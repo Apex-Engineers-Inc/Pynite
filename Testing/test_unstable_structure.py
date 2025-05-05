@@ -4,30 +4,35 @@ MIT License
 
 Copyright (c) 2020 D. Craig Brinck, SE; tamalone1
 """
+import pytest
 
-import unittest
-
-from numpy import True_
 from Pynite import FEModel3D
-import sys
-from io import StringIO
 
-class Test_Unstable(unittest.TestCase):
-    ''' Tests that should raise instability errors.'''
+class TestUnstable:
+    '''This test checks the Pynite's ability to detect unstable support conditions'''
 
-    def setUp(self):
-        # Suppress printed output temporarily
-        sys.stdout = StringIO()
+    STEEL = 'Steel'
+    COLUMN = 'Column'
+    BEAM = 'Beam'
 
-    def tearDown(self):
-        # Reset the print function to normal
-        sys.stdout = sys.__stdout__
+    @pytest.fixture
+    def model(self) -> FEModel3D:
+        """Create a new FEModel3D instance for each test with a default material and section"""
+
+        model = FEModel3D()
+        model.add_material(self.STEEL, 29000, 11400, 0.5, 490/1000/12**3)
+
+        # Iy = 100 in^4, Iz = 150 in^4, J = 250 in^4, A = 10 in^2
+        model.add_section(self.COLUMN, 10, 100, 150, 250)
         
-    def test_unstable_supports(self):
+        # Iy = 100 in^4, Iz = 250 in^4, J = 250 in^4, A = 15 in^2
+        model.add_section(self.BEAM, 15, 100, 250, 250)
+        return model
 
-        # This test checks the Pynite's ability to detect unstable support conditions
+
+    def test_unstable_supports(self, model: FEModel3D):
         # Units used in this test are inches, and kips
-        MomentFrame = FEModel3D()
+        MomentFrame = model
 
         # Add nodes (frame is 15 ft wide x 12 ft tall)
         MomentFrame.add_node("N1", 0, 0, 0)
@@ -35,19 +40,12 @@ class Test_Unstable(unittest.TestCase):
         MomentFrame.add_node("N3", 15*12, 12*12, 0)
         MomentFrame.add_node("N4", 15*12, 0*12, 0)
 
-        # Add a material
-        MomentFrame.add_material('Steel', 29000, 11400, 0.5, 490/1000/12**3)
-
         # Add columns with the following properties:
-        # Iy = 100 in^4, Iz = 150 in^4, J = 250 in^4, A = 10 in^2
-        MomentFrame.add_section('Section', 10, 100, 150, 250)
-        MomentFrame.add_member("M1", "N1", "N2", 'Steel', 'Section')
-        MomentFrame.add_member("M2", "N4", "N3", 'Steel', 'Section')
+        MomentFrame.add_member("M1", "N1", "N2", self.STEEL, self.COLUMN)
+        MomentFrame.add_member("M2", "N4", "N3", self.STEEL, self.COLUMN)
 
         # Add a beam with the following properties:
-        # Iy = 100 in^4, Iz = 250 in^4, J = 250 in^4, A = 15 in^2
-        MomentFrame.add_section('Section2', 15, 100, 250, 250)
-        MomentFrame.add_member("M3", "N2", "N3", 'Steel', 'Section2')
+        MomentFrame.add_member("M3", "N2", "N3", self.STEEL, self.BEAM)
 
         # Pin the ends of the columns
         MomentFrame.def_releases('M1', Dzi=True)
@@ -60,5 +58,5 @@ class Test_Unstable(unittest.TestCase):
         # Add a nodal lateral load of 50 kips at the left side of the frame
         MomentFrame.add_node_load("N2", "FX", 50)
         # Analyze the frame - we should see an error message that the structure is unstable
-        with self.assertRaises(Exception):
+        with pytest.raises(Exception):
             MomentFrame.analyze()
