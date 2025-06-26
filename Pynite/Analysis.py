@@ -2,18 +2,18 @@ from __future__ import annotations # Allows more recent type hints features
 from typing import TYPE_CHECKING
 from math import isclose
 
-from numpy import array, atleast_2d, zeros, subtract, matmul, divide, seterr, nanmax
+from numpy import array, atleast_2d, zeros, subtract, matmul, divide, seterr, nanmax, sort, ix_
 from numpy.linalg import solve
 from scipy.spatial import KDTree
+from scipy.sparse import lil_matrix, csr_matrix
 
 from Pynite.LoadCombo import LoadCombo
 
 if TYPE_CHECKING:
-    from typing import List, Tuple
+    from typing import List, Tuple, Union
     from Pynite.FEModel3D import FEModel3D
     from numpy import float64
     from numpy.typing import NDArray
-    from scipy.sparse import lil_matrix
 
 
 def _prepare_model(model: FEModel3D) -> None:
@@ -93,60 +93,39 @@ def _check_stability(model: FEModel3D, K: NDArray[float64]) -> None:
     """
     Identifies nodal instabilities in a model's stiffness matrix.
     """
+    id_to_node = {node.ID: node for node in model.nodes.values()}
+    directions = (
+        'for translation in the global X direction.',
+        'for translation in the global Y direction.',
+        'for translation in the global Z direction.',
+        'for rotation about the global X axis.',
+        'for rotation about the global Y axis.',
+        'for rotation about the global Z axis.',
+    )
 
-    # Initialize the `unstable` flag to `False`
     unstable = False
 
-    # Step through each diagonal term in the stiffness matrix
     for i in range(K.shape[0]):
-        
-        # Determine which node this term belongs to
-        node = [node for node in model.nodes.values() if node.ID == int(i/6)][0]
+        node_id = i // 6
+        dof = i % 6
+        node = id_to_node[node_id]
 
-        # Determine which degree of freedom this term belongs to
-        dof = i%6
+        dof_supports = (
+            node.support_DX,
+            node.support_DY,
+            node.support_DZ,
+            node.support_RX,
+            node.support_RY,
+            node.support_RZ,
+        )
+        supported = dof_supports[dof]
 
-        # Check to see if this degree of freedom is supported
-        if dof == 0:
-            supported = node.support_DX
-        elif dof == 1:
-            supported = node.support_DY
-        elif dof == 2:
-            supported = node.support_DZ
-        elif dof == 3:
-            supported = node.support_RX
-        elif dof == 4:
-            supported = node.support_RY
-        elif dof == 5:
-            supported = node.support_RZ
-
-        # Check if the degree of freedom on this diagonal is unstable
-        if isclose(K[i, i], 0) and not supported:
-
-            # Flag the model as unstable
+        if isclose(K[i, i], 0.0) and not supported:
             unstable = True
-
-            # Identify which direction this instability affects
-            if i%6 == 0:
-                direction = 'for translation in the global X direction.'
-            if i%6 == 1:
-                direction = 'for translation in the global Y direction.'
-            if i%6 == 2:
-                direction = 'for translation in the global Z direction.'
-            if i%6 == 3:
-                direction = 'for rotation about the global X axis.'
-            if i%6 == 4:
-                direction = 'for rotation about the global Y axis.'
-            if i%6 == 5:
-                direction = 'for rotation about the global Z axis.'
-
-            # Print a message to the console
-            print('* Nodal instability detected: node ' + node.name + ' is unstable ' + direction)
+            print(f'* Nodal instability detected: node {node.name} is unstable {directions[dof]}')
 
     if unstable:
         raise Exception('Unstable node(s). See console output for details.')
-
-    return
 
 
 def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArray[float64], D1_indices: List[int], D2_indices: List[int], D2: NDArray[float64], log: bool = True, sparse: bool = True, check_stability: bool = False, max_iter: int = 30) -> None:
@@ -1060,35 +1039,37 @@ def _partition_D(model: FEModel3D) -> Tuple[List[int], List[int], NDArray[float6
     return D1_indices, D2_indices, D2
 
 
-def _partition(model: FEModel3D, unp_matrix: NDArray[float64] | lil_matrix, D1_indices: List[int], D2_indices: List[int]) -> Tuple[NDArray[float64], NDArray[float64]] | Tuple[NDArray[float64], NDArray[float64], NDArray[float64], NDArray[float64]]:
-    """Partitions a matrix (or vector) into submatrices (or subvectors) based on degree of freedom boundary conditions.
+def _partition(model: FEModel3D, unp_matrix: Union[NDArray[float64], lil_matrix], D1_indices: List[int], D2_indices: List[int]) -> Union[Tuple[NDArray[float64], NDArray[float64]], Tuple[csr_matrix, csr_matrix, csr_matrix, csr_matrix]]:
+    """
+    Partitions a matrix (or vector) into submatrices (or subvectors) based on boundary condition DOF indices.
 
-    :param unp_matrix: The unpartitioned matrix (or vector) to be partitioned.
-    :type unp_matrix: ndarray or lil_matrix
-    :param D1_indices: A list of the indices for degrees of freedom that have unknown displacements.
-    :type D1_indices: list
-    :param D2_indices: A list of the indices for degrees of freedom that have known displacements.
-    :type D2_indices: list
-    :return: Partitioned submatrices (or subvectors) based on degree of freedom boundary conditions.
-    :rtype: array, array, array, array
+    Note: if using lil sparse matrices, this will convert to CSR format. 
+    Lil matrices are typically what you want when building up the matrix, but are not as efficient when slicing and solving
     """
 
-    # Determine if this is a 1D vector or a 2D matrix
 
-    # 1D vectors
-    if unp_matrix.shape[1] == 1:
-        # Partition the vector into 2 subvectors
-        m1 = unp_matrix[D1_indices, :]
-        m2 = unp_matrix[D2_indices, :]
-        return m1, m2
-    # 2D matrices
+    if not D1_indices and not D2_indices:
+        raise ValueError("At least one set of DOF indices must be provided")
+
+    D1 = sort(array(D1_indices, dtype=int))
+    D2 = sort(array(D2_indices, dtype=int))
+
+    # Vector case
+    if unp_matrix.ndim == 2 and unp_matrix.shape[1] == 1:
+        return array(unp_matrix[D1], dtype=float), array(unp_matrix[D2], dtype=float)
+
+    # Matrix case
+    if isinstance(unp_matrix, lil_matrix):
+        matrix_csr = unp_matrix.tocsr()
     else:
-        # Partition the matrix into 4 submatrices
-        m11 = unp_matrix[D1_indices, :][:, D1_indices]
-        m12 = unp_matrix[D1_indices, :][:, D2_indices]
-        m21 = unp_matrix[D2_indices, :][:, D1_indices]
-        m22 = unp_matrix[D2_indices, :][:, D2_indices]
-        return m11, m12, m21, m22
+        matrix_csr = unp_matrix
+
+    m11 = matrix_csr[ix_(D1, D1)]
+    m12 = matrix_csr[ix_(D1, D2)]
+    m21 = matrix_csr[ix_(D2, D1)]
+    m22 = matrix_csr[ix_(D2, D2)]
+
+    return m11, m12, m21, m22
 
 
 def _renumber(model: FEModel3D) -> None:
