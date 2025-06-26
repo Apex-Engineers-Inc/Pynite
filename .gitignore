@@ -13,3 +13,6 @@ Pynite Report.pdf
 *.fbp
 gui.py
 wxTableBases.py
+
+# image auto-generated when running test suite
+test.png
