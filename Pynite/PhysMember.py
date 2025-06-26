@@ -1,5 +1,5 @@
 from __future__ import annotations # Allows more recent type hints features
-from typing import Dict, List, Literal, Tuple, TYPE_CHECKING
+from typing import Dict, List, Literal, Tuple, TYPE_CHECKING, Union
 from Pynite.Member3D import Member3D
 
 if TYPE_CHECKING:
@@ -31,129 +31,186 @@ class PhysMember(Member3D):
         super().__init__(model, name, i_node, j_node, material_name, section_name, rotation, tension_only, comp_only)
         self.sub_members: Dict[str, Member3D] = {}
 
-    def descritize(self) -> None:
+
+    def discretize(self) -> None:
         """
         Subdivides the physical member into sub-members at each node along the physical member
+        using spatial acceleration (KDTree) for performance.
         """
-
-        # Clear out any old sub_members
+        # Clear any existing sub-members and initialize the intermediate nodes list
         self.sub_members = {}
-
-        # Start a new list of nodes along the member
         int_nodes: List[Tuple[Node3D, float]] = []
 
-        # Create a vector from the i-node to the j-node
+        # Extract endpoint coordinates for geometric calculations
         Xi, Yi, Zi = self.i_node.X, self.i_node.Y, self.i_node.Z
         Xj, Yj, Zj = self.j_node.X, self.j_node.Y, self.j_node.Z
-        vector_ij = array([Xj-Xi, Yj-Yi, Zj-Zi])
-
-        # Add the i-node and j-node to the list
-        int_nodes.append((self.i_node, 0))
-        int_nodes.append((self.j_node, norm(vector_ij)))
-
-        # Step through each node in the model
-        for node in self.model.nodes.values():
-
-            # Check each node in the model (except the i and j-nodes)
-            if node is not self.i_node and node is not self.j_node:
-
-                # Create a vector from the i-node to the current node
-                X, Y, Z = node.X, node.Y, node.Z
-                vector_in = array([X-Xi, Y-Yi, Z-Zi])
-
-                # Calculate the angle between the two vectors
-                angle = acos(round(dot(vector_in, vector_ij)/(norm(vector_in)*norm(vector_ij)), 10))
-
-                # Determine if the node is colinear with the member
-                if isclose(angle, 0):
-
-                    # Determine if the node is on the member
-                    if norm(vector_in) < norm(vector_ij):
-
-                        # Add the node to the list of intermediate nodes
-                        int_nodes.append((node, norm(vector_in)))
         
-        # Create a list of sorted intermediate nodes by distance from the i-node
-        int_nodes = sorted(int_nodes, key=lambda x: x[1])
+        # Calculate the member vector and total length
+        vector_ij = array([Xj - Xi, Yj - Yi, Zj - Zi])
+        L = float(norm(vector_ij))
 
-        # Break up the member into sub-members at each intermediate node
-        for i in range(len(int_nodes) - 1):
+        # Initialize intermediate nodes list with the member endpoints
+        # Each tuple contains (node_object, distance_from_i_node)
+        int_nodes.append((self.i_node, 0.0))
+        int_nodes.append((self.j_node, L))
 
-            # Generate the sub-member's name (physical member name + a, b, c, etc.)
-            name = self.name + chr(i+97)
-
-            # Find the i and j nodes for the sub-member, and their positions along the physical
-            # member's local x-axis
-            i_node = int_nodes[i][0]
-            j_node = int_nodes[i+1][0]
-            xi = int_nodes[i][1]
-            xj = int_nodes[i+1][1]
-
-            # Create a new sub-member
-            new_sub_member = Member3D(self.model, name, i_node, j_node, self.material.name, self.section.name, self.rotation, self.tension_only, self.comp_only)
+        # Use spatial acceleration (KDTree) to as an efficient prefilter to find nearby nodes
+        # Candidate nodes are nodes that are no more than L/8 away from the member line
+        # This avoids checking every node in large models and can greatly reduce the number of nodes checked
+        if self.model._kd_tree is not None:
+            # Calculate optimized search strategy using eighth-points to maximize volume reduction
+            # Instead of searching a sphere centered at midpoint with radius L/2,
+            # use four smaller spheres at eighth points with radius L/8
+            # This reduces total search volume by ~90% while still capturing all relevant nodes
             
-            # Flag the sub-member as active
-            for combo_name in self.model.load_combos.keys():
+            eighth_L = L / 8
+            buffer = 1e-6  # Add a small buffer to account for numerical precision
+            
+            # Calculate the four eighth points along the member
+            # Points at 12.5%, 37.5%, 62.5%, and 87.5% ensure complete coverage
+            eighth_positions = [0.125, 0.375, 0.625, 0.875]
+            dx, dy, dz = Xj - Xi, Yj - Yi, Zj - Zi
+            
+            # Generate all eighth points efficiently
+            eighth_points = []
+            for pos in eighth_positions:
+                point = array([Xi + pos * dx, Yi + pos * dy, Zi + pos * dz])
+                eighth_points.append(point)
+            
+            # Search radius for each eighth-sphere (L/8 + buffer)
+            radius = eighth_L + buffer
+
+            # Query all four eighth-point regions and combine results
+            all_indices = []
+            for point in eighth_points:
+                indices = self.model._kd_tree.query_ball_point(point, r=radius, p=2)
+                all_indices.extend(indices)
+            
+            # Combine and deduplicate indices using set operations for efficiency
+            idxs = list(set(all_indices))
+
+            # Pre-allocate lists for better performance and avoid repeated lookups
+            candidate_nodes = []
+            kd_tree_node_names = self.model._kd_tree_node_names
+            model_nodes = self.model.nodes
+            
+            # Batch convert indices to nodes (faster than list comprehension with nested lookups)
+            for idx in idxs:
+                node_name = kd_tree_node_names[idx]
+                candidate_nodes.append(model_nodes[node_name])
+        else:
+            # Fallback: if no KDTree available, check all nodes in the model
+            # This is slower but ensures compatibility
+            candidate_nodes = list(self.model.nodes.values())
+
+        # Check each candidate node to see if it lies exactly on the member line
+        # Pre-compute values that don't change in the loop for better performance
+        vector_ij_norm_sq = L * L  # Avoid repeated norm calculations
+        tolerance_sq = 1e-12      # Square of tolerance to avoid sqrt in distance calculation
+        
+        for node in candidate_nodes:
+            # Skip the member's own endpoints (fast identity check)
+            if node is self.i_node or node is self.j_node:
+                continue
+
+            # Calculate vector from i-node to the candidate node
+            dx, dy, dz = node.X - Xi, node.Y - Yi, node.Z - Zi
+            
+            # Project the candidate node onto the member's axis using dot product
+            # proj_length = dot(vector_in, vector_ij) / L
+            proj_length = (dx * vector_ij[0] + dy * vector_ij[1] + dz * vector_ij[2]) / L
+
+            # Quick bounds check - must be within member length (excluding endpoints)
+            if not (0 < proj_length < L):
+                continue
+
+            # Calculate perpendicular distance squared to avoid expensive sqrt operation
+            # Use the formula: |v x u|² = |v|²|u|² - (v·u)²
+            proj_length_ratio = proj_length / L
+            proj_x = Xi + proj_length_ratio * vector_ij[0]
+            proj_y = Yi + proj_length_ratio * vector_ij[1] 
+            proj_z = Zi + proj_length_ratio * vector_ij[2]
+            
+            # Calculate squared distance from node to projection point
+            offset_x, offset_y, offset_z = node.X - proj_x, node.Y - proj_y, node.Z - proj_z
+            distance_to_line_sq = offset_x*offset_x + offset_y*offset_y + offset_z*offset_z
+
+            # If the node is essentially on the line (within numerical tolerance)
+            if distance_to_line_sq < tolerance_sq:
+                # Add this node as an intermediate node with its position along the member
+                int_nodes.append((node, proj_length))
+
+        # Sort intermediate nodes by distance from the i-node
+        int_nodes.sort(key=lambda x: x[1])
+
+        # Create sub-members between each pair of consecutive intermediate nodes
+        # Each sub-member spans from one node to the next along the physical member
+        for i in range(len(int_nodes) - 1):
+            # Generate unique sub-member name using alphabetic suffix (a, b, c, etc.)
+            name = self.name + chr(i + 97)
+            i_node, xi = int_nodes[i]      # Start node and its position along member
+            j_node, xj = int_nodes[i + 1]  # End node and its position along member
+
+            # Create a new sub-member spanning from i_node to j_node
+            # This inherits all material and section properties from the parent physical member
+            new_sub_member = Member3D(
+                self.model, name, i_node, j_node, self.material.name,
+                self.section.name, self.rotation, self.tension_only, self.comp_only
+            )
+
+            # Activate the sub-member for all existing load combinations in the model
+            for combo_name in self.model.load_combos:
                 new_sub_member.active[combo_name] = True
 
-            # Apply end releases if applicable
+            # Transfer end releases from the physical member to appropriate sub-members
+            # First sub-member gets the i-end (start) releases from the physical member
             if i == 0:
                 new_sub_member.Releases[0:6] = self.Releases[0:6]
+            # Last sub-member gets the j-end (end) releases from the physical member
             if i == len(int_nodes) - 2:
                 new_sub_member.Releases[6:12] = self.Releases[6:12]
 
-            # Add distributed to the sub-member
+            # Helper function to linearly interpolate distributed load intensity at any position
+            def interpolate_load(x: float) -> float:
+                return (w2 - w1) / (x2_load - x1_load) * (x - x1_load) + w1
+
+            # Distribute the physical member's distributed loads to applicable sub-members
             for dist_load in self.DistLoads:
+                direction, w1, w2, x1_load, x2_load, case = dist_load
                 
-                # Find the start and end points of the distributed load in the physical member's
-                # local coordinate system
-                x1_load = dist_load[3]
-                x2_load = dist_load[4]
-
-                # Determine if the distributed load should be applied to this segment
-                if x1_load <= xj and x2_load > xi: 
+                # Check if this distributed load overlaps with the current sub-member
+                if x1_load <= xj and x2_load > xi:
+                    # Calculate the portion of the load that applies to this sub-member
+                    # Convert from physical member coordinates to sub-member local coordinates
+                    x1 = max(0, x1_load - xi)           # Start position relative to sub-member
+                    x2 = min(xj - xi, x2_load - xi)     # End position relative to sub-member
                     
-                    direction = dist_load[0]
-                    w1 = dist_load[1]
-                    w2 = dist_load[2]
-                    case = dist_load[5]
-
-                    # Equation describing the load as a function of x
-                    w = lambda x: (w2 - w1)/(x2_load - x1_load)*(x - x1_load) + w1
-
-                    # Chop up the distributed load for the sub-member
-                    if x1_load > xi:
-                        x1 = x1_load - xi
-                    else:
-                        x1 = 0
-                        w1 = w(xi)
+                    # Start with the original load intensities
+                    w1_adjacent = w1
+                    w2_adjacent = w2
                     
-                    if x2_load < xj:
-                        x2 = x2_load - xi
-                    else:
-                        x2 = xj - xi
-                        w2 = w(xj)
+                    # If the load starts before this sub-member, interpolate the starting intensity
+                    if x1_load < xi:
+                        w1_adjacent = interpolate_load(xi)
+                    
+                    # If the load extends beyond this sub-member, interpolate the ending intensity
+                    if x2_load > xj:
+                        w2_adjacent = interpolate_load(xj)
+                    
+                    # Add the adjusted distributed load to the sub-member
+                    new_sub_member.DistLoads.append((direction, w1_adjacent, w2_adjacent, x1, x2, case))
 
-                    # Add the load to the sub-member
-                    new_sub_member.DistLoads.append([direction, w1, w2, x1, x2, case])
-
-            # Add point loads to the sub-member
+            # Distribute the physical member's point loads to applicable sub-members
             for pt_load in self.PtLoads:
+                direction, P, x, case = pt_load
                 
-                direction = pt_load[0]
-                P = pt_load[1]
-                x = pt_load[2]
-                case = pt_load[3]
+                # Check if this point load falls within the current sub-member's span
+                # Special case: include loads exactly at the end if this is the last sub-member
+                if xi <= x < xj or (isclose(x, xj) and isclose(xj, L)):
+                    # Convert load position from physical member coordinates to sub-member coordinates
+                    new_sub_member.PtLoads.append((direction, P, x - xi, case))
 
-                # Determine if the point load should be applied to this segment
-                if x >= xi and x < xj or (isclose(x, xj) and isclose(xj, self.L())):
-
-                    x = x - xi
-                    
-                    # Add the load to the sub-member
-                    new_sub_member.PtLoads.append([direction, P, x, case])
-
-            # Add the new sub-member to the sub-member dictionary for this physical member
+            # Store the completed sub-member in the dictionary
             self.sub_members[name] = new_sub_member
     
     def shear(self, Direction: Literal['Fy', 'Fz'], x: float, combo_name: str = 'Combo 1') -> float:

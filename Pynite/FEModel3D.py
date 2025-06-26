@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from numpy import array, zeros, matmul, divide, subtract, atleast_2d, all
 from numpy.linalg import solve
+from scipy.spatial import cKDTree
 
 from Pynite.Node3D import Node3D
 from Pynite.Material import Material
@@ -52,6 +53,11 @@ class FEModel3D():
         self._D: Dict[str, NDArray[float64]] = {}      # A dictionary of the model's nodal displacements by load combination
         
         self.solution: str | None = None  # Indicates the solution type for the latest run of the model
+
+        # The KD data for faster spatial queries of nodes. The tree is only built when the model is 
+        # analyzed (e.g., when Analysis.prepare_model takes place)
+        self._kd_tree: cKDTree | None = None      # A KDTree for spatial searches
+        self._kd_tree_node_names: list[str] = []  # List of node names corresponding to points. This allows the KDTree to map points back to the actual nodes.
 
     @property
     def load_cases(self) -> List[str]:
@@ -652,12 +658,12 @@ class FEModel3D():
         :type origin: list, optional
         :param axis: The global axis about which the mesh will be generated, defaults to 'Y'.
         :type axis: str, optional
-        :param start_node: The name of the first node in the mesh. If set to None the program will use the next available node name, defaults to None.
+        :param start_node: The name of the first node in the mesh. If set to `None` the program will use the next available node name, defaults to None.
         :type start_node: str, optional
         :param start_element: The name of the first element in the mesh. If set to `None` the
                               program will use the next available element name, defaults to None
         :type start_element: str, optional
-        :raises NameError: Occurs if the specified name already exists.
+        :raises NameError: Occurs if the specified name already exists in the model.
         :return: The name of the mesh added to the model.
         :rtype: str
         """

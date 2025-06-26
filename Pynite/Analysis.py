@@ -4,6 +4,7 @@ from math import isclose
 
 from numpy import array, atleast_2d, zeros, subtract, matmul, divide, seterr, nanmax
 from numpy.linalg import solve
+from scipy.spatial import KDTree
 
 from Pynite.LoadCombo import LoadCombo
 
@@ -39,7 +40,7 @@ def _prepare_model(model: FEModel3D) -> None:
 
     # Generate all meshes
     for mesh in model.meshes.values():
-        if mesh.is_generated is False:
+        if mesh.is_generated() is False:
             mesh.generate()
 
     # Activate all springs and members for all load combinations
@@ -54,6 +55,9 @@ def _prepare_model(model: FEModel3D) -> None:
 
     # Assign an internal ID to all nodes and elements in the model. This number is different from the name used by the user to identify nodes and elements.
     _renumber(model)
+
+    # build the KDTree for fast spatial queries
+    _build_kdtree(model)
 
 
 def _identify_combos(model: FEModel3D, combo_tags: List[str] | None = None) -> List[LoadCombo]:
@@ -1101,10 +1105,10 @@ def _renumber(model: FEModel3D) -> None:
     for id, spring in enumerate(model.springs.values()):
         spring.ID = id
 
-    # Descritize all the physical members and number each member in the model
+    # Discretize all the physical members and number each member in the model
     id = 0
     for phys_member in model.members.values():
-        phys_member.descritize()
+        phys_member.discretize()
         for member in phys_member.sub_members.values():
             member.ID = id
             id += 1
@@ -1116,3 +1120,30 @@ def _renumber(model: FEModel3D) -> None:
     # Number each quadrilateral in the model
     for id, quad in enumerate(model.quads.values()):
         quad.ID = id
+
+
+def _build_kdtree(model: FEModel3D) -> None:
+    """Builds or rebuilds the KDTree for faster spatial node queries.
+    
+    The KDTree is built from node coordinates and allows for efficient
+    nearest neighbor searches and spatial queries during analysis.
+    """
+    if not model.nodes:
+        model._kd_tree = None
+        model._kd_tree_node_names = []
+        return
+
+    # Get node coordinates and names in a consistent order
+    node_items = list(model.nodes.items())
+    coords = [[node.X, node.Y, node.Z] for name, node in node_items]
+    node_names = [name for name, node in node_items]
+
+    # Only rebuild if the KDTree is None or the number of nodes has changed
+    if model._kd_tree is None or len(model._kd_tree_node_names) != len(coords):
+        try:
+            model._kd_tree = KDTree(coords)
+            model._kd_tree_node_names = node_names
+        except Exception:
+            # If KDTree construction fails, fall back to no spatial indexing
+            model._kd_tree = None
+            model._kd_tree_node_names = []

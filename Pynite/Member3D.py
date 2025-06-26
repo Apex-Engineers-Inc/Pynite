@@ -90,8 +90,8 @@ class Member3D():
         self.j_reversal: bool = False
 
         self.rotation: float = rotation  # Member rotation (degrees) about its local x-axis
-        self.PtLoads: List[Tuple] = []  # A list of point loads & moments applied to the element (Direction, P, x, case='Case 1') or (Direction, M, x, case='Case 1')
-        self.DistLoads: List[Tuple] = []       # A list of linear distributed loads applied to the element (Direction, w1, w2, x1, x2, case='Case 1')
+        self.PtLoads: List[Tuple[str, float, float, str]] = []      # A list of point loads & moments applied to the element (Direction, P, x, case='Case 1') or (Direction, M, x, case='Case 1')
+        self.DistLoads: List[Tuple[str, float, float, float, float, str]] = []       # A list of linear distributed loads applied to the element (Direction, w1, w2, x1, x2, case='Case 1')
         self.SegmentsZ: List[BeamSegZ] = []       # A list of mathematically continuous beam segments for z-bending
         self.SegmentsY: List[BeamSegY] = []       # A list of mathematically continuous beam segments for y-bending
         self.SegmentsX: List[BeamSegZ] = []       # A list of mathematically continuous beam segments for torsion
