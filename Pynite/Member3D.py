@@ -63,7 +63,7 @@ class Member3D():
         :type comp_only: bool, optional
         """
         self.name: str = name      # A unique name for the member given by the user
-        self.ID: int | None = None        # Unique index number for the member assigned by the program
+        self._ID: Optional[int] = None        # Unique index number for the member assigned by the program
         self.i_node: Node3D = i_node  # The element's i-node
         self.j_node: Node3D = j_node  # The element's j-node
 
@@ -107,6 +107,19 @@ class Member3D():
 
         # Members need a link to the model they belong to
         self.model: FEModel3D = model
+    
+    @property
+    def ID(self) -> int:
+        """
+        Returns the unique index number for the member assigned by the program.
+        """
+        if self._ID is None:
+            raise ValueError("Member ID has not been set.")
+        return self._ID
+
+    @ID.setter
+    def ID(self, value: int) -> None:
+        self._ID = value
 
 # %%
     def L(self) -> float:

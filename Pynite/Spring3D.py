@@ -29,7 +29,7 @@ class Spring3D():
         Initializes a new spring.
         '''
         self.name: str = name      # A unique name for the spring given by the user
-        self.ID: Optional[int] = None        # Unique index number for the spring assigned by the program
+        self._ID: Optional[int] = None        # Unique index number for the spring assigned by the program
         self.i_node: Node3D = i_node  # The spring's i-node
         self.j_node: Node3D = j_node  # The spring's j-node
         self.ks: float = ks          # The spring constant (force/displacement)
@@ -41,6 +41,19 @@ class Spring3D():
         # They may become inactive for a load combination during a tension/compression-only
         # analysis. This dictionary will be used when the model is solved.
         self.active: Dict[str, bool] = {} # Key = load combo name, Value = True or False
+
+    @property
+    def ID(self) -> int:
+        """
+        Returns the unique index number for the spring assigned by the program.
+        """
+        if self._ID is None:
+            raise ValueError("Spring ID has not been set.")
+        return self._ID
+    
+    @ID.setter
+    def ID(self, value: int) -> None:
+        self._ID = value
 
 #%%
     def L(self) -> float:

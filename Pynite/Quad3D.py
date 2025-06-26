@@ -32,7 +32,7 @@ class Quad3D():
                  ky_mod: float = 1.0):
 
         self.name: str = name
-        self.ID: Optional[int] = None
+        self._ID: Optional[int] = None
         self.type: str = 'Quad'
 
         self.i_node: Node3D = i_node
@@ -55,6 +55,19 @@ class Quad3D():
             self.nu: float = self.model.materials[material_name].nu
         except:
             raise KeyError('Please define the material ' + str(material_name) + ' before assigning it to plates.')
+    
+    @property
+    def ID(self) -> int:
+        """
+        Returns the unique index number for the quadrilateral assigned by the program.
+        """
+        if self._ID is None:
+            raise ValueError("Quadrilateral ID has not been set.")
+        return self._ID
+    
+    @ID.setter
+    def ID(self, value: int) -> None:
+        self._ID = value
 
     # def _local_coords(self):
     #     """

@@ -16,7 +16,7 @@ class Node3D():
     def __init__(self, name: str, X: float, Y: float, Z: float):
         
         self.name = name                 # A unique name for the node assigned by the user
-        self.ID: Optional[int] = None    # A unique index number for the node assigned by the program
+        self._ID: Optional[int] = None    # A unique index number for the node assigned by the program
         
         self.X = X          # Global X coordinate
         self.Y = Y          # Global Y coordinate
@@ -66,6 +66,19 @@ class Node3D():
 
         # Initialize the color contour value for the node. This will be used for contour smoothing.
         self.contour: List[float] = []
+    
+    @property
+    def ID(self) -> int:
+        """
+        Returns the unique index number for the node assigned by the program.
+        """
+        if self._ID is None:
+            raise ValueError("Node ID has not been set.")
+        return self._ID
+    
+    @ID.setter
+    def ID(self, value: int) -> None:
+        self._ID = value
 
     def distance(self, other: 'Node3D') -> float:
         """

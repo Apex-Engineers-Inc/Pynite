@@ -46,7 +46,7 @@ class Plate3D():
         """
 
         self.name: str = name
-        self.ID: Optional[int] = None
+        self._ID: Optional[int] = None
         self.type: str = 'Rect'
 
         self.i_node: Node3D = i_node
@@ -71,6 +71,19 @@ class Plate3D():
         except:
             raise KeyError('Please define the material ' + str(material_name) + ' before assigning it to plates.')
     
+    @property
+    def ID(self) -> int:
+        """
+        Returns the unique index number for the plate assigned by the program.
+        """
+        if self._ID is None:
+            raise ValueError("Plate ID has not been set.")
+        return self._ID
+
+    @ID.setter
+    def ID(self, value: int) -> None:
+        self._ID = value
+
     def width(self) -> float:
         """
         Returns the width of the plate along its local x-axis
