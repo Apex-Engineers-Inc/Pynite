@@ -2059,8 +2059,12 @@ class FEModel3D():
                     try:
                         # Calculate the unknown displacements D1
                         if sparse == True:
-                            # The partitioned stiffness matrix is in `lil` format, which is great for memory, but slow for mathematical operations. The stiffness matrix will be converted to `csr` format for mathematical operations. The `@` operator performs matrix multiplication on sparse matrices.
-                            D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2))
+                            # The partitioned stiffness matrix is in `lil` format, which is great for memory, but slow for mathematical operations. 
+                            # The stiffness matrix will be converted to `csr` format for mathematical operations. 
+                            # The `@` operator performs matrix multiplication on sparse matrices.
+                            # The MMD_ATA permutation is used to improve the performance of the sparse solver by minimizing the fill-in of the matrix.
+                            # The MMD_ATA was chosen because it had the best overall performance when running the test suite (by a large margin).
+                            D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2), permc_spec="MMD_ATA")
                             D1 = D1.reshape(len(D1), 1)
                         else:
                             D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
@@ -2165,7 +2169,9 @@ class FEModel3D():
                         # for memory, but slow for mathematical operations. The stiffness
                         # matrix will be converted to `csr` format for mathematical operations.
                         # The `@` operator performs matrix multiplication on sparse matrices.
-                        D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2))
+                        # The MMD_ATA permutation is used to improve the performance of the sparse solver by minimizing the fill-in of the matrix.
+                        # The MMD_ATA was chosen because it had the best overall performance when running the test suite (by a large margin).
+                        D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2), permc_spec="MMD_ATA")
                         D1 = D1.reshape(len(D1), 1)
                     else:
                         D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))

@@ -234,7 +234,9 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
                     # Calculate the displacements, `D1`
                     if sparse is True:
                         # The partitioned stiffness matrix is already in `csr` format. The `@` operator performs matrix multiplication on sparse matrices.
-                        D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2))
+                        # The MMD_ATA permutation is used to improve the performance of the sparse solver by minimizing the fill-in of the matrix.
+                        # The MMD_ATA was chosen because it had the best overall performance when running the test suite (by a large margin).
+                        D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2), permc_spec="MMD_ATA")
                         D1 = D1.reshape(len(D1), 1)
                     else:
                         # The partitioned stiffness matrix is in `csr` format. It will be converted to a 2D dense array for mathematical operations.
@@ -336,7 +338,9 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
                 if sparse == True:
                     # The partitioned stiffness matrix is already in `csr` format. The `@`
                     # operator performs matrix multiplication on sparse matrices.
-                    Delta_D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2))
+                    # The MMD_ATA permutation is used to improve the performance of the sparse solver by minimizing the fill-in of the matrix.
+                    # The MMD_ATA was chosen because it had the best overall performance when running the test suite (by a large margin).
+                    Delta_D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2), permc_spec="MMD_ATA")
                     Delta_D1 = Delta_D1.reshape(len(Delta_D1), 1)
                 else:
                     # The partitioned stiffness matrix is in `csr` format. It will be
