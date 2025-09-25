@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from typing import Dict, List, Union
     from numpy import float64
     from numpy.typing import NDArray
+    from scipy.sparse import coo_matrix
 
 # %%
 class FEModel3D():
@@ -1654,8 +1655,8 @@ class FEModel3D():
 
         # Return the global stiffness matrix
         return K    
-   
-    def Kg(self, combo_name='Combo 1', log=False, sparse=True, first_step=True):
+
+    def Kg(self, combo_name:str='Combo 1', log:bool=False, sparse:bool=True, first_step:bool=True) -> Union[NDArray[float64], coo_matrix]:
         """Returns the model's global geometric stiffness matrix. Geometric stiffness of plates is not considered.
 
         :param combo_name: The name of the load combination to derive the matrix for. Defaults to 'Combo 1'.
@@ -1735,7 +1736,7 @@ class FEModel3D():
         # Return the global geometric stiffness matrix
         return Kg
 
-    def Km(self, combo_name='Combo 1', push_combo='Push', step_num=1, log=False, sparse=True):
+    def Km(self, combo_name: str='Combo 1', push_combo: str='Push', step_num: int=1, log: bool=False, sparse: bool=True) -> Union[NDArray[float64], coo_matrix]:
         """Calculates the structure's global plastic reduction matrix, which is used for nonlinear inelastic analysis.
 
         :param combo_name: The name of the load combination to get the plastic reduction matrix for. Defaults to 'Combo 1'.
@@ -1824,7 +1825,7 @@ class FEModel3D():
         # Return the global plastic reduction matrix
         return Km 
 
-    def FER(self, combo_name='Combo 1') -> NDArray[float64]:
+    def FER(self, combo_name:str='Combo 1') -> NDArray[float64]:
         """Assembles and returns the global fixed end reaction vector for any given load combo.
 
         :param combo_name: The name of the load combination to get the fixed end reaction vector
@@ -1924,7 +1925,7 @@ class FEModel3D():
         # Return the global fixed end reaction vector
         return FER
     
-    def P(self, combo_name='Combo 1') -> NDArray[float64]:
+    def P(self, combo_name:str='Combo 1') -> NDArray[float64]:
         """Assembles and returns the global nodal force vector.
 
         :param combo_name: The name of the load combination to get the force vector for. Defaults
@@ -1970,7 +1971,7 @@ class FEModel3D():
         # Return the global nodal force vector
         return P
 
-    def D(self, combo_name='Combo 1') -> NDArray[float64]:
+    def D(self, combo_name: str='Combo 1') -> NDArray[float64]:
         """Returns the global displacement vector for the model.
 
         :param combo_name: The name of the load combination to get the results for. Defaults to
@@ -1983,7 +1984,7 @@ class FEModel3D():
         # Return the global displacement vector
         return self._D[combo_name]
 
-    def analyze(self, log=False, check_stability=True, check_statics=False, max_iter=30, sparse=True, combo_tags=None, spring_tolerance=0, member_tolerance=0):
+    def analyze(self, log:bool=False, check_stability:bool=True, check_statics:bool=False, max_iter:int=30, sparse:bool=True, combo_tags:Union[List[str], None]=None, spring_tolerance:float=0, member_tolerance:float=0) -> None:
         """Performs first-order static analysis. Iterations are performed if tension-only members or compression-only members are present.
 
         :param log: Prints the analysis log to the console if set to True. Default is False.
@@ -2102,7 +2103,7 @@ class FEModel3D():
         # Flag the model as solved
         self.solution = 'Linear TC'
 
-    def analyze_linear(self, log=False, check_stability=True, check_statics=False, sparse=True, combo_tags=None):
+    def analyze_linear(self, log:bool=False, check_stability:bool=True, check_statics:bool=False, sparse:bool=True, combo_tags:Union[List[str], None]=None) -> None:
         """Performs first-order static analysis. This analysis procedure is much faster since it only assembles the global stiffness matrix once, rather than once for each load combination. It is not appropriate when non-linear behavior such as tension/compression only analysis or P-Delta analysis are required.
 
         :param log: Prints the analysis log to the console if set to True. Default is False.
@@ -2197,7 +2198,7 @@ class FEModel3D():
         # Flag the model as solved
         self.solution = 'Linear'
 
-    def analyze_PDelta(self, log=False, check_stability=True, max_iter=30, sparse=True, combo_tags=None):
+    def analyze_PDelta(self, log:bool=False, check_stability:bool=True, max_iter:int=30, sparse:bool=True, combo_tags:Union[List[str], None]=None) -> None:
         """Performs second order (P-Delta) analysis. This type of analysis is appropriate for most models using beams, columns and braces. Second order analysis is usually required by material specific codes. The analysis is iterative and takes longer to solve. Models with slender members and/or members with combined bending and axial loads will generally have more significant P-Delta effects. P-Delta effects in plates/quads are not considered.
 
         :param log: Prints updates to the console if set to True. Default is False.
