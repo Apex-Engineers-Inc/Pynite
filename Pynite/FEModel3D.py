@@ -780,7 +780,7 @@ class FEModel3D():
         # Add the wall to the model
         self.shear_walls[name] = new_shear_wall
 
-    def merge_duplicate_nodes(self, tolerance:float = 0.001) -> list:
+    def merge_duplicate_nodes(self, tolerance:float = 0.001) -> list[str]:
         """
         Removes duplicate nodes from the model and returns a list of the removed node names.
 
@@ -835,7 +835,7 @@ class FEModel3D():
                         node_lookup[node.name].append((element, nt))
 
         # Step 2: Merge nodes
-        removed = set()
+        removed: set[str] = set()
 
         for old_name, new_name in groups.items():
             old_node = name_to_node[old_name]
@@ -874,6 +874,10 @@ class FEModel3D():
         for name in removed:
             self.nodes.pop(name, None)
 
+        # Step 4: Update _kd_tree_node_names if any nodes were removed
+        if removed:
+            self._kd_tree_node_names = [name for name in self.nodes]
+    
         self.solution = None
         return list(removed)
     
