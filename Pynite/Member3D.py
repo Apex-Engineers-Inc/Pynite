@@ -1,6 +1,7 @@
 from __future__ import annotations  # Allows more recent type hints features
 from typing import TYPE_CHECKING, Literal, Union, List
 from math import isclose
+from functools import lru_cache
 
 from numpy import array, zeros, add, subtract, matmul, insert, dot, cross, divide, count_nonzero, concatenate
 from numpy import linspace, vstack, hstack, allclose, radians, sin, cos
@@ -22,6 +23,822 @@ if TYPE_CHECKING:
     from Pynite.Material import Material
     from Pynite.Section import Section
     from Pynite.LoadCombo import LoadCombo
+
+
+# Cached functions for performance optimization
+@lru_cache
+def _k_unc_cached(E: float, G: float, Iy: float, Iz: float, J: float, A: float, L: float) -> NDArray[float64]:
+    """
+    Pure cached function to calculate uncondensed local stiffness matrix.
+
+    Parameters
+    ----------
+    E : float
+        Young's modulus
+    G : float
+        Shear modulus
+    Iy : float
+        Moment of inertia about y-axis
+    Iz : float
+        Moment of inertia about z-axis
+    J : float
+        Torsional constant
+    A : float
+        Cross-sectional area
+    L : float
+        Member length
+
+    Returns
+    -------
+    NDArray[float64]
+        12x12 uncondensed local stiffness matrix
+    """
+    # Create the uncondensed local stiffness matrix
+    k = array([[A*E/L,  0,             0,             0,      0,            0,            -A*E/L, 0,             0,             0,      0,            0           ],
+               [0,      12*E*Iz/L**3,  0,             0,      0,            6*E*Iz/L**2,  0,      -12*E*Iz/L**3, 0,             0,      0,            6*E*Iz/L**2 ],
+               [0,      0,             12*E*Iy/L**3,  0,      -6*E*Iy/L**2, 0,            0,      0,             -12*E*Iy/L**3, 0,      -6*E*Iy/L**2, 0           ],
+               [0,      0,             0,             G*J/L,  0,            0,            0,      0,             0,             -G*J/L, 0,            0           ],
+               [0,      0,             -6*E*Iy/L**2,  0,      4*E*Iy/L,     0,            0,      0,             6*E*Iy/L**2,   0,      2*E*Iy/L,     0           ],
+               [0,      6*E*Iz/L**2,   0,             0,      0,            4*E*Iz/L,     0,      -6*E*Iz/L**2,  0,             0,      0,            2*E*Iz/L    ],
+               [-A*E/L, 0,             0,             0,      0,            0,            A*E/L,  0,             0,             0,      0,            0           ],
+               [0,      -12*E*Iz/L**3, 0,             0,      0,            -6*E*Iz/L**2, 0,      12*E*Iz/L**3,  0,             0,      0,            -6*E*Iz/L**2],
+               [0,      0,             -12*E*Iy/L**3, 0,      6*E*Iy/L**2,  0,            0,      0,             12*E*Iy/L**3,  0,      6*E*Iy/L**2,  0           ],
+               [0,      0,             0,             -G*J/L, 0,            0,            0,      0,             0,             G*J/L,  0,            0           ],
+               [0,      0,             -6*E*Iy/L**2,  0,      2*E*Iy/L,     0,            0,      0,             6*E*Iy/L**2,   0,      4*E*Iy/L,     0           ],
+               [0,      6*E*Iz/L**2,   0,             0,      0,            2*E*Iz/L,     0,      -6*E*Iz/L**2,  0,             0,      0,            4*E*Iz/L    ]])
+
+    return k
+
+
+@lru_cache
+def _fer_unc_cached(
+    L: float,
+    T_top_left: tuple[float, ...],  # 3x3 transformation matrix as tuple for global loads
+    point_loads: tuple[tuple[str, float, float, str], ...],  # tuple of (direction, magnitude, position, case)
+    dist_loads: tuple[tuple[str, float, float, float, float, str], ...],   # tuple of (direction, w1, w2, x1, x2, case)
+    combo_factors: tuple[tuple[str, float], ...]  # tuple of (case, factor) pairs
+) -> NDArray[float64]:
+    """
+    Pure cached function to calculate uncondensed local fixed end reaction vector.
+
+    Parameters
+    ----------
+    L : float
+        Member length
+    T_top_left : tuple[float, ...]
+        3x3 transformation matrix (top-left of full 12x12 T matrix) as flattened tuple
+    point_loads : tuple[tuple[str, float, float, str], ...]
+        Tuple of (direction, magnitude, position, case) tuples
+    dist_loads : tuple[tuple[str, float, float, float, float, str], ...]
+        Tuple of (direction, w1, w2, x1, x2, case) tuples
+    combo_factors : tuple[tuple[str, float], ...]
+        Tuple of (case, factor) pairs
+
+    Returns
+    -------
+    NDArray[float64]
+        12x1 uncondensed local fixed end reaction vector
+    """
+    # Initialize the fixed end reaction vector
+    fer = zeros((12, 1))
+
+    # Convert T_top_left back to 3x3 array for global load transformations
+    T_3x3 = array(T_top_left).reshape((3, 3))
+
+    # Convert combo_factors back to dict
+    factors_dict = dict(combo_factors)
+
+    # Loop through each load case and factor in the load combination
+    for case, factor in factors_dict.items():
+
+        # Sum the fixed end reactions for the point loads & moments
+        for ptLoad in point_loads:
+
+            # Check if the current point load corresponds to the current load case
+            if ptLoad[3] == case:
+
+                if ptLoad[0] == 'Fx':
+                    fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*ptLoad[1], ptLoad[2], L))
+                elif ptLoad[0] == 'Fy':
+                    fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], L, 'Fy'))
+                elif ptLoad[0] == 'Fz':
+                    fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], L, 'Fz'))
+                elif ptLoad[0] == 'Mx':
+                    fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*ptLoad[1], ptLoad[2], L))
+                elif ptLoad[0] == 'My':
+                    fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], L, 'My'))
+                elif ptLoad[0] == 'Mz':
+                    fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], L, 'Mz'))
+                elif ptLoad[0] == 'FX' or ptLoad[0] == 'FY' or ptLoad[0] == 'FZ':
+                    FX, FY, FZ = 0, 0, 0
+                    if ptLoad[0] == 'FX': FX = 1
+                    if ptLoad[0] == 'FY': FY = 1
+                    if ptLoad[0] == 'FZ': FZ = 1
+                    f = T_3x3 @ array([FX*ptLoad[1], FY*ptLoad[1], FZ*ptLoad[1]])
+                    fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*f[0], ptLoad[2], L))
+                    fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[1], ptLoad[2], L, 'Fy'))
+                    fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[2], ptLoad[2], L, 'Fz'))
+                elif ptLoad[0] == 'MX' or ptLoad[0] == 'MY' or ptLoad[0] == 'MZ':
+                    MX, MY, MZ = 0, 0, 0
+                    if ptLoad[0] == 'MX': MX = 1
+                    if ptLoad[0] == 'MY': MY = 1
+                    if ptLoad[0] == 'MZ': MZ = 1
+                    f = T_3x3 @ array([MX*ptLoad[1], MY*ptLoad[1], MZ*ptLoad[1]])
+                    fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*f[0], ptLoad[2], L))
+                    fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[1], ptLoad[2], L, 'My'))
+                    fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[2], ptLoad[2], L, 'Mz'))
+                else:
+                    raise Exception('Invalid member point load direction specified.')
+
+        # Sum the fixed end reactions for the distributed loads
+        for distLoad in dist_loads:
+
+            # Check if the current distributed load corresponds to the current load case
+            if distLoad[5] == case:
+
+                if distLoad[0] == 'Fx':
+                    fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], L))
+                elif distLoad[0] == 'Fy' or distLoad[0] == 'Fz':
+                    fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], L, distLoad[0]))
+                elif distLoad[0] == 'FX' or distLoad[0] == 'FY' or distLoad[0] == 'FZ':
+                    FX, FY, FZ = 0, 0, 0
+                    if distLoad[0] == 'FX': FX = 1
+                    if distLoad[0] == 'FY': FY = 1
+                    if distLoad[0] == 'FZ': FZ = 1
+                    w1 = T_3x3 @ array([FX*distLoad[1], FY*distLoad[1], FZ*distLoad[1]])
+                    w2 = T_3x3 @ array([FX*distLoad[2], FY*distLoad[2], FZ*distLoad[2]])
+                    fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*w1[0], factor*w2[0], distLoad[3], distLoad[4], L))
+                    fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[1], factor*w2[1], distLoad[3], distLoad[4], L, 'Fy'))
+                    fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[2], factor*w2[2], distLoad[3], distLoad[4], L, 'Fz'))
+
+    # Return the fixed end reaction vector, uncondensed
+    return fer
+
+
+@lru_cache
+def _fer_cached(
+    fer_unc: tuple[float, ...],  # Flattened uncondensed FER as tuple
+    k_unc: tuple[float, ...],    # Flattened uncondensed stiffness matrix as tuple
+    releases: tuple[bool, ...], # End releases as tuple
+    R1_indices: tuple[int, ...],  # Unreleased DOF indices
+    R2_indices: tuple[int, ...]   # Released DOF indices
+) -> NDArray[float64]:
+    """
+    Pure cached function to calculate condensed (and expanded) local fixed end reaction vector.
+
+    Parameters
+    ----------
+    fer_unc : tuple[float, ...]
+        Flattened uncondensed local fixed end reaction vector
+    k_unc : tuple[float, ...]
+        Flattened uncondensed local stiffness matrix
+    releases : tuple[bool, ...]
+        End releases as tuple of booleans
+    R1_indices : tuple[int, ...]
+        Unreleased degree of freedom indices
+    R2_indices : tuple[int, ...]
+        Released degree of freedom indices
+
+    Returns
+    -------
+    NDArray[float64]
+        12x1 condensed and expanded local fixed end reaction vector
+    """
+    # Convert tuples back to arrays
+    fer_unc_array = array(fer_unc).reshape((12, 1))
+    k_unc_array = array(k_unc).reshape((12, 12))
+
+    # Partition the local stiffness matrix and local fixed end reaction vector
+    fer1 = fer_unc_array[list(R1_indices), :]
+    fer2 = fer_unc_array[list(R2_indices), :]
+
+    k11 = k_unc_array[list(R1_indices), :][:, list(R1_indices)]
+    k12 = k_unc_array[list(R1_indices), :][:, list(R2_indices)]
+    k21 = k_unc_array[list(R2_indices), :][:, list(R1_indices)]
+    k22 = k_unc_array[list(R2_indices), :][:, list(R2_indices)]
+
+    # Calculate the condensed fixed end reaction vector
+    ferCondensed = subtract(fer1, matmul(matmul(k12, inv(k22)), fer2))
+
+    # Expand the condensed fixed end reaction vector
+    i = 0
+    for DOF in releases:
+        if DOF == True:
+            ferCondensed = insert(ferCondensed, i, 0, axis=0)
+        i += 1
+
+    # Return the fixed end reaction vector
+    return ferCondensed
+
+
+@lru_cache
+def _FER_cached(
+    T_matrix: tuple[float, ...],   # Flattened transformation matrix as tuple
+    fer_local: tuple[float, ...]   # Flattened local FER as tuple
+) -> NDArray[float64]:
+    """
+    Pure cached function to calculate global fixed end reaction vector.
+
+    Parameters
+    ----------
+    T_matrix : tuple[float, ...]
+        Flattened 12x12 transformation matrix
+    fer_local : tuple[float, ...]
+        Flattened 12x1 local fixed end reaction vector
+
+    Returns
+    -------
+    NDArray[float64]
+        12x1 global fixed end reaction vector
+    """
+    # Convert tuples back to arrays
+    T_array = array(T_matrix).reshape((12, 12))
+    fer_array = array(fer_local).reshape((12, 1))
+
+    # Calculate and return the global fixed end reaction vector
+    return matmul(inv(T_array), fer_array)
+
+
+@lru_cache
+def _T_cached(
+    Xi: float, Yi: float, Zi: float,  # i-node coordinates
+    Xj: float, Yj: float, Zj: float,  # j-node coordinates
+    L: float,                          # member length
+    rotation: float                    # member rotation in degrees
+) -> NDArray[float64]:
+    """
+    Pure cached function to calculate transformation matrix.
+
+    Parameters
+    ----------
+    Xi, Yi, Zi : float
+        Coordinates of i-node
+    Xj, Yj, Zj : float
+        Coordinates of j-node
+    L : float
+        Member length
+    rotation : float
+        Member rotation in degrees
+
+    Returns
+    -------
+    NDArray[float64]
+        12x12 transformation matrix
+    """
+    # Calculate the direction cosines for the local x-axis
+    x = [(Xj - Xi)/L, (Yj - Yi)/L, (Zj - Zi)/L]
+
+    # Calculate the remaining direction cosines.
+    # For now, the local z-axis will be kept parallel to the global XZ plane in all cases. It will be adjusted later if a rotation has been applied to the member.
+    # Vertical members
+    if isclose(Xi, Xj) and isclose(Zi, Zj):
+
+        # For vertical members, keep the local y-axis in the XY plane to make 2D problems easier to solve in the XY plane
+        if Yj > Yi:
+            y = [-1, 0, 0]
+            z = [0, 0, 1]
+        else:
+            y = [1, 0, 0]
+            z = [0, 0, 1]
+
+    # Horizontal members
+    elif isclose(Yi, Yj):
+
+        # Find a vector in the direction of the local z-axis by taking the cross-product
+        # of the local x-axis and the local y-axis. This vector will be perpendicular to
+        # both the local x-axis and the local y-axis.
+        y = [0, 1, 0]
+        z = cross(x, y)
+
+        # Divide the z-vector by its magnitude to produce a unit vector of direction cosines
+        z = divide(z, (z[0]**2 + z[1]**2 + z[2]**2)**0.5)
+
+    # Members neither vertical or horizontal
+    else:
+
+        # Find the projection of x on the global XZ plane
+        proj = [Xj - Xi, 0, Zj - Zi]
+
+        # Find a vector in the direction of the local z-axis by taking the cross-product
+        # of the local x-axis and its projection on a plane parallel to the XZ plane. This
+        # produces a vector perpendicular to both the local x-axis and its projection. This
+        # vector will always be horizontal since it's parallel to the XZ plane. The order
+        # in which the vectors are 'crossed' has been selected to ensure the y-axis always
+        # has an upward component (i.e. the top of the beam is always on top).
+        if Yj > Yi:
+            z = cross(proj, x)
+        else:
+            z = cross(x, proj)
+
+        # Divide the z-vector by its magnitude to produce a unit vector of direction cosines
+        z = divide(z, (z[0]**2 + z[1]**2 + z[2]**2)**0.5)
+
+        # Find the direction cosines for the local y-axis
+        y = cross(z, x)
+        y = divide(y, (y[0]**2 + y[1]**2 + y[2]**2)**0.5)
+
+    # Check if the member is rotated
+    if rotation != 0.0:
+
+        # Convert the rotation angle to radians
+        theta = radians(rotation)
+
+        # Shorthand cosine and sine functions
+        c = cos(theta)
+        s = sin(theta)
+
+        # Convert `x` to a numpy array
+        u = array(x)
+
+        # Rotate y using the Rodrigues formula
+        v = array(y)
+        y = v * c + cross(u, v) * s + u * (dot(u, v)) * (1 - c)
+        y /= norm(y)
+
+        # Rotate z using the Rodrigues formula
+        v = array(z)
+        z = v * c + cross(u, v) * s + u * (dot(u, v)) * (1 - c)
+        z /= norm(z)
+
+    # Create the direction cosines matrix
+    dirCos = array([x, y, z])
+
+    # Build the transformation matrix
+    transMatrix = zeros((12, 12))
+    transMatrix[0:3, 0:3] = dirCos
+    transMatrix[3:6, 3:6] = dirCos
+    transMatrix[6:9, 6:9] = dirCos
+    transMatrix[9:12, 9:12] = dirCos
+
+    return transMatrix
+
+
+@lru_cache
+def _k_cached(
+    k_unc: tuple[float, ...],      # Flattened uncondensed stiffness matrix as tuple
+    releases: tuple[bool, ...],   # End releases as tuple
+    R1_indices: tuple[int, ...], # Unreleased DOF indices
+    R2_indices: tuple[int, ...]  # Released DOF indices
+) -> NDArray[float64]:
+    """
+    Pure cached function to calculate condensed (and expanded) local stiffness matrix.
+
+    Parameters
+    ----------
+    k_unc : tuple[float, ...]
+        Flattened uncondensed local stiffness matrix
+    releases : tuple[bool, ...]
+        End releases as tuple of booleans
+    R1_indices : tuple[int, ...]
+        Unreleased degree of freedom indices
+    R2_indices : tuple[int, ...]
+        Released degree of freedom indices
+
+    Returns
+    -------
+    NDArray[float64]
+        12x12 condensed and expanded local stiffness matrix
+    """
+    # Convert tuple back to array
+    k_unc_array = array(k_unc).reshape((12, 12))
+
+    # Partition the local stiffness matrix as 4 submatrices in
+    # preparation for static condensation
+    k11 = k_unc_array[list(R1_indices), :][:, list(R1_indices)]
+    k12 = k_unc_array[list(R1_indices), :][:, list(R2_indices)]
+    k21 = k_unc_array[list(R2_indices), :][:, list(R1_indices)]
+    k22 = k_unc_array[list(R2_indices), :][:, list(R2_indices)]
+
+    # Calculate the condensed local stiffness matrix
+    k_Condensed = subtract(k11, matmul(matmul(k12, inv(k22)), k21))
+
+    # Expand the condensed local stiffness matrix
+    i = 0
+    for DOF in releases:
+        if DOF == True:
+            k_Condensed = insert(k_Condensed, i, 0, axis=0)
+            k_Condensed = insert(k_Condensed, i, 0, axis=1)
+        i += 1
+
+    # Return the local stiffness matrix, with end releases applied
+    return k_Condensed
+
+
+@lru_cache
+def _K_cached(
+    T_matrix: tuple[float, ...],  # Flattened transformation matrix as tuple
+    k_local: tuple[float, ...]    # Flattened local stiffness matrix as tuple
+) -> NDArray[float64]:
+    """
+    Pure cached function to calculate global elastic stiffness matrix.
+
+    Parameters
+    ----------
+    T_matrix : tuple[float, ...]
+        Flattened 12x12 transformation matrix
+    k_local : tuple[float, ...]
+        Flattened 12x12 local stiffness matrix
+
+    Returns
+    -------
+    NDArray[float64]
+        12x12 global elastic stiffness matrix
+    """
+    # Convert tuples back to arrays
+    T_array = array(T_matrix).reshape((12, 12))
+    k_array = array(k_local).reshape((12, 12))
+
+    # Calculate and return the stiffness matrix in global coordinates
+    return matmul(matmul(inv(T_array), k_array), T_array)
+
+
+@lru_cache
+def _L(Xi: float, Yi: float, Zi: float, Xj: float, Yj: float, Zj: float) -> float:
+    """
+    Pure cached function to calculate member length.
+
+    Parameters
+    ----------
+    Xi, Yi, Zi : float
+        Coordinates of i-node
+    Xj, Yj, Zj : float
+        Coordinates of j-node
+
+    Returns
+    -------
+    float
+        Member length
+    """
+    # Calculate the distance between the two nodes
+    return ((Xj - Xi)**2 + (Yj - Yi)**2 + (Zj - Zi)**2)**0.5
+
+
+@lru_cache
+def _f_cached(
+    solution_type: str,
+    k_local: tuple[float, ...],    # Local stiffness matrix as tuple
+    d_local: tuple[float, ...],    # Local displacement vector as tuple
+    fer_local: tuple[float, ...],  # Local FER as tuple
+    kg_matrix: tuple[float, ...],  # Geometric stiffness matrix as tuple (for P-Delta)
+    km_matrix: tuple[float, ...],  # Material stiffness matrix as tuple (for pushover)
+    fer_push: tuple[float, ...],   # Pushover FER as tuple (for pushover)
+    step_num: float    # Step number (for pushover)
+) -> NDArray[float64]:
+    """
+    Pure cached function to calculate local end force vector.
+
+    Parameters
+    ----------
+    solution_type : str
+        Type of analysis ('P-Delta', 'Pushover', or 'Linear')
+    k_local : tuple[float, ...]
+        Flattened local stiffness matrix
+    d_local : tuple[float, ...]
+        Flattened local displacement vector
+    fer_local : tuple[float, ...]
+        Flattened local fixed end reaction vector
+    kg_matrix : tuple[float, ...]
+        Flattened geometric stiffness matrix (for P-Delta)
+    km_matrix : tuple[float, ...]
+        Flattened material stiffness matrix (for pushover)
+    fer_push : tuple[float, ...]
+        Flattened pushover FER (for pushover)
+    step_num : float
+        Step number (for pushover)
+
+    Returns
+    -------
+    NDArray[float64]
+        12x1 local end force vector
+    """
+    # Convert tuples back to arrays
+    k_array = array(k_local).reshape((12, 12))
+    d_array = array(d_local).reshape((12, 1))
+    fer_array = array(fer_local).reshape((12, 1))
+
+    if solution_type == 'P-Delta':
+        kg_array = array(kg_matrix).reshape((12, 12))
+        return add(matmul(add(k_array, kg_array), d_array), fer_array)
+    elif solution_type == 'Pushover':
+        kg_array = array(kg_matrix).reshape((12, 12))
+        km_array = array(km_matrix).reshape((12, 12))
+        fer_push_array = array(fer_push).reshape((12, 1))
+        kt = k_array + kg_array + km_array
+        fer_total = fer_array + fer_push_array * step_num
+        return matmul(kt, d_array) + fer_total
+    else:  # Linear analysis
+        return matmul(k_array, d_array) + fer_array
+
+
+@lru_cache
+def _F_cached(
+    T_matrix: tuple[float, ...],   # Flattened transformation matrix as tuple
+    f_local: tuple[float, ...]     # Flattened local force vector as tuple
+) -> NDArray[float64]:
+    """
+    Pure cached function to calculate global end force vector.
+
+    Parameters
+    ----------
+    T_matrix : tuple[float, ...]
+        Flattened 12x12 transformation matrix
+    f_local : tuple[float, ...]
+        Flattened 12x1 local force vector
+
+    Returns
+    -------
+    NDArray[float64]
+        12x1 global end force vector
+    """
+    # Convert tuples back to arrays
+    T_array = array(T_matrix).reshape((12, 12))
+    f_array = array(f_local).reshape((12, 1))
+
+    # Calculate and return the global force vector
+    return matmul(inv(T_array), f_array)
+
+
+@lru_cache
+def _d_cached(
+    T_matrix: tuple[float, ...],  # Flattened transformation matrix as tuple
+    D_global: tuple[float, ...]   # Flattened global displacement vector as tuple
+) -> NDArray[float64]:
+    """
+    Pure cached function to calculate local displacement vector.
+
+    Parameters
+    ----------
+    T_matrix : tuple[float, ...]
+        Flattened 12x12 transformation matrix
+    D_global : tuple[float, ...]
+        Flattened 12x1 global displacement vector
+
+    Returns
+    -------
+    NDArray[float64]
+        12x1 local displacement vector
+    """
+    # Convert tuples back to arrays
+    T_array = array(T_matrix).reshape((12, 12))
+    D_array = array(D_global).reshape((12, 1))
+
+    # Calculate and return the local displacement vector
+    return matmul(T_array, D_array)
+
+
+@lru_cache
+def _D_cached(
+    active: bool,         # Member activity status
+    i_node_disps: tuple[float, float, float, float, float, float],  # i-node displacements (DX, DY, DZ, RX, RY, RZ)
+    j_node_disps: tuple[float, float, float, float, float, float]   # j-node displacements (DX, DY, DZ, RX, RY, RZ)
+) -> NDArray[float64]:
+    """
+    Pure cached function to construct global displacement vector.
+
+    Parameters
+    ----------
+    active : bool
+        Member activity status for load combination
+    i_node_disps : tuple[float, float, float, float, float, float]
+        i-node displacements (DX, DY, DZ, RX, RY, RZ)
+    j_node_disps : tuple[float, float, float, float, float, float]
+        j-node displacements (DX, DY, DZ, RX, RY, RZ)
+
+    Returns
+    -------
+    NDArray[float64]
+        12x1 global displacement vector
+    """
+    # Initialize the displacement vector
+    D = zeros((12, 1))
+
+    # Read in the global displacements from the nodes
+    # Apply axial displacements only if the member is active
+    if active:
+        D[0, 0] = i_node_disps[0]  # i_node.DX
+        D[6, 0] = j_node_disps[0]  # j_node.DX
+
+    # Apply the remaining displacements
+    D[1, 0] = i_node_disps[1]   # i_node.DY
+    D[2, 0] = i_node_disps[2]   # i_node.DZ
+    D[3, 0] = i_node_disps[3]   # i_node.RX
+    D[4, 0] = i_node_disps[4]   # i_node.RY
+    D[5, 0] = i_node_disps[5]   # i_node.RZ
+    D[7, 0] = j_node_disps[1]   # j_node.DY
+    D[8, 0] = j_node_disps[2]   # j_node.DZ
+    D[9, 0] = j_node_disps[3]   # j_node.RX
+    D[10, 0] = j_node_disps[4]  # j_node.RY
+    D[11, 0] = j_node_disps[5]  # j_node.RZ
+
+    # Return the global displacement vector
+    return D
+
+
+@lru_cache
+def _kg_cached(
+    P: float,         # Axial force
+    Ip: float,        # Polar moment of inertia (Iy + Iz)
+    A: float,         # Cross-sectional area
+    L: float,         # Member length
+    releases: tuple[bool, ...],  # End releases as tuple
+    R1_indices: tuple[int, ...], # Unreleased DOF indices
+    R2_indices: tuple[int, ...]  # Released DOF indices
+) -> NDArray[float64]:
+    """
+    Pure cached function to calculate condensed local geometric stiffness matrix.
+
+    Parameters
+    ----------
+    P : float
+        Axial force acting on the member (compression = +, tension = -)
+    Ip : float
+        Polar moment of inertia (Iy + Iz)
+    A : float
+        Cross-sectional area
+    L : float
+        Member length
+    releases : tuple[bool, ...]
+        End releases as tuple of booleans
+    R1_indices : tuple[int, ...]
+        Unreleased degree of freedom indices
+    R2_indices : tuple[int, ...]
+        Released degree of freedom indices
+
+    Returns
+    -------
+    NDArray[float64]
+        12x12 condensed local geometric stiffness matrix
+    """
+    # Create the uncondensed local geometric stiffness matrix
+    kg = array([[1,  0,    0,     0,     0,         0,         -1, 0,     0,    0,     0,         0        ],
+                [0,  6/5,  0,     0,     0,         L/10,      0,  -6/5,  0,    0,     0,         L/10     ],
+                [0,  0,    6/5,   0,     -L/10,     0,         0,  0,     -6/5, 0,     -L/10,     0        ],
+                [0,  0,    0,     Ip/A,  0,         0,         0,  0,     0,    -Ip/A, 0,         0        ],
+                [0,  0,    -L/10, 0,     2*L**2/15, 0,         0,  0,     L/10, 0,     -L**2/30,  0        ],
+                [0,  L/10, 0,     0,     0,         2*L**2/15, 0,  -L/10, 0,    0,     0,         -L**2/30 ],
+                [-1, 0,    0,     0,     0,         0,         1,  0,     0,    0,     0,         0        ],
+                [0,  -6/5, 0,     0,     0,         -L/10,     0,  6/5,   0,    0,     0,         -L/10    ],
+                [0,  0,    -6/5,  0,     L/10,      0,         0,  0,     6/5,  0,     L/10,      0        ],
+                [0,  0,    0,     -Ip/A, 0,         0,         0,  0,     0,    Ip/A,  0,         0        ],
+                [0,  0,    -L/10, 0,     -L**2/30,  0,         0,  0,     L/10, 0,     2*L**2/15, 0        ],
+                [0,  L/10, 0,     0,     0,         -L**2/30,  0,  -L/10, 0,    0,     0,         2*L**2/15]])
+
+    kg = kg*P/L
+
+    # Partition the geometric stiffness matrix as 4 submatrices in
+    # preparation for static condensation
+    kg11 = kg[list(R1_indices), :][:, list(R1_indices)]
+    kg12 = kg[list(R1_indices), :][:, list(R2_indices)]
+    kg21 = kg[list(R2_indices), :][:, list(R1_indices)]
+    kg22 = kg[list(R2_indices), :][:, list(R2_indices)]
+
+    # Calculate the condensed local geometric stiffness matrix
+    # Note that a matrix of zeros cannot be inverted, so if P is 0 an error will occur
+    if isclose(P, 0.0):
+        kg_Condensed = zeros(kg11.shape)
+    else:
+        kg_Condensed = subtract(kg11, matmul(matmul(kg12, inv(kg22)), kg21))
+
+    # Expand the condensed local geometric stiffness matrix
+    i = 0
+    for DOF in releases:
+        if DOF == True:
+            kg_Condensed = insert(kg_Condensed, i, 0, axis=0)
+            kg_Condensed = insert(kg_Condensed, i, 0, axis=1)
+        i += 1
+
+    # Return the local geometric stiffness matrix, with end releases applied
+    return kg_Condensed
+
+
+@lru_cache
+def _km_cached(
+    k_data: tuple[float, ...],        # Condensed elastic stiffness matrix data
+    P: float,             # Axial force
+    Ip: float,            # Polar moment of inertia
+    A: float,             # Cross-sectional area
+    L: float,             # Member length
+    releases: tuple[bool, ...],      # End releases
+    R1_indices: tuple[int, ...],    # Unreleased DOF indices
+    R2_indices: tuple[int, ...],    # Released DOF indices
+    section_exists: bool, # Whether section is defined
+    i_reversal: bool,     # Load reversal at i-node
+    j_reversal: bool,     # Load reversal at j-node
+    Gi_data: tuple[float, ...],       # Gradient at i-node (from section.G)
+    Gj_data: tuple[float, ...]        # Gradient at j-node (from section.G)
+) -> NDArray[float64]:
+    """
+    Pure cached function to calculate local plastic reduction matrix.
+    """
+
+    if not section_exists:
+        raise Exception('Nonlinear material analysis requires member sections to be defined.')
+
+    # Get the elastic local stiffness matrix
+    ke = array(k_data).reshape(12, 12)
+
+    # Get the geometric local stiffness matrix
+    kg = _kg_cached(P, Ip, A, L, releases, R1_indices, R2_indices)
+
+    # Get the total elastic local stiffness matrix
+    ke = add(ke, kg)
+
+    # Handle gradients based on load reversal
+    if i_reversal:
+        Gi = zeros((6, 1))
+    else:
+        Gi = array(Gi_data).reshape(6, 1)
+
+    if j_reversal:
+        Gj = zeros((6, 1))
+    else:
+        Gj = array(Gj_data).reshape(6, 1)
+
+    # Combine the gradients at the i and j-nodes
+    zeros_array = zeros((6, 1))
+    Gi = vstack((Gi, zeros_array))
+    Gj = vstack((zeros_array, Gj))
+    G = hstack((Gi, Gj))
+
+    # Check that G is not a zero matrix, which indicates no plastic behavior
+    if allclose(G, 0, atol=1e-14):
+        return zeros((12, 12))
+    else:
+        # Solve for km using a pseudo-inverse
+        return -ke @ G @ pinv(G.T @ ke @ G) @ G.T @ ke
+
+
+@lru_cache
+def _lamb_cached(
+    model_delta_d_data: tuple[float, ...],  # Change in global displacement vector
+    i_node_id: int,             # i-node ID
+    j_node_id: int,             # j-node ID
+    T_data: tuple[float, ...],              # Transformation matrix
+    k_data: tuple[float, ...],              # Condensed elastic stiffness matrix
+    P: float,                   # Axial force
+    Ip: float,                  # Polar moment of inertia
+    A: float,                   # Cross-sectional area
+    L: float,                   # Member length
+    releases: tuple[bool, ...],            # End releases
+    R1_indices: tuple[int, ...],          # Unreleased DOF indices
+    R2_indices: tuple[int, ...],          # Released DOF indices
+    section_exists: bool,       # Whether section is defined
+    Gi_data: tuple[float, ...],             # Gradient at i-node
+    Gj_data: tuple[float, ...]              # Gradient at j-node
+) -> NDArray[float64]:
+    """
+    Pure cached function to calculate lambda vector for pushover analysis.
+    """
+
+    if not section_exists:
+        raise Exception('Nonlinear material analysis requires member sections to be defined.')
+
+    # Reconstruct arrays from tuples
+    model_Delta_D = array(model_delta_d_data)
+    T = array(T_data).reshape(12, 12)
+    ke = array(k_data).reshape(12, 12)
+
+    # Obtain the change in the member's end displacements
+    Delta_D = array([model_Delta_D[i_node_id*6 + 0],
+                     model_Delta_D[i_node_id*6 + 1],
+                     model_Delta_D[i_node_id*6 + 2],
+                     model_Delta_D[i_node_id*6 + 3],
+                     model_Delta_D[i_node_id*6 + 4],
+                     model_Delta_D[i_node_id*6 + 5],
+                     model_Delta_D[j_node_id*6 + 0],
+                     model_Delta_D[j_node_id*6 + 1],
+                     model_Delta_D[j_node_id*6 + 2],
+                     model_Delta_D[j_node_id*6 + 3],
+                     model_Delta_D[j_node_id*6 + 4],
+                     model_Delta_D[j_node_id*6 + 5]]).reshape(12, 1)
+
+    # Convert the global changes in displacement to local coordinates
+    Delta_d = T @ Delta_D
+
+    # Get the geometric stiffness matrix
+    kg = _kg_cached(P, Ip, A, L, releases, R1_indices, R2_indices)
+
+    # Elastic stiffness (including geometric stiffness)
+    ke = add(ke, kg)
+
+    # Reconstruct gradients
+    Gi = array(Gi_data).reshape(6, 1)
+    Gj = array(Gj_data).reshape(6, 1)
+
+    # Combine the gradients for the i and j-nodes
+    zeros_array = zeros((6, 1))
+    Gi = vstack((Gi, zeros_array))
+    Gj = vstack((zeros_array, Gj))
+    G = hstack((Gi, Gj))
+
+    # Check if all terms in [G] are zero
+    if allclose(G, 0, atol=1e-14):
+        # No plasticity is occurring, so lambda is a 2x1 zero matrix
+        return array([[0], [0]])
+    else:
+        # Note: pinv accounts for rows of zeros that would normally make the matrix singular
+        return pinv(G.T @ ke @ G) @ G.T @ ke @ Delta_d
+
 
 
 # %%
@@ -90,12 +907,12 @@ class Member3D():
         self.j_reversal: bool = False
 
         self.rotation: float = rotation  # Member rotation (degrees) about its local x-axis
-        self.PtLoads: List[Tuple[str, float, float, str]] = []      # A list of point loads & moments applied to the element (Direction, P, x, case='Case 1') or (Direction, M, x, case='Case 1')
-        self.DistLoads: List[Tuple[str, float, float, float, float, str]] = []       # A list of linear distributed loads applied to the element (Direction, w1, w2, x1, x2, case='Case 1')
-        self.SegmentsZ: List[BeamSegZ] = []       # A list of mathematically continuous beam segments for z-bending
-        self.SegmentsY: List[BeamSegY] = []       # A list of mathematically continuous beam segments for y-bending
-        self.SegmentsX: List[BeamSegZ] = []       # A list of mathematically continuous beam segments for torsion
-        self.Releases: List[bool] = [False, False, False, False, False, False, False, False, False, False, False, False]
+        self.PtLoads: list[tuple[str, float, float, str]] = []      # A list of point loads & moments applied to the element (Direction, P, x, case='Case 1') or (Direction, M, x, case='Case 1')
+        self.DistLoads: list[tuple[str, float, float, float, float, str]] = []       # A list of linear distributed loads applied to the element (Direction, w1, w2, x1, x2, case='Case 1')
+        self.SegmentsZ: list[BeamSegZ] = []       # A list of mathematically continuous beam segments for z-bending
+        self.SegmentsY: list[BeamSegY] = []       # A list of mathematically continuous beam segments for y-bending
+        self.SegmentsX: list[BeamSegZ] = []       # A list of mathematically continuous beam segments for torsion
+        self.Releases: list[bool] = [False, False, False, False, False, False, False, False, False, False, False, False]
         self.tension_only: bool = tension_only  # Indicates whether the member is tension-only
         self.comp_only: bool = comp_only  # Indicates whether the member is compression-only
 
@@ -130,8 +947,16 @@ class Member3D():
         :rtype: float
         """
 
-        # Return the distance between the two nodes
-        return self.i_node.distance(self.j_node)
+        # Get data needed for cached function
+        Xi = self.i_node.X
+        Yi = self.i_node.Y
+        Zi = self.i_node.Z
+        Xj = self.j_node.X
+        Yj = self.j_node.Y
+        Zj = self.j_node.Z
+
+        # Return the cached member length
+        return _L(Xi, Yi, Zi, Xj, Yj, Zj)
 
 # %%
     def _partition_D(self) -> Tuple[List[int], List[int]]:
@@ -165,25 +990,18 @@ class Member3D():
         :rtype: ndarray
         """
 
-        # Partition the local stiffness matrix as 4 submatrices in
-        # preparation for static condensation
-        k11, k12, k21, k22 = self._partition(self._k_unc())
+        # Get data needed for cached function
+        R1_indices, R2_indices = self._partition_D()
+        k_unc = self._k_unc()
+        releases = tuple(self.Releases)
 
-        # Calculate the condensed local stiffness matrix
-        k_Condensed = subtract(k11, matmul(matmul(k12, inv(k22)), k21))
-
-        # Expand the condensed local stiffness matrix
-        i = 0
-        for DOF in self.Releases:
-
-            if DOF == True:
-                k_Condensed = insert(k_Condensed, i, 0, axis=0)
-                k_Condensed = insert(k_Condensed, i, 0, axis=1)
-
-            i += 1
-
-        # Return the local stiffness matrix, with end releases applied
-        return k_Condensed
+        # Return the cached condensed local stiffness matrix
+        return _k_cached(
+            tuple(k_unc.flatten()),
+            releases,
+            tuple(R1_indices),
+            tuple(R2_indices)
+        )
 
 # %%
     def _k_unc(self) -> NDArray[float64]:
@@ -203,22 +1021,8 @@ class Member3D():
         A = self.section.A
         L = self.L()
 
-        # Create the uncondensed local stiffness matrix
-        k = array([[A*E/L,  0,             0,             0,      0,            0,            -A*E/L, 0,             0,             0,      0,            0           ],
-                   [0,      12*E*Iz/L**3,  0,             0,      0,            6*E*Iz/L**2,  0,      -12*E*Iz/L**3, 0,             0,      0,            6*E*Iz/L**2 ],
-                   [0,      0,             12*E*Iy/L**3,  0,      -6*E*Iy/L**2, 0,            0,      0,             -12*E*Iy/L**3, 0,      -6*E*Iy/L**2, 0           ],
-                   [0,      0,             0,             G*J/L,  0,            0,            0,      0,             0,             -G*J/L, 0,            0           ],
-                   [0,      0,             -6*E*Iy/L**2,  0,      4*E*Iy/L,     0,            0,      0,             6*E*Iy/L**2,   0,      2*E*Iy/L,     0           ],
-                   [0,      6*E*Iz/L**2,   0,             0,      0,            4*E*Iz/L,     0,      -6*E*Iz/L**2,  0,             0,      0,            2*E*Iz/L    ],
-                   [-A*E/L, 0,             0,             0,      0,            0,            A*E/L,  0,             0,             0,      0,            0           ],
-                   [0,      -12*E*Iz/L**3, 0,             0,      0,            -6*E*Iz/L**2, 0,      12*E*Iz/L**3,  0,             0,      0,            -6*E*Iz/L**2],
-                   [0,      0,             -12*E*Iy/L**3, 0,      6*E*Iy/L**2,  0,            0,      0,             12*E*Iy/L**3,  0,      6*E*Iy/L**2,  0           ],
-                   [0,      0,             0,             -G*J/L, 0,            0,            0,      0,             0,             G*J/L,  0,            0           ],
-                   [0,      0,             -6*E*Iy/L**2,  0,      2*E*Iy/L,     0,            0,      0,             6*E*Iy/L**2,   0,      4*E*Iy/L,     0           ],
-                   [0,      6*E*Iz/L**2,   0,             0,      0,            2*E*Iz/L,     0,      -6*E*Iz/L**2,  0,             0,      0,            4*E*Iz/L    ]])
-
-        # Return the uncondensed local stiffness matrix
-        return k
+        # Return the cached uncondensed local stiffness matrix
+        return _k_unc_cached(E, G, Iy, Iz, J, A, L)
 
     def kg(self, P: float = 0) -> NDArray[float64]:
         """
@@ -233,50 +1037,15 @@ class Member3D():
         :rtype: NDArray[float64]
         """
 
-        # Get the properties needed to form the local geometric stiffness matrix
+        # Get data needed for cached function
         Ip = self.section.Iy + self.section.Iz
         A = self.section.A
         L = self.L()
+        releases = tuple(self.Releases)
+        R1_indices, R2_indices = self._partition_D()
 
-        # Create the uncondensed local geometric stiffness matrix
-        kg = array([[1,  0,    0,     0,     0,         0,         -1, 0,     0,    0,     0,         0        ],
-                    [0,  6/5,  0,     0,     0,         L/10,      0,  -6/5,  0,    0,     0,         L/10     ],
-                    [0,  0,    6/5,   0,     -L/10,     0,         0,  0,     -6/5, 0,     -L/10,     0        ],
-                    [0,  0,    0,     Ip/A,  0,         0,         0,  0,     0,    -Ip/A, 0,         0        ],
-                    [0,  0,    -L/10, 0,     2*L**2/15, 0,         0,  0,     L/10, 0,     -L**2/30,  0        ],
-                    [0,  L/10, 0,     0,     0,         2*L**2/15, 0,  -L/10, 0,    0,     0,         -L**2/30 ],
-                    [-1, 0,    0,     0,     0,         0,         1,  0,     0,    0,     0,         0        ],
-                    [0,  -6/5, 0,     0,     0,         -L/10,     0,  6/5,   0,    0,     0,         -L/10    ],
-                    [0,  0,    -6/5,  0,     L/10,      0,         0,  0,     6/5,  0,     L/10,      0        ],
-                    [0,  0,    0,     -Ip/A, 0,         0,         0,  0,     0,    Ip/A,  0,         0        ],
-                    [0,  0,    -L/10, 0,     -L**2/30,  0,         0,  0,     L/10, 0,     2*L**2/15, 0        ],
-                    [0,  L/10, 0,     0,     0,         -L**2/30,  0,  -L/10, 0,    0,     0,         2*L**2/15]])
-
-        kg = kg*P/L
-
-        # Partition the geometric stiffness matrix as 4 submatrices in
-        # preparation for static condensation
-        kg11, kg12, kg21, kg22 = self._partition(kg)
-
-        # Calculate the condensed local geometric stiffness matrix
-        # Note that a matrix of zeros cannot be inverted, so if P is 0 an error will occur
-        if isclose(P, 0.0):
-            kg_Condensed = zeros(kg11.shape)
-        else:
-            kg_Condensed = subtract(kg11, matmul(matmul(kg12, inv(kg22)), kg21))
-
-        # Expand the condensed local geometric stiffness matrix
-        i = 0
-        for DOF in self.Releases:
-
-            if DOF == True:
-                kg_Condensed = insert(kg_Condensed, i, 0, axis=0)
-                kg_Condensed = insert(kg_Condensed, i, 0, axis=1)
-
-            i += 1
-
-        # Return the local geomtric stiffness matrix, with end releases applied
-        return kg_Condensed
+        # Return the cached local geometric stiffness matrix
+        return _kg_cached(P, Ip, A, L, releases, tuple(R1_indices), tuple(R2_indices))
 
     def km(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
         """Returns the local plastic reduction matrix for the element.
@@ -287,60 +1056,36 @@ class Member3D():
         :rtype: NDArray[float64]
         """
 
-        # List the degrees of freedom associated with axial and bending stiffnesses
-        # dofs = [0, 3, 4, 6, 9, 10]
-
-        # Get the elastic local stiffness matrix (for only axial and bending)
-        # Note that using the entire stiffness matrix with all terms would lead to an uninvertible term later on
-        ke = self.k()  # [dofs][:, dofs]
-
-        # Get the member's axial force
+        # Gather data needed for cached function
+        k_data = tuple(self.k().flatten())
         P = self._fxj - self._fxi
+        Ip = self.section.Iy + self.section.Iz if self.section else 0
+        A = self.section.A if self.section else 0
+        L = self.L()
+        releases = tuple(self.Releases)
+        R1_indices, R2_indices = self._partition_D()
+        section_exists = self.section is not None
+        i_reversal = self.i_reversal
+        j_reversal = self.j_reversal
 
-        # Get the geometric local stiffness matrix (for only axial and bending)
-        kg = self.kg(P)  # [dofs][:, dofs]
-
-        # Get the total elastic local stiffness matrix
-        ke = add(ke, kg)
-
-        # Get the gradient to the failure surface at at each end of the element
-        if self.section is None:
-            raise Exception(f'Nonlinear material analysis requires member sections to be defined. A section definition is missing for element {self.name}.')
+        # Calculate gradients if section exists and no load reversal
+        if section_exists and not i_reversal:
+            Gi_data = tuple(self.section.G(self._fxi, self._myi, self._mzi).flatten())
         else:
+            Gi_data = tuple(zeros((6, 1)).flatten())
 
-            # Check for load reversal at the i-node
-            if self.i_reversal == True:
-                # Gi is a null vector if load reversal is occuring
-                Gi = zeros((6, 1))
-            else:
-                Gi = self.section.G(self._fxi, self._myi, self._mzi)
-
-            # Check for load reversal at the j-node
-            if self.j_reversal == True:
-                # Gj is a null vector if load reversal is occuring
-                Gj = zeros((6, 1))
-            else:
-                Gj = self.section.G(self._fxj, self._myj, self._mzj)
-
-        # Combine the gradients at the i and j-nodes
-        zeros_array = zeros((6, 1))
-        Gi = vstack((Gi, zeros_array))
-        Gj = vstack((zeros_array, Gj))
-        G = hstack((Gi, Gj))
+        if section_exists and not j_reversal:
+            Gj_data = tuple(self.section.G(self._fxj, self._myj, self._mzj).flatten())
+        else:
+            Gj_data = tuple(zeros((6, 1)).flatten())
 
         if self.name == 'M1a':
             M1a_Phi_i = self.section.Phi(self._fxi, self._myi, self._mzi)
             print(f'M1a Phi_i: {M1a_Phi_i}')
-            # print(f'M1a Gi: {Gi}')
 
-        # Calculate the plastic reduction matrix for each end of the element
-        # TODO: Note that `ke` below already accounts for P-Delta effects and any member end releases which should spill into `km`. I believe end releases will resolve themselves because of this. We'll see how this tests when we get to testing. If it causes problems when end releases are applied we may need to adjust our calculation of G when end releases are present.
-        # Check that G is not a zero matrix, which indicates no plastic behavior
-        if allclose(G, 0, atol=1e-14):
-            return zeros((12, 12))
-        else:
-            # Solve for `km` using a psuedo-inverse (pinv). The psuedo-inverse takes into account that we may have rows of zeros that make the matrix otherwise uninvertable.
-            return -ke @ G @ pinv(G.T @ ke @ G) @ G.T @ ke
+        # Return the cached local plastic reduction matrix
+        return _km_cached(k_data, P, Ip, A, L, releases, tuple(R1_indices), tuple(R2_indices),
+                   section_exists, i_reversal, j_reversal, Gi_data, Gj_data)
 
     def lamb(self, model_Delta_D: NDArray[float64], combo_name: str = 'Combo 1', push_combo: str = 'Push', step_num: int = 1) -> NDArray[float64]:
         """
@@ -360,49 +1105,38 @@ class Member3D():
         :rtype: NDArray[float64]
         """
 
-        # Obtain the change in the member's end displacements from the calculated displacement change vector
-        Delta_D = array([model_Delta_D[self.i_node.ID*6 + 0],
-                         model_Delta_D[self.i_node.ID*6 + 1],
-                         model_Delta_D[self.i_node.ID*6 + 2],
-                         model_Delta_D[self.i_node.ID*6 + 3],
-                         model_Delta_D[self.i_node.ID*6 + 4],
-                         model_Delta_D[self.i_node.ID*6 + 5],
-                         model_Delta_D[self.j_node.ID*6 + 0],
-                         model_Delta_D[self.j_node.ID*6 + 1],
-                         model_Delta_D[self.j_node.ID*6 + 2],
-                         model_Delta_D[self.j_node.ID*6 + 3],
-                         model_Delta_D[self.j_node.ID*6 + 4],
-                         model_Delta_D[self.j_node.ID*6 + 5]]).reshape(12, 1)
+        # Gather data needed for cached function
+        model_delta_d_data = tuple(model_Delta_D.flatten())
+        i_node_id = self.i_node.ID
+        j_node_id = self.j_node.ID
+        T_data = tuple(self.T().flatten())
 
-        # Convert the global changes in displacement to local coordinates
-        Delta_d = self.T() @ Delta_D
+        # Calculate axial force for geometric stiffness
+        d_total = self.d(combo_name)
+        delta_dx_total = d_total[6, 0] - d_total[0, 0]
+        P = self.section.A*self.material.E/self.L()*delta_dx_total
 
-        # Get the elastic local stiffness matrix (includeing goemetric stiffness)
-        d_total = self.d(combo_name)  # Total displacements acting on the member at the current load stp
-        delta_dx_total = d_total[6, 0] - d_total[0, 0]  # Change in displacement across the lenght of the member
-        P = self.section.A*self.material.E/self.L()*delta_dx_total  # Axial load acting on the member at the current load step
-        ke = self.k() + self.kg(P)  # Elastic stiffness (including geometric stiffness)
+        # Get stiffness matrix data
+        k_data = tuple(self.k().flatten())
+        Ip = self.section.Iy + self.section.Iz if self.section else 0
+        A = self.section.A if self.section else 0
+        L = self.L()
+        releases = tuple(self.Releases)
+        R1_indices, R2_indices = self._partition_D()
+        section_exists = self.section is not None
 
-        # Get the gradient to the failure surface at at each end of the element
-        if self.section is None:
-            raise Exception(f'Nonlinear material analysis requires member sections to be defined. A section definition is missing for element {self.name}.')
+        # Calculate gradients if section exists
+        if section_exists:
+            Gi_data = tuple(self.section.G(self._fxi, self._myi, self._mzi).flatten())
+            Gj_data = tuple(self.section.G(self._fxj, self._myj, self._mzj).flatten())
         else:
-            Gi = self.section.G(self._fxi, self._myi, self._mzi)
-            Gj = self.section.G(self._fxj, self._myj, self._mzj)
+            Gi_data = tuple(zeros((6, 1)).flatten())
+            Gj_data = tuple(zeros((6, 1)).flatten())
 
-        # Combine the gradients for the i and j-nodes
-        zeros_array = zeros((6, 1))
-        Gi = vstack((Gi, zeros_array))
-        Gj = vstack((zeros_array, Gj))
-        G = hstack((Gi, Gj))
-
-        # Check if all terms in [G] are zero
-        if allclose(G, 0, atol=1e-14):
-            # No plasticity is occuring, so `lambda` is a 2x1 zero matrix
-            return array([[0], [0]])
-        else:
-            # Note: `pinv` accounts for rows of zeros that would normally make the matrix singular
-            return pinv(G.T @ ke @ G) @ G.T @ ke @ Delta_d
+        # Return the cached lambda vector
+        return _lamb_cached(model_delta_d_data, i_node_id, j_node_id, T_data, k_data, P, Ip, A, L,
+                     releases, tuple(R1_indices), tuple(R2_indices), section_exists,
+                     Gi_data, Gj_data)
 
     def fer(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
         """
@@ -414,27 +1148,20 @@ class Member3D():
         :rtype: NDArray[float64]
         """
 
-        # Get the lists of unreleased and released degree of freedom indices
+        # Get data needed for cached function
         R1_indices, R2_indices = self._partition_D()
+        fer_unc = self._fer_unc(combo_name)
+        k_unc = self._k_unc()
+        releases = tuple(self.Releases)
 
-        # Partition the local stiffness matrix and local fixed end reaction vector
-        k11, k12, k21, k22 = self._partition(self._k_unc())
-        fer1, fer2 = self._partition(self._fer_unc(combo_name))
-
-        # Calculate the condensed fixed end reaction vector
-        ferCondensed = subtract(fer1, matmul(matmul(k12, inv(k22)), fer2))
-
-        # Expand the condensed fixed end reaction vector
-        i = 0
-        for DOF in self.Releases:
-
-            if DOF == True:
-                ferCondensed = insert(ferCondensed, i, 0, axis=0)
-
-            i += 1
-
-        # Return the fixed end reaction vector        
-        return ferCondensed
+        # Return the cached condensed fixed end reaction vector
+        return _fer_cached(
+            tuple(fer_unc.flatten()),
+            tuple(k_unc.flatten()),
+            releases,
+            tuple(R1_indices),
+            tuple(R2_indices)
+        )
 
     def _fer_unc(self, combo_name:str = 'Combo 1') -> NDArray[float64]:
         """
@@ -442,77 +1169,16 @@ class Member3D():
         Needed to apply the slope-deflection equation properly.
         """
 
-        # Initialize the fixed end reaction vector
-        fer = zeros((12, 1))
-
-        # Get the requested load combination
+        # Get data needed for cached function
+        L = self.L()
+        T_top_left = tuple(self.T()[:3, :3].flatten())  # 3x3 transformation matrix for global loads
+        point_loads = tuple(self.PtLoads)
+        dist_loads = tuple(self.DistLoads)
         combo = self.model.load_combos[combo_name]
+        combo_factors = tuple(combo.factors.items())
 
-        # Loop through each load case and factor in the load combination
-        for case, factor in combo.factors.items():
-
-            # Sum the fixed end reactions for the point loads & moments
-            for ptLoad in self.PtLoads:
-
-                # Check if the current point load corresponds to the current load case
-                if ptLoad[3] == case:
-
-                    if ptLoad[0] == 'Fx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*ptLoad[1], ptLoad[2], self.L()))
-                    elif ptLoad[0] == 'Fy':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], self.L(), 'Fy'))
-                    elif ptLoad[0] == 'Fz':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], self.L(), 'Fz'))
-                    elif ptLoad[0] == 'Mx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*ptLoad[1], ptLoad[2], self.L()))
-                    elif ptLoad[0] == 'My':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], self.L(), 'My'))
-                    elif ptLoad[0] == 'Mz':     
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], self.L(), 'Mz'))
-                    elif ptLoad[0] == 'FX' or ptLoad[0] == 'FY' or ptLoad[0] == 'FZ':
-                        FX, FY, FZ = 0, 0, 0
-                        if ptLoad[0] == 'FX': FX = 1
-                        if ptLoad[0] == 'FY': FY = 1
-                        if ptLoad[0] == 'FZ': FZ = 1
-                        f = self.T()[:3, :][:, :3] @ array([FX*ptLoad[1], FY*ptLoad[1], FZ*ptLoad[1]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*f[0], ptLoad[2], self.L()))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[1], ptLoad[2], self.L(), 'Fy'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[2], ptLoad[2], self.L(), 'Fz'))
-                    elif ptLoad[0] == 'MX' or ptLoad[0] == 'MY' or ptLoad[0] == 'MZ':
-                        MX, MY, MZ = 0, 0, 0
-                        if ptLoad[0] == 'MX': MX = 1
-                        if ptLoad[0] == 'MY': MY = 1
-                        if ptLoad[0] == 'MZ': MZ = 1
-                        f = self.T()[:3, :][:, :3] @ array([MX*ptLoad[1], MY*ptLoad[1], MZ*ptLoad[1]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*f[0], ptLoad[2], self.L()))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[1], ptLoad[2], self.L(), 'My'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[2], ptLoad[2], self.L(), 'Mz'))
-                    else:
-                        raise Exception('Invalid member point load direction specified.')
-
-            # Sum the fixed end reactions for the distributed loads
-            for distLoad in self.DistLoads:
-
-                # Check if the current distributed load corresponds to the current load case
-                if distLoad[5] == case:
-
-                    if distLoad[0] == 'Fx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], self.L()))
-                    elif distLoad[0] == 'Fy' or distLoad[0] == 'Fz':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], self.L(), distLoad[0]))
-                    elif distLoad[0] == 'FX' or distLoad[0] == 'FY' or distLoad[0] == 'FZ':
-                        FX, FY, FZ = 0, 0, 0
-                        if distLoad[0] == 'FX': FX = 1
-                        if distLoad[0] == 'FY': FY = 1
-                        if distLoad[0] == 'FZ': FZ = 1
-                        w1 = self.T()[:3, :][:, :3] @ array([FX*distLoad[1], FY*distLoad[1], FZ*distLoad[1]])
-                        w2 = self.T()[:3, :][:, :3] @ array([FX*distLoad[2], FY*distLoad[2], FZ*distLoad[2]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*w1[0], factor*w2[0], distLoad[3], distLoad[4], self.L()))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[1], factor*w2[1], distLoad[3], distLoad[4], self.L(), 'Fy'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[2], factor*w2[2], distLoad[3], distLoad[4], self.L(), 'Fz'))
-
-        # Return the fixed end reaction vector, uncondensed
-        return fer
+        # Return the cached uncondensed fixed end reaction vector
+        return _fer_unc_cached(L, T_top_left, point_loads, dist_loads, combo_factors)
 
     def _partition(self, unp_matrix: NDArray[float64])-> tuple[Any, Any] | tuple[Any, Any, Any, Any]:
         """
@@ -543,32 +1209,57 @@ class Member3D():
         :rtype: array
         """
 
-        # Calculate and return the member's local end force vector
+        # Get common data
+        k_local = self.k()
+        d_local = self.d(combo_name)
+        fer_local = self.fer(combo_name)
+
+        # Determine solution type and get additional data as needed
         if self.model.solution == 'P-Delta':
-
             # Back-calculate the axial force on the member from the axial strain
-            P = (self.d(combo_name)[6, 0] - self.d(combo_name)[0, 0])*self.section.A*self.material.E/self.L()
+            P = (d_local[6, 0] - d_local[0, 0])*self.section.A*self.material.E/self.L()
+            kg_matrix = self.kg(P)
 
-            return add(matmul(add(self.k(), self.kg(P)), self.d(combo_name)), self.fer(combo_name))
+            return _f_cached(
+                'P-Delta',
+                tuple(k_local.flatten()),
+                tuple(d_local.flatten()),
+                tuple(fer_local.flatten()),
+                tuple(kg_matrix.flatten()),
+                tuple(zeros((12, 12)).flatten()),  # Empty km_matrix
+                tuple(zeros((12, 1)).flatten()),   # Empty fer_push
+                0.0                                # Empty step_num
+            )
 
-        # Check for a pushover analysis
         elif push_combo is not None and step_num is not None:
-
             # Calculate the axial force on the member from the latest elasto-plastic member end forces
             P = self._fxj - self._fxi
+            kg_matrix = self.kg(P)
+            km_matrix = self.km(combo_name)
+            fer_push = self.fer(push_combo)
 
-            # Calculate the total stiffness matrix
-            kt = self.k() + self.kg(P) + self.km(combo_name)
-
-            # Calculate the fixed end reaction vector for this load step
-            fer = self.fer(combo_name) + self.fer(push_combo)*step_num
-
-            # Retern the new member end forces
-            return kt @ self.d(combo_name) + fer
+            return _f_cached(
+                'Pushover',
+                tuple(k_local.flatten()),
+                tuple(d_local.flatten()),
+                tuple(fer_local.flatten()),
+                tuple(kg_matrix.flatten()),
+                tuple(km_matrix.flatten()),
+                tuple(fer_push.flatten()),
+                float(step_num)
+            )
 
         else:
-
-            return self.k() @ self.d(combo_name) + self.fer(combo_name)
+            return _f_cached(
+                'Linear',
+                tuple(k_local.flatten()),
+                tuple(d_local.flatten()),
+                tuple(fer_local.flatten()),
+                tuple(zeros((12, 12)).flatten()),  # Empty kg_matrix
+                tuple(zeros((12, 12)).flatten()),  # Empty km_matrix
+                tuple(zeros((12, 1)).flatten()),   # Empty fer_push
+                0.0                                # Empty step_num
+            )
 
     def d(self, combo_name='Combo 1') -> NDArray[float64]:
         """
@@ -580,8 +1271,15 @@ class Member3D():
             The name of the load combination to construct the displacement vector for (not the load combination itself).
         """
 
-        # Calculate and return the local displacement vector
-        return self.T() @ self.D(combo_name)
+        # Get data needed for cached function
+        T_matrix = self.T()
+        D_global = self.D(combo_name)
+
+        # Return the cached local displacement vector
+        return _d_cached(
+            tuple(T_matrix.flatten()),
+            tuple(D_global.flatten())
+        )
 
     # Transformation matrix
     def T(self) -> NDArray[float64]:
@@ -589,105 +1287,18 @@ class Member3D():
         Returns the transformation matrix for the member.
         """
 
-        # Get the global coordinates for the two ends
+        # Get data needed for cached function
         Xi = self.i_node.X
-        Xj = self.j_node.X
-
         Yi = self.i_node.Y
-        Yj = self.j_node.Y
-
         Zi = self.i_node.Z
+        Xj = self.j_node.X
+        Yj = self.j_node.Y
         Zj = self.j_node.Z
-
-        # Calculate the length of the member
         L = self.L()
+        rotation = self.rotation
 
-        # Calculate the direction cosines for the local x-axis
-        x = [(Xj - Xi)/L, (Yj - Yi)/L, (Zj - Zi)/L]
-
-        # Calculate the remaining direction cosines.
-        # For now, the local z-axis will be kept parallel to the global XZ plane in all cases. It will be adjusted later if a rotation has been applied to the member.
-        # Vertical members
-        if isclose(Xi, Xj) and isclose(Zi, Zj):
-
-            # For vertical members, keep the local y-axis in the XY plane to make 2D problems easier to solve in the XY plane
-            if Yj > Yi:
-                y = [-1, 0, 0]
-                z = [0, 0, 1]
-            else:
-                y = [1, 0, 0]
-                z = [0, 0, 1]
-
-        # Horizontal members
-        elif isclose(Yi, Yj):
-
-            # Find a vector in the direction of the local z-axis by taking the cross-product
-            # of the local x-axis and the local y-axis. This vector will be perpendicular to
-            # both the local x-axis and the local y-axis.
-            y = [0, 1, 0]
-            z = cross(x, y)
-
-            # Divide the z-vector by its magnitude to produce a unit vector of direction cosines
-            z = divide(z, (z[0]**2 + z[1]**2 + z[2]**2)**0.5)
-
-        # Members neither vertical or horizontal
-        else:
-
-            # Find the projection of x on the global XZ plane
-            proj = [Xj - Xi, 0, Zj - Zi]
-
-            # Find a vector in the direction of the local z-axis by taking the cross-product
-            # of the local x-axis and its projection on a plane parallel to the XZ plane. This
-            # produces a vector perpendicular to both the local x-axis and its projection. This
-            # vector will always be horizontal since it's parallel to the XZ plane. The order
-            # in which the vectors are 'crossed' has been selected to ensure the y-axis always
-            # has an upward component (i.e. the top of the beam is always on top).
-            if Yj > Yi:
-                z = cross(proj, x)
-            else:
-                z = cross(x, proj)
-
-            # Divide the z-vector by its magnitude to produce a unit vector of direction cosines
-            z = divide(z, (z[0]**2 + z[1]**2 + z[2]**2)**0.5)
-
-            # Find the direction cosines for the local y-axis
-            y = cross(z, x)
-            y = divide(y, (y[0]**2 + y[1]**2 + y[2]**2)**0.5)
-
-        # Check if the member is rotated
-        if self.rotation != 0.0:
-
-            # Convert the rotation angle to radians
-            theta = radians(self.rotation)
-
-            # Shorthand cosine and sine functions
-            c = cos(theta)
-            s = sin(theta)
-
-            # Convert `x` to a numpy array
-            u = array(x)
-
-            # Rotate y using the Rodrigues formula
-            v = array(y)
-            y = v * c + cross(u, v) * s + u * (dot(u, v)) * (1 - c)
-            y /= norm(y)
-
-            # Rotate z using the Rodrigues formula
-            v = array(z)
-            z = v * c + cross(u, v) * s + u * (dot(u, v)) * (1 - c)
-            z /= norm(z)
-
-        # Create the direction cosines matrix
-        dirCos = array([x, y, z])
-
-        # Build the transformation matrix
-        transMatrix = zeros((12, 12))
-        transMatrix[0:3, 0:3] = dirCos
-        transMatrix[3:6, 3:6] = dirCos
-        transMatrix[6:9, 6:9] = dirCos
-        transMatrix[9:12, 9:12] = dirCos
-
-        return transMatrix
+        # Return the cached transformation matrix
+        return _T_cached(Xi, Yi, Zi, Xj, Yj, Zj, L, rotation)
 
     # Member global stiffness matrix
     def K(self) -> NDArray[float64]:
@@ -697,8 +1308,15 @@ class Member3D():
         :rtype: array
         """
 
-        # Calculate and return the stiffness matrix in global coordinates
-        return matmul(matmul(inv(self.T()), self.k()), self.T())
+        # Get data needed for cached function
+        T_matrix = self.T()
+        k_local = self.k()
+
+        # Return the cached global elastic stiffness matrix
+        return _K_cached(
+            tuple(T_matrix.flatten()),
+            tuple(k_local.flatten())
+        )
 
     def Kg(self, P: float=0.0):
         """Returns the global geometric stiffness matrix for the member. Used for P-Delta analysis.
@@ -729,8 +1347,15 @@ class Member3D():
         Returns the member's global end force vector for the given load combination.
         """
 
-        # Calculate and return the global force vector
-        return matmul(inv(self.T()), self.f(combo_name))
+        # Get data needed for cached function
+        T_matrix = self.T()
+        f_local = self.f(combo_name)
+
+        # Return the cached global force vector
+        return _F_cached(
+            tuple(T_matrix.flatten()),
+            tuple(f_local.flatten())
+        )
 
     def FER(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
         """
@@ -742,8 +1367,15 @@ class Member3D():
             The name of the load combination to calculate the fixed end reaction vector for (not the load combination itself).
         """
 
-        # Calculate and return the fixed end reaction vector
-        return matmul(inv(self.T()), self.fer(combo_name))
+        # Get data needed for cached function
+        T_matrix = self.T()
+        fer_local = self.fer(combo_name)
+
+        # Return the cached global fixed end reaction vector
+        return _FER_cached(
+            tuple(T_matrix.flatten()),
+            tuple(fer_local.flatten())
+        )
 
     def D(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
         """
@@ -756,30 +1388,27 @@ class Member3D():
             displacement vector for (not the load combination itelf).
         """
 
-        # Initialize the displacement vector
-        D = zeros((12, 1))
+        # Get data needed for cached function
+        active = self.active[combo_name]
+        i_node_disps = (
+            self.i_node.DX[combo_name],
+            self.i_node.DY[combo_name],
+            self.i_node.DZ[combo_name],
+            self.i_node.RX[combo_name],
+            self.i_node.RY[combo_name],
+            self.i_node.RZ[combo_name]
+        )
+        j_node_disps = (
+            self.j_node.DX[combo_name],
+            self.j_node.DY[combo_name],
+            self.j_node.DZ[combo_name],
+            self.j_node.RX[combo_name],
+            self.j_node.RY[combo_name],
+            self.j_node.RZ[combo_name]
+        )
 
-        # TODO: I'm not sure this next block is the best way to handle inactive members - need to review
-        # Read in the global displacements from the nodes
-        # Apply axial displacements only if the member is active
-        if self.active[combo_name] == True:
-            D[0, 0] = self.i_node.DX[combo_name]
-            D[6, 0] = self.j_node.DX[combo_name]
-
-        # Apply the remaining displacements
-        D[1, 0] = self.i_node.DY[combo_name]
-        D[2, 0] = self.i_node.DZ[combo_name]
-        D[3, 0] = self.i_node.RX[combo_name]
-        D[4, 0] = self.i_node.RY[combo_name]
-        D[5, 0] = self.i_node.RZ[combo_name]
-        D[7, 0] = self.j_node.DY[combo_name]
-        D[8, 0] = self.j_node.DZ[combo_name]
-        D[9, 0] = self.j_node.RX[combo_name]
-        D[10, 0] = self.j_node.RY[combo_name]
-        D[11, 0] = self.j_node.RZ[combo_name]
-
-        # Return the global displacement vector
-        return D
+        # Return the cached global displacement vector
+        return _D_cached(active, i_node_disps, j_node_disps)
 
     def shear(self, Direction: Literal['Fy', 'Fz'], x: float, combo_name: str = 'Combo 1') -> float:
         """
