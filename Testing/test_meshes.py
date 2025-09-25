@@ -1,5 +1,58 @@
 from Pynite import FEModel3D
-    
+from Pynite.Rendering import Renderer
+from math import isclose
+
+
+def test_rect_mesh_in_plane_stiffness():
+
+    model = FEModel3D()
+
+    E = 57*(5000)**0.5*12**2
+    G = 0.4*E
+    nu = 0.15
+    rho = 0.150
+    model.add_material('Concrete', E, G, nu, rho)
+
+    model.add_rectangle_mesh('MSH1', 1, 10, 15, 0.667, 'Concrete', 1, 0.7, (0, 0, 0), 'XY', element_type='Quad')
+
+    model.meshes['MSH1'].generate()
+
+    bott_nodes = [node for node in model.nodes.values() if isclose(node.Y, 0.0)]
+    top_nodes = [node for node in model.nodes.values() if isclose(node.Y, 15.0)]
+    num_top_nodes = len(top_nodes)
+    node_shear = 1000/num_top_nodes
+
+    for node in top_nodes:
+        model.add_node_load(node.name, 'FX', node_shear, 'E')
+
+    for node in bott_nodes:
+        model.def_support(node.name, True, True, True, True, True, True)
+
+    model.add_load_combo('1.0E', {'E': 1.0})
+
+    model.analyze()
+
+    delta_max = 0.0
+    for node in top_nodes:
+
+        if node.DX['1.0E'] > delta_max:
+
+            delta_max = node.DX['1.0E']
+
+    k = 1000/(delta_max*12)
+
+    print(f'Stiffness, k = {k} kip/in')
+
+    # Check that the stiffness is as expected
+    assert round(k) == 1369, 'Failed rectangular mesh stiffness test.'
+
+    # rndr = Renderer(model)
+    # rndr.combo_name = '1.0E'
+    # rndr.render_loads = True
+    # rndr.color_map = 'Txy'
+    # rndr.render_model()
+
+
 def test_PCA_7_quad():
     """
     Tests against the example from Section 7 of "Circular Concrete Tanks
@@ -18,7 +71,7 @@ def test_PCA_7_quad():
 
     fc = 4000                    # Concrete compressive strength (psi)
     E = 57000*(fc)**0.5*(12**2)  # Concrete modulus of elasticity (psf)
-    nu = 0.25 #0.17              # Poisson's ratio for concrete
+    nu = 0.25  # 0.17            # Poisson's ratio for concrete
     tank_model.add_material('Concrete', E, 0.4*E, nu, 150)
 
     mesh_size = 1       # Desired mesh size (ft)
@@ -33,11 +86,10 @@ def test_PCA_7_quad():
 
         avg_Y = (element.i_node.Y + element.j_node.Y
                 + element.m_node.Y + element.n_node.Y)/4
-        
+
         p = (H - avg_Y)*w
 
         tank_model.add_quad_surface_pressure(element.name, p)
-
 
     # Add fixed supports to the base
     for node in tank_model.nodes.values():
@@ -87,6 +139,7 @@ def test_PCA_7_quad():
     # rndr.render_loads = False
     # rndr.render_model()
 
+
 def test_PCA_7_rect():
     """
     Tests against the example from Section 7 of "Circular Concrete Tanks without Prestressing" by PCA.
@@ -94,7 +147,7 @@ def test_PCA_7_rect():
 
     # Create a new finite element model
     tank_model = FEModel3D()
-    
+
     H = 20     # Tank wall height (ft)
     D = 54     # Tank inside diameter (ft)
     R = D/2    # Tank inside radius (ft)
@@ -104,7 +157,7 @@ def test_PCA_7_rect():
 
     fc = 4000                    # Concrete compressive strength (psi)
     E = 57000*(fc)**0.5*(12**2)  # Concrete modulus of elasticity (psf)
-    nu = 0.25 #0.17                    # Poisson's ratio for concrete
+    nu = 0.25  # 0.17            # Poisson's ratio for concrete
     tank_model.add_material('Concrete', E, 0.4*E, nu, 150)
 
     mesh_size = 2       # Desired mesh size (ft)
@@ -113,7 +166,7 @@ def test_PCA_7_rect():
 
     # Add a cylinder mesh to the model
     tank_model.add_cylinder_mesh('MSH1', mesh_size, R, H, t, 'Concrete', 1, 1, center, axis, element_type='Rect')
-    
+
     # Generate the mesh prior to running so we can work with it
     tank_model.meshes['MSH1'].generate()
 
@@ -122,11 +175,10 @@ def test_PCA_7_rect():
 
         avg_Y = (element.i_node.Y + element.j_node.Y
                 + element.m_node.Y + element.n_node.Y)/4
-        
+
         p = (H - avg_Y)*w
 
         tank_model.add_plate_surface_pressure(element.name, p)
-    
 
     # Add fixed supports to the base
     for node in tank_model.nodes.values():
@@ -157,5 +209,8 @@ def test_PCA_7_rect():
     assert My_max > 0, 'Failed plate cylinder sign convention test'
     assert abs(1 - Sx/20000) < 0.05, 'Failed plate cylinder hoop tension test.'
 
+
 if __name__ == '__main__':
+
+    test_rect_mesh_in_plane_stiffness()
     test_PCA_7_quad()

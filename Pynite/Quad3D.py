@@ -4,7 +4,7 @@
 # 3. "A First Course in the Finite Element Method, 4th Edition", Daryl L. Logan
 # 4. "Finite Element Analysis Fundamentals", Richard H. Gallagher
 
-from __future__ import annotations # Allows more recent type hints features
+from __future__ import annotations  # Allows more recent type hints features
 from typing import TYPE_CHECKING, Literal
 
 from math import sin, cos
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 class Quad3D():
     """
     An isoparametric general quadrilateral element, formulated by superimposing an isoparametric DKMQ bending element with an isoparametric plane stress element. Drilling stability is provided by adding a weak rotational spring stiffness at each node. Isotropic behavior is the default, but orthotropic in-plane behavior can be modeled by specifying stiffness modification factors for the element's local x and y axes.
-    
+
     This element performs well for thick and thin plates, and for skewed plates. Minor errors are introduced into the solution due to the drilling approximation. Orthotropic behavior is limited to acting along the plate's local axes.
     """
 
@@ -45,7 +45,7 @@ class Quad3D():
         self.ky_mod: float = ky_mod
 
         self.pressures: List[Tuple[float, str]] = []  # A list of surface pressures [pressure, case='Case 1']
-    
+
         # Quads need a link to the model they belong to
         self.model: FEModel3D = model
 
@@ -113,7 +113,7 @@ class Quad3D():
     #     self.y2 = np.dot(vector_02, y_axis)
     #     self.y3 = np.dot(vector_03, y_axis)
     #     self.y4 = np.dot(vector_04, y_axis)
-    
+
     def _local_coords(self):
         """
         Calculates or recalculates and stores the local (x, y) coordinates for each node of the quadrilateral.
@@ -287,7 +287,7 @@ class Quad3D():
         """
         Returns the Jacobian matrix for the element
         """
-        
+
         # Get the local coordinates for the element
         x1, y1, x2, y2, x3, y3, x4, y4 = self.x1, self.y1, self.x2, self.y2, self.x3, self.y3, self.x4, self.y4
 
@@ -527,7 +527,7 @@ class Quad3D():
         Cm = 1/(1 - nu_xy*nu_yx)*np.array([[   Ex,    nu_yx*Ex,           0         ],
                                            [nu_xy*Ey,    Ey,              0         ],
                                            [    0,        0,     (1 - nu_xy*nu_yx)*G]])
-        
+
         return Cm
 
     def k_b(self) -> NDArray[float64]:
@@ -719,16 +719,16 @@ class Quad3D():
 
         # Sum the bending and membrane stiffness matrices
         return np.add(self.k_b(), self.k_m())
-   
-    def f(self, combo_name:str='Combo 1') -> NDArray[float64]:
+
+    def f(self, combo_name: str='Combo 1') -> NDArray[float64]:
         """
         Returns the quad element's local end force vector
         """
-        
+
         # Calculate and return the plate's local end force vector
         return np.add(self.k() @ self.d(combo_name), self.fer(combo_name))
 
-    def fer(self, combo_name:str='Combo 1') -> NDArray[float64]:
+    def fer(self, combo_name: str='Combo 1') -> NDArray[float64]:
         """
         Returns the quadrilateral's local fixed end reaction vector.
 
@@ -737,7 +737,10 @@ class Quad3D():
         combo_name : string
             The name of the load combination to get the consistent load vector for.
         """
-        
+
+        # Update the local coordinate system
+        self._local_coords()
+
         Hw = lambda xi, eta : 1/4*np.array([[(1 - xi)*(1 - eta), 0, 0, (1 + xi)*(1 - eta), 0, 0, (1 + xi)*(1 + eta), 0, 0, (1 - xi)*(1 + eta), 0, 0]])
 
         # Initialize the fixed end reaction vector
@@ -763,7 +766,7 @@ class Quad3D():
 
                     # Sum the pressures
                     p -= factor*pressure[0]
-        
+
         fer = (Hw(-gp, -gp).T*p*det(self.J(-gp, -gp))
              + Hw( gp, -gp).T*p*det(self.J( gp, -gp))
              + Hw( gp,  gp).T*p*det(self.J( gp,  gp))
@@ -775,7 +778,7 @@ class Quad3D():
         # Step through each term in the unexpanded vector
         # i = Unexpanded vector row
         for i in range(12):
-                
+
             # Find the corresponding term in the expanded vector
 
             # m = Expanded vector row
@@ -785,7 +788,7 @@ class Quad3D():
                 m = 2*i + 1
             if i in [2, 5, 8, 11]:  # indices associated with rotation about y
                 m = 2*i
-                
+
             # Ensure the index is an integer rather than a float
             m = round(m)
 
@@ -802,7 +805,7 @@ class Quad3D():
        # Calculate and return the local displacement vector
        return self.T() @ self.D(combo_name)
 
-    def F(self, combo_name:str='Combo 1') -> NDArray[float64]:
+    def F(self, combo_name: str='Combo 1') -> NDArray[float64]:
         """
         Returns the quad element's global force vector
 
@@ -811,7 +814,7 @@ class Quad3D():
         combo_name : string
             The load combination to get results for.
         """
-        
+
         # Calculate and return the global force vector
         return inv(self.T()) @ self.f(combo_name)
 
@@ -858,7 +861,7 @@ class Quad3D():
         D[21, 0] = self.n_node.RX[combo_name]
         D[22, 0] = self.n_node.RY[combo_name]
         D[23, 0] = self.n_node.RZ[combo_name]
-        
+
         # Return the global displacement vector
         return D
 
@@ -872,7 +875,7 @@ class Quad3D():
 
         # Calculate and return the stiffness matrix in global coordinates
         return inv(T) @ self.k() @ T
- 
+
     # Global fixed end reaction vector
     def FER(self, combo_name:str='Combo 1') -> NDArray[float64]:
         '''

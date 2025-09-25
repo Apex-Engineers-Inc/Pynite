@@ -66,7 +66,33 @@ Here's a list of projects that use Pynite:
 * Phaenotyp (https://github.com/bewegende-Architektur/Phaenotyp) (https://youtu.be/shloSw9HjVI)
 
 # What's New?
-v.1.1.2
+v1.5.0 (in progress)
+* Extended max/min enveloping to plate/quad meshes. Now you can quickly check the max/min mesh forces accross multiple load combinations in one simple command by passing a list of `combo_tags` to the functions.
+* Added max/min enveloping to torsion.
+* Fixed an error in member rotations that has persisted since v1.0.0. Rotations about the member's local x-axis were not being applied correctly. They are now applied using the Rodrigues formula.
+
+v1.4.0
+* Added the ability to check across multiple combinations for max/min member force and deflection results using combo tags. Simply substitute a list of combo tags to the functions instead of a load combination name and the functions will envelope results across any combinations having the given tags. No more searching all combinations manually!
+* Improved the efficiency of member max/min result functions by removing redundant segmentation routine calls.
+* Set the Y-axis to vertical for 3D rendering in Pyvista. This allows the "isometric" button to display the model in the correct orientation in Jupyter.
+* Continued working toward pushover analysis. Development of this feature has been slower than anticipated. Some major hurdles have been overcome, but the code for this feature is still largely experimental, and may be so for sometime.
+
+v1.3.1
+* Reverted to an older Pynite convention for comparing boolean operators. Users who used `1` and `0` for boolean inputs in methods instead of `True` and `False` were experiencing issues. This change allows for multiple ways for users to input booleans.
+
+v1.3.0
+* Fixed shear wall thickness issues. The new `ShearWall` feature was not applying the wall thickness correctly. This has been fixed.
+* Fixed a bug in reaction calculations for positive nodal springs. Only reactions for positive springs (e.g. tension-only) were affected.
+* Refactored `AxialDeflection` to `axial_deflection` to be consistent with the rest of the code.
+* Fixed a bug in reporting axial deflection arrays. The program was throwing exceptions when axial deflection array results were requested.
+* Fixed a bug preventing reports from generating.
+* Added support for html reporting, and better error messages for getting `pdfkit` and `wkhtmltopdf` setup for reporting.
+
+v1.2.0
+* Added the ability to apply loads in steps in the `FEModel3D.analyze` method via the new `num_steps` keyword argument. `num_steps` defaults to 1, but if a higher number is used the load will be split into the specified number of steps and be applied incrementally. This can be very helpful when dealing with complex tension/compression-only scenarios that otherwise may have had trouble converging. Consider using 10 to 20 load steps when dealing with complex T/C-only models. The ability to perform step-wise analysis better approximates nonlinear load-displacement curves and sets `Pynite` up for future nonlinear analysis features.
+* Added P-&Delta; effects to vectorized results. Prior to this fix, member end forces and internal forces were being calculated correctly, but the P-&Delta; flag was not triggered in the methods that used vectorized results. Moment plots and moment arrays were the only items that were affected. Spot checking moments, and checking max/min moments were not affected.
+
+v1.1.2
 * Corrected a long-standing issue transforming quad local bending and membrane stresses to global coordinates. This did not affect quad local stress results. Only if you were converting the results to global coordinates would the issue arise.
 * Array results no longer include extra points at discontinuities. This was affecting some users who were using array results. Note that without the extra points, you may need to use a larger number of points to identify max/min values at discontinuities.
 * Added axial stiffness adjustments to P-&Delta; analysis. P-&Delta; effects primarily affect bending stiffness, but axial stiffness is affected too. While these axial stiffness adjustments are often negligible, they can be important in some cases. `Pynite` now considers axial stiffness adjustments when running P-&Delta; analysis.
@@ -104,21 +130,3 @@ v0.0.98-100
 v0.0.97
 * Fixed physical member load and deflection diagrams. Physical members are a newer feature. Member internal results were being reported correctly, but the diagrams for these members had not been revised to plot correctly. The old method for plain members was still being used. Physical members were not considering that a physical member was made from multiple submembers, and results for each span needed to be combined to get the whole plot.
 * Switched some commonly used python libraries to be installed by default with `Pynite`. Most `Pynite` users will want these libraries installed for full-featured use of `Pynite`. These libraries help with `Pynite` visualizations, plotting, the sparse solver, and `Jupyter Lab` functionality. This is just easier for new python users. I was getting a lot of questions about how to set up libraries, and this takes the guesswork away. This is part of `Pynite's` objective to stay easy to use.
-
-v0.0.96
-* Changed quad elements from MITC4 formulation to DKMQ formulation. This greatly improves plate results at corners and increases the speed with which the plate's stiffness matrix is assembled. MITC4 element code has been retained as legacy code, but is no longer used by the program.
-* ***Breaking Changes***: Implemented snake-case for dictionary names (e.g. `FEModel3D.Nodes` is now `FEModel3D.nodes`). These changes were made to prepare `Pynite` for a v1.0 release that is consistent with the `PEP8` style guide for `python`.
-* Bug fix for tension/conpression-only member internal results. While global results were correct, member internal results were showing results from the first tension/compression only iteration.
-* Member results arrays can now be customized to pick up user defined points. Member results arrays generate results much faster now too.
-
-v0.0.95
-* Bug fix for rendering negative point loads via `Pyvista`. They were being rendered as positive loads. The analysis was not impacted by this bug.
-
-v0.0.94
-* Added rendering via `Pyvista`. This greatly simplified the rendering code and provided a fresh look to the rendereings. Renderings in jupyter are now interactive. Global axes are also now shown in rendereings. To use `Pyvista` instead of `VTK`, use the new `Rendering` library rather than the old `Visualization` library. Rendering via `VTK` directly is still available.
-* Bug fix for member self-weight. The program was throwing exceptions instead of calculating member self-weight. Added a unit test to help prevent this issue from occuring again as code changes.
-* Refactored `material` to be `material_name` in the code. The prior naming convention caused confusion which led to the self-weight bug.
-
-v0.0.93
-* Fixed phantom reactions showing up at unsupported nodes. If there was a support defined at a node, the program was summing reactions for all directions at the node, rather than just the supported directions. This caused the program to report "extra" reaction directions at any supported node (if the user queried them). Element forces/stresses were not affected as this was a post-processing reaction summing issue. Reactions for supported directions were summed correctly, except in the case of nodes with both spring supports and other supports. Only unsupported directions, and nodes with both spring supports and other supports, were showing phantom reactions. This bug also caused statics checks to fail from time to time.
-* Reorganized physical member code to match member code more consistently.

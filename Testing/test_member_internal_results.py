@@ -1,6 +1,7 @@
 from Pynite import FEModel3D
 import math
 
+
 def test_beam_internal_forces():
     """
     Units for this model are kips and feet
@@ -15,7 +16,7 @@ def test_beam_internal_forces():
 
     # Define the supports (simply supported)
     beam.def_support('N1', True, True, True, True, False, False)
-    beam.def_support('N2', True, True, True, False, False, False)
+    beam.def_support('N2', True, True, True, True, False, False)
 
     # Define beam section proerties
     J = 400/12**4
@@ -39,11 +40,11 @@ def test_beam_internal_forces():
 
     # Add a member distributed load along the strong axis
     beam.add_member_dist_load('M1', 'FY', -0.5, -0.5, case='D')
-    beam.add_load_combo('D', {'D':1.0})
+    beam.add_load_combo('D', {'D': 1.0})
 
     # Add a member distributed laod along the weak axis
     beam.add_member_dist_load('M1', 'FZ', -0.5, -0.5, case='D')
-    beam.add_load_combo('D', {'D':1.0})
+    beam.add_load_combo('D', {'D': 1.0})
 
     # Analyze the model
     beam.analyze_linear()
@@ -62,6 +63,11 @@ def test_beam_internal_forces():
     assert math.isclose(beam.members['M1'].shear('Fy', 5, 'D'), 0, abs_tol=0.01), 'Fy internal shear test failed at midpoint of member.'
     assert math.isclose(beam.members['M1'].shear('Fz', 5, 'D'), 0, abs_tol=0.01), 'Fz internal shear test failed at midpoint of member.'
 
+    assert math.isclose(beam.members['M1'].max_shear('Fy', 'D'), 2.5, abs_tol=0.01), 'Fy internal max shear test failed.'
+    assert math.isclose(beam.members['M1'].max_shear('Fz', 'D'), 2.5, abs_tol=0.01), 'Fz internal max shear test failed.'
+    assert math.isclose(beam.members['M1'].min_shear('Fy', 'D'), -2.5, abs_tol=0.01), 'Fy internal min shear test failed.'
+    assert math.isclose(beam.members['M1'].min_shear('Fz', 'D'), -2.5, abs_tol=0.01), 'Fz internal min shear test failed.'
+
     # Check the moment diagram
     assert math.isclose(beam.members['M1'].moment('Mz', 0, 'D'), 0, abs_tol=2), 'Mz internal moment test failed at start of member.'
     assert math.isclose(beam.members['M1'].moment('My', 0, 'D'), 0, abs_tol=2), 'My internal moment test failed at start of member.'
@@ -70,6 +76,11 @@ def test_beam_internal_forces():
     assert math.isclose(beam.members['M1'].moment('Mz', 10, 'D'), 0, abs_tol=2), 'Mz internal moment test failed at end of member.'
     assert math.isclose(beam.members['M1'].moment('My', 10, 'D'), 0, abs_tol=2), 'My internal moment test failed at end of member.'
 
+    assert math.isclose(beam.members['M1'].min_moment('Mz', 'D'), -6.25, abs_tol=2), 'Mz internal min moment test failed.'
+    assert math.isclose(beam.members['M1'].min_moment('My', 'D'), -6.25, abs_tol=2), 'My internal min moment test failed.'
+    assert math.isclose(beam.members['M1'].max_moment('Mz', 'D'), 0, abs_tol=2), 'Mz internal max moment test failed.'
+    assert math.isclose(beam.members['M1'].max_moment('My', 'D'), 0, abs_tol=2), 'My internal max moment test failed.'
+
     # Check the deflected shape
     assert math.isclose(beam.members['M1'].deflection('dy', 0, 'D')*12, 0, abs_tol=0.00001), 'dy internal deflection test failed at start of member.'
     assert math.isclose(beam.members['M1'].deflection('dz', 0, 'D')*12, 0, abs_tol=0.00001), 'dz internal deflection test failed at start of member.'
@@ -77,6 +88,11 @@ def test_beam_internal_forces():
     assert math.isclose(beam.members['M1'].deflection('dy', 5, 'D')*12, 5*(-0.5)*10**4/(384*E*Iy)*12, abs_tol=0.00001), 'dy internal deflection test failed at midpoint of member.'
     assert math.isclose(beam.members['M1'].deflection('dy', 10, 'D')*12, 0, abs_tol=0.00001), 'dy internal deflection test failed at end of member.'
     assert math.isclose(beam.members['M1'].deflection('dz', 10, 'D')*12, 0, abs_tol=0.00001), 'dz internal deflection test failed at end of member.'
+
+    assert math.isclose(beam.members['M1'].max_deflection('dy', 'D')*12, 0, abs_tol=0.00001), 'dy internal max deflection test failed.'
+    assert math.isclose(beam.members['M1'].max_deflection('dz', 'D')*12, 0, abs_tol=0.00001), 'dz internal max deflection test failed.'
+    assert math.isclose(beam.members['M1'].min_deflection('dz', 'D')*12, 5*(-0.5)*10**4/(384*E*Iz)*12, abs_tol=0.00001), 'dz internal min deflection test failed.'
+    assert math.isclose(beam.members['M1'].min_deflection('dy', 'D')*12, 5*(-0.5)*10**4/(384*E*Iy)*12, abs_tol=0.00001), 'dy internal min deflection test failed.'
 
 if __name__ == '__main__':
     test_beam_internal_forces()

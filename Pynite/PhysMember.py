@@ -21,13 +21,13 @@ class PhysMember(Member3D):
     Physical members can detect internal nodes and subdivide themselves into sub-members at those
     nodes.
     """
-    
+
     # '__plt' is used to store the 'pyplot' from matplotlib once it gets imported. Setting it to 'None' for now allows us to defer importing it until it's actually needed.
-    __plt = None  
-    
+    __plt = None
+
     def __init__(self, model: FEModel3D, name: str, i_node: Node3D, j_node: Node3D, material_name: str, section_name: str, rotation: float = 0.0,
                  tension_only: bool = False, comp_only: bool = False) -> None:
-        
+
         super().__init__(model, name, i_node, j_node, material_name, section_name, rotation, tension_only, comp_only)
         self.sub_members: Dict[str, Member3D] = {}
 
@@ -153,10 +153,7 @@ class PhysMember(Member3D):
 
             # Create a new sub-member spanning from i_node to j_node
             # This inherits all material and section properties from the parent physical member
-            new_sub_member = Member3D(
-                self.model, name, i_node, j_node, self.material.name,
-                self.section.name, self.rotation, self.tension_only, self.comp_only
-            )
+            new_sub_member = Member3D(self.model, name, i_node, j_node, self.material.name, self.section.name, self.rotation, self.tension_only, self.comp_only)
 
             # Activate the sub-member for all existing load combinations in the model
             for combo_name in self.model.load_combos:
@@ -212,11 +209,11 @@ class PhysMember(Member3D):
 
             # Store the completed sub-member in the dictionary
             self.sub_members[name] = new_sub_member
-    
+
     def shear(self, Direction: Literal['Fy', 'Fz'], x: float, combo_name: str = 'Combo 1') -> float:
         """
         Returns the shear at a point along the member's length.
-        
+
         Parameters
         ----------
         Direction : string
@@ -228,14 +225,14 @@ class PhysMember(Member3D):
         combo_name : string
             The name of the load combination to get the results for (not the combination itself).
         """
-        
+
         member, x_mod = self.find_member(x)
         return member.shear(Direction, x_mod, combo_name)
-    
+
     def max_shear(self, Direction: Literal['Fy', 'Fz'], combo_name: str = 'Combo 1') -> float:
         """
         Returns the maximum shear in the member for the given direction
-        
+
         Parameters
         ----------
         Direction : string
@@ -277,7 +274,7 @@ class PhysMember(Member3D):
     def plot_shear(self, Direction: Literal['Fy', 'Fz'], combo_name: str = 'Combo 1', n_points: int = 20) -> None:
         """
         Plots the shear diagram for the member
-        
+
         Parameters
         ----------
         Direction : string
@@ -294,7 +291,7 @@ class PhysMember(Member3D):
         if PhysMember.__plt is None:
             from matplotlib import pyplot as plt
             PhysMember.__plt = plt
-        
+
         fig, ax = PhysMember.__plt.subplots()
         ax.axhline(0, color='black', lw=1)
         ax.grid()
@@ -424,7 +421,7 @@ class PhysMember(Member3D):
             if Mmax is None or M > Mmax:
                 Mmax = M
         return Mmax
-    
+
     def min_moment(self, Direction: Literal['My', 'Mz'], combo_name: str = 'Combo 1') -> float:
         """
         Returns the minimum moment in the member for the given direction
@@ -536,11 +533,17 @@ class PhysMember(Member3D):
 
             x_subm_array = x_array[filter] - x_o
 
+            # Check if P-Delta analysis was run
+            if self.model.solution == 'P-Delta':
+                PDelta = True
+            else:
+                PDelta = False
+
             # Check which axis is of interest
             if Direction == 'My':
-                m_array = self._extract_vector_results(submember.SegmentsY, x_subm_array, 'moment')
+                m_array = self._extract_vector_results(submember.SegmentsY, x_subm_array, 'moment', PDelta)
             elif Direction == 'Mz':
-                m_array = self._extract_vector_results(submember.SegmentsZ, x_subm_array, 'moment')
+                m_array = self._extract_vector_results(submember.SegmentsZ, x_subm_array, 'moment', PDelta)
             else:
                 raise ValueError(f"Direction must be 'My' or 'Mz'. {Direction} was given.")
 
@@ -558,7 +561,7 @@ class PhysMember(Member3D):
 
         # Return the results
         return m_array2
-    
+
     def torque(self, x: float, combo_name: str = 'Combo 1') -> float:
         """
         Returns the torsional moment at a point along the member's length
@@ -573,7 +576,7 @@ class PhysMember(Member3D):
         
         member, x_mod = self.find_member(x)
         return member.torque(x_mod, combo_name)
-    
+
     def max_torque(self, combo_name: str = 'Combo 1') -> float:
         
         Tmax = None
@@ -582,7 +585,7 @@ class PhysMember(Member3D):
             if Tmax is None or T > Tmax:
                 Tmax = T
         return Tmax
-    
+
     def min_torque(self, combo_name: str = 'Combo 1') -> float:
         """
         Returns the minimum torsional moment in the member.
@@ -682,7 +685,7 @@ class PhysMember(Member3D):
             x_subm_array = x_array[filter] - x_o
 
             # Check which axis is of interest
-            t_array = self._extract_vector_results(submember.SegmentsZ, x_subm_array, 'torque')
+            t_array = self._extract_vector_results(submember.SegmentsX, x_subm_array, 'torque')
 
             # Adjust from the submember's coordinate system to the physical member's coordinate system
             t_array[0] = [x_o + x for x in t_array[0]]
@@ -713,7 +716,7 @@ class PhysMember(Member3D):
 
         member, x_mod = self.find_member(x)
         return member.axial(x_mod, combo_name)
-    
+
     def max_axial(self, combo_name: str = 'Combo 1') -> float:
         
         Pmax = None
@@ -722,7 +725,7 @@ class PhysMember(Member3D):
             if Pmax is None or P > Pmax:
                 Pmax = P
         return Pmax
-    
+
     def min_axial(self, combo_name: str = 'Combo 1') -> float:
 
         Pmin = None
@@ -829,7 +832,7 @@ class PhysMember(Member3D):
         
         # Return the results
         return a_array2
-    
+
     def deflection(self, Direction: Literal['dx', 'dy', 'dz'], x: float, combo_name: str = 'Combo 1') -> float:
         """
         Returns the deflection at a point along the member's length.
@@ -868,7 +871,7 @@ class PhysMember(Member3D):
             if dmax is None or d > dmax:
                 dmax = d
         return dmax
-    
+
     def min_deflection(self, Direction: Literal['dx', 'dy', 'dz'], combo_name: str = 'Combo 1') -> float:
         """
         Returns the minimum deflection in the member.
@@ -1000,7 +1003,7 @@ class PhysMember(Member3D):
 
             # Check which axis is of interest
             if Direction == 'dx':
-                d_array = self._extract_vector_results(submember.SegmentsX, x_subm_array, 'axial_deflection')
+                d_array = self._extract_vector_results(submember.SegmentsZ, x_subm_array, 'axial_deflection')
             elif Direction == 'dy':
                 d_array = self._extract_vector_results(submember.SegmentsZ, x_subm_array, 'deflection')
             elif Direction == 'dz':
