@@ -307,7 +307,7 @@ class PhysMember(Member3D):
         PhysMember.__plt.title('Member ' + self.name + '\n' + combo_name)
         PhysMember.__plt.show()
 
-    def shear_array(self, Direction: Literal['Fy', 'Fz'], n_points: int, combo_name='Combo 1', x_array=None) -> NDArray[float64]:
+    def shear_array(self, Direction: Literal['Fy', 'Fz'], n_points: int, combo_name='Combo 1', x_array: NDArray[float64] | None = None) -> NDArray[float64]:
         """
         Returns the array of the shear in the physical member for the given direction
 
@@ -480,7 +480,7 @@ class PhysMember(Member3D):
         PhysMember.__plt.title('Member ' + self.name + '\n' + combo_name)
         PhysMember.__plt.show()
 
-    def moment_array(self, Direction: Literal['My', 'Mz'], n_points: int, combo_name='Combo 1', x_array=None) -> NDArray[float64]:
+    def moment_array(self, Direction: Literal['My', 'Mz'], n_points: int, combo_name='Combo 1', x_array: NDArray[float64] | None = None) -> NDArray[float64]:
         """
         Returns the array of the moment in the physical member for the given direction
 
@@ -635,7 +635,7 @@ class PhysMember(Member3D):
         PhysMember.__plt.title('Member ' + self.name + '\n' + combo_name)
         PhysMember.__plt.show()
 
-    def torque_array(self, n_points: int, combo_name='Combo 1', x_array=None) -> NDArray[float64]:
+    def torque_array(self, n_points: int, combo_name='Combo 1', x_array: NDArray[float64] | None = None) -> NDArray[float64]:
         """
         Returns the array of the torque in the physical member.
 
@@ -767,7 +767,7 @@ class PhysMember(Member3D):
         PhysMember.__plt.title('Member ' + self.name + '\n' + combo_name)
         PhysMember.__plt.show()
 
-    def axial_array(self, n_points: int, combo_name='Combo 1', x_array=None) -> NDArray[float64]:
+    def axial_array(self, n_points: int, combo_name='Combo 1', x_array: NDArray[float64] | None = None) -> NDArray[float64]:
         """
         Returns the array of the axial force in the physical member.
 
@@ -946,7 +946,7 @@ class PhysMember(Member3D):
         PhysMember.__plt.title('Member ' + self.name + '\n' + combo_name)
         PhysMember.__plt.show()
 
-    def deflection_array(self, Direction: Literal['dx', 'dy', 'dz'], n_points: int, combo_name='Combo 1', x_array=None) -> NDArray[float64]:
+    def deflection_array(self, Direction: Literal['dx', 'dy', 'dz'], n_points: int, combo_name='Combo 1', x_array: NDArray[float64] | None = None) -> NDArray[float64]:
         """
         Returns the array of the deflection in the physical member for the given direction
 
