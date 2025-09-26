@@ -1,10 +1,12 @@
 # %%
 # `__future__` import required to use bar operators for optional type annotations
 from __future__ import annotations  # Allows more recent type hints features
-from typing import TYPE_CHECKING, cast, Literal
+from typing import TYPE_CHECKING, Any, cast, Literal
 
 from numpy import array, zeros, matmul, subtract
+from numpy._typing._generic_alias import NDArray
 from numpy.linalg import solve
+from scipy.sparse._coo import coo_matrix
 from scipy.spatial import cKDTree
 
 from Pynite.Node3D import Node3D
@@ -772,7 +774,7 @@ class FEModel3D():
         # Return the mesh's name
         return name
 
-    def add_shear_wall(self, name: str, mesh_size: float, length: float, height: float, thickness: float, material_name: str, ky_mod: float = 0.35, plane: Literal['XY', 'YZ'] = 'XY', origin: List[float] = [0, 0, 0]):
+    def add_shear_wall(self, name: str, mesh_size: float, length: float, height: float, thickness: float, material_name: str, ky_mod: float = 0.35, plane: Literal['XY', 'YZ'] = 'XY', origin: List[float] = [0, 0, 0]) -> None:
 
         # Create a new shear wall
         new_shear_wall = ShearWall(self, name, mesh_size, length, height, thickness, material_name, ky_mod, origin, plane)
@@ -882,7 +884,7 @@ class FEModel3D():
         self.solution = None
         return list(removed)
     
-    def delete_node(self, node_name:str):
+    def delete_node(self, node_name:str) -> None:
         """Removes a node from the model. All nodal loads associated with the node and elements attached to the node will also be removed.
 
         :param node_name: The name of the node to be removed.
@@ -901,7 +903,7 @@ class FEModel3D():
         # Flag the model as unsolved
         self.solution = None
 
-    def delete_spring(self, spring_name:str):
+    def delete_spring(self, spring_name:str) -> None:
         """Removes a spring from the model.
 
         :param spring_name: The name of the spring to be removed.
@@ -914,7 +916,7 @@ class FEModel3D():
         # Flag the model as unsolved
         self.solution = None
 
-    def delete_member(self, member_name:str):
+    def delete_member(self, member_name:str) -> None:
         """Removes a member from the model. All member loads associated with the member will also
            be removed.
 
@@ -931,7 +933,7 @@ class FEModel3D():
         
     def def_support(self, node_name:str, support_DX:bool=False, support_DY:bool=False,
                     support_DZ:bool=False, support_RX:bool=False, support_RY:bool=False,
-                    support_RZ:bool=False):
+                    support_RZ:bool=False) -> None:
         """Defines the support conditions at a node. Nodes will default to fully unsupported
            unless specified otherwise.
 
@@ -974,7 +976,7 @@ class FEModel3D():
         # Flag the model as unsolved
         self.solution = None
 
-    def def_support_spring(self, node_name:str, dof:str, stiffness:float, direction:str | None = None):
+    def def_support_spring(self, node_name:str, dof:str, stiffness:float, direction:str | None = None) -> None:
         """Defines a spring support at a node.
 
         :param node_name: The name of the node to apply the spring support to.
@@ -1055,7 +1057,7 @@ class FEModel3D():
     def def_releases(self, member_name:str, Dxi:bool=False, Dyi:bool=False, Dzi:bool=False,
                      Rxi:bool=False, Ryi:bool=False, Rzi:bool=False,
                      Dxj:bool=False, Dyj:bool=False, Dzj:bool=False,
-                     Rxj:bool=False, Ryj:bool=False, Rzj:bool=False):
+                     Rxj:bool=False, Ryj:bool=False, Rzj:bool=False) -> None:
         """Defines member end realeses for a member. All member end releases will default to unreleased unless specified otherwise.
 
         :param member_name: The name of the member to have its releases modified.
@@ -1095,7 +1097,7 @@ class FEModel3D():
         # Flag the model as unsolved
         self.solution = None
 
-    def add_load_combo(self, name:str, factors:dict, combo_tags:list | None = None):
+    def add_load_combo(self, name:str, factors:dict, combo_tags:list[str] | None = None) -> None:
         """Adds a load combination to the model.
 
         :param name: A unique name for the load combination (e.g. '1.2D+1.6L+0.5S' or 'Gravity Combo').
@@ -1115,7 +1117,7 @@ class FEModel3D():
         # Flag the model as solved
         self.solution = None
 
-    def add_node_load(self, node_name:str, direction:str, P:float, case:str = 'Case 1'):
+    def add_node_load(self, node_name:str, direction:str, P:float, case:str = 'Case 1') -> None:
         """Adds a nodal load to the model.
 
         :param node_name: The name of the node where the load is being applied.
@@ -1142,7 +1144,7 @@ class FEModel3D():
         # Flag the model as unsolved
         self.solution = None
 
-    def add_member_pt_load(self, member_name:str, direction:str, P:float, x:float, case:str = 'Case 1'):
+    def add_member_pt_load(self, member_name:str, direction:str, P:float, x:float, case:str = 'Case 1') -> None:
         """Adds a member point load to the model.
 
         :param member_name: The name of the member the load is being applied to.
@@ -1177,7 +1179,7 @@ class FEModel3D():
 
     def add_member_dist_load(self, member_name:str, direction:str, w1:float, w2:float,
                              x1:float | None = None, x2:float | None = None,
-                             case:str = 'Case 1'):
+                             case:str = 'Case 1') -> None:
         """Adds a member distributed load to the model.
 
         :param member_name: The name of the member the load is being appied to.
@@ -1227,7 +1229,7 @@ class FEModel3D():
         # Flag the model as unsolved
         self.solution = None
 
-    def add_member_self_weight(self, global_direction:str, factor:float, case:str = 'Case 1'):
+    def add_member_self_weight(self, global_direction:str, factor:float, case:str = 'Case 1') -> None:
         """Adds self weight to all members in the model. Note that this only works for members. Plate and Quad elements will be ignored by this command.
 
         :param global_direction: The global direction to apply the member load in: 'FX', 'FY', or 'FZ'.
@@ -1261,7 +1263,7 @@ class FEModel3D():
         
         # No need to flag the model as unsolved. That has already been taken care of by our call to `add_member_dist_load`
 
-    def add_plate_surface_pressure(self, plate_name:str, pressure:float, case:str = 'Case 1'):
+    def add_plate_surface_pressure(self, plate_name:str, pressure:float, case:str = 'Case 1') -> None:
         """Adds a surface pressure to the rectangular plate element.
         
 
@@ -1283,7 +1285,7 @@ class FEModel3D():
         # Flag the model as unsolved
         self.solution = None
 
-    def add_quad_surface_pressure(self, quad_name:str, pressure:float, case:str = 'Case 1'):
+    def add_quad_surface_pressure(self, quad_name:str, pressure:float, case:str = 'Case 1') -> None:
         """Adds a surface pressure to the quadrilateral element.
 
         :param quad_name: The name for the quad to add the surface pressure to.
@@ -1304,7 +1306,7 @@ class FEModel3D():
         # Flag the model as unsolved
         self.solution = None
 
-    def delete_loads(self):
+    def delete_loads(self) -> None:
         """Deletes all loads from the model along with any results based on the loads.
         """
 
@@ -1346,7 +1348,7 @@ class FEModel3D():
         # Flag the model as unsolved
         self.solution = None
 
-    def K(self, combo_name='Combo 1', log=False, check_stability=True, sparse=True):
+    def K(self, combo_name: str = 'Combo 1', log: bool = False, check_stability: bool = True, sparse: bool = True)  -> Union[NDArray[float64], coo_matrix]:
         """Returns the model's global stiffness matrix. The stiffness matrix will be returned in
            scipy's sparse lil format, which reduces memory usage and can be easily converted to
            other formats.
@@ -1664,7 +1666,7 @@ class FEModel3D():
         # Return the global stiffness matrix
         return K    
 
-    def Kg(self, combo_name:str='Combo 1', log:bool=False, sparse:bool=True, first_step:bool=True) -> Union[NDArray[float64], coo_matrix]:
+    def Kg(self, combo_name: str = 'Combo 1', log: bool = False, sparse: bool = True, first_step: bool = True) -> Union[NDArray[float64], coo_matrix]:
         """Returns the model's global geometric stiffness matrix. Geometric stiffness of plates is not considered.
 
         :param combo_name: The name of the load combination to derive the matrix for. Defaults to 'Combo 1'.
@@ -1744,7 +1746,7 @@ class FEModel3D():
         # Return the global geometric stiffness matrix
         return Kg
 
-    def Km(self, combo_name: str='Combo 1', push_combo: str='Push', step_num: int=1, log: bool=False, sparse: bool=True) -> Union[NDArray[float64], coo_matrix]:
+    def Km(self, combo_name: str = 'Combo 1', push_combo: str='Push', step_num: int=1, log: bool=False, sparse: bool=True) -> Union[NDArray[float64], coo_matrix]:
         """Calculates the structure's global plastic reduction matrix, which is used for nonlinear inelastic analysis.
 
         :param combo_name: The name of the load combination to get the plastic reduction matrix for. Defaults to 'Combo 1'.
@@ -2363,7 +2365,7 @@ class FEModel3D():
         # Flag the model as solved
         self.solution = 'Nonlinear TC'
 
-    def analyze_PDelta(self, log=False, check_stability=True, max_iter=30, sparse=True, combo_tags=None):
+    def analyze_PDelta(self, log: bool=False, check_stability: bool=True, max_iter: int=30, sparse: bool=True, combo_tags: list[str]|None = None) -> None:
         """Performs second order (P-Delta) analysis. This type of analysis is appropriate for most models using beams, columns and braces. Second order analysis is usually required by material specific codes. The analysis is iterative and takes longer to solve. Models with slender members and/or members with combined bending and axial loads will generally have more significant P-Delta effects. P-Delta effects in plates/quads are not considered.
 
         :param log: Prints updates to the console if set to True. Default is False.
@@ -2419,7 +2421,7 @@ class FEModel3D():
         # Flag the model as solved
         self.solution = 'P-Delta'
 
-    def _not_ready_yet_analyze_pushover(self, log=False, check_stability=True, push_combo='Push', max_iter=30, tol=0.01, sparse=True, combo_tags=None):
+    def _not_ready_yet_analyze_pushover(self, log: bool=False, check_stability: bool=True, push_combo: str='Push', max_iter: int=30, tol: float=0.01, sparse: bool=True, combo_tags: list[str]|None = None) -> None:
 
         if log:
             print('+---------------------+')
@@ -2532,7 +2534,7 @@ class FEModel3D():
         # Flag the model as solved
         self.solution = 'Pushover'
 
-    def unique_name(self, dictionary, prefix):
+    def unique_name(self, dictionary: dict[str, Any], prefix: str) -> str:
         """Returns the next available unique name for a dictionary of objects.
 
         :param dictionary: The dictionary to get a unique name for.
@@ -2553,7 +2555,7 @@ class FEModel3D():
         # Return the next available name
         return name
 
-    def rename(self):
+    def rename(self) -> None:
         """
         Renames all the nodes and elements in the model.
         """
@@ -2603,13 +2605,13 @@ class FEModel3D():
             self.quads[new_key].name = new_key
             id += 1
 
-    def orphaned_nodes(self):
+    def orphaned_nodes(self) -> list[str]:
         """
         Returns a list of the names of nodes that are not attached to any elements.
         """
 
         # Initialize a list of orphaned nodes
-        orphans = []
+        orphans: list[str] = []
 
         # Step through each node in the model
         for node in self.nodes.values():
