@@ -7,6 +7,7 @@ Created on Fri Nov  3 20:58:03 2017
 # %%
 from __future__ import annotations # Allows more recent type hints features
 from typing import TYPE_CHECKING
+from functools import lru_cache
 
 from numpy import zeros
 
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
 
 
 # %%
+@lru_cache
 def FER_PtLoad(P: float, x: float, L: float, Direction: Literal["Fy", "Fz"]) -> NDArray[float64]:
     """
     Returns the fixed end reaction vector for a point load
@@ -54,7 +56,7 @@ def FER_PtLoad(P: float, x: float, L: float, Direction: Literal["Fy", "Fz"]) -> 
 
     return FER
 
-
+@lru_cache
 def FER_Moment(M: float, x: float, L: float, Direction: Literal["My", "Mz"]) -> NDArray[float64]:
     """
     Returns the fixed end reaction vector for a concentrated moment
@@ -94,6 +96,7 @@ def FER_Moment(M: float, x: float, L: float, Direction: Literal["My", "Mz"]) -> 
 
 
 # Returns the fixed end reaction vector for a linear distributed load
+@lru_cache
 def FER_LinLoad(w1: float, w2: float, x1: float, x2: float, L: float, Direction: Literal["Fy", "Fz"]) -> NDArray[float64]:
     """
     Returns the fixed end reaction vector for a linear distributed load
@@ -135,6 +138,7 @@ def FER_LinLoad(w1: float, w2: float, x1: float, x2: float, L: float, Direction:
 
 
 # Returns the fixed end reaction vector for an axial point load
+@lru_cache
 def FER_AxialPtLoad(P: float, x: float, L: float) -> NDArray[float64]:
     """
     Returns the fixed end reaction vector for an axial point load
@@ -160,6 +164,7 @@ def FER_AxialPtLoad(P: float, x: float, L: float) -> NDArray[float64]:
 
 
 # Returns the fixed end reaction vector for a distributed axial load
+@lru_cache
 def FER_AxialLinLoad(p1: float, p2: float, x1: float, x2: float, L: float) -> NDArray[float64]:
     """
     Returns the fixed end reaction vector for a distributed axial load
@@ -187,7 +192,7 @@ def FER_AxialLinLoad(p1: float, p2: float, x1: float, x2: float, L: float) -> ND
 
     return FER
 
-
+@lru_cache
 def FER_Torque(T: float, x: float, L: float) -> NDArray[float64]:
     """
     Returns the fixed end reaction vector for a concentrated torque
