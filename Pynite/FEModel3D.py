@@ -874,9 +874,10 @@ class FEModel3D():
         for name in removed:
             self.nodes.pop(name, None)
 
-        # Step 4: Update _kd_tree_node_names if any nodes were removed
+        # Step 4: Invalidate KDTree if any nodes were removed
         if removed:
-            self._kd_tree_node_names = [name for name in self.nodes]
+            self._kd_tree = None
+            self._kd_tree_node_names = []
     
         self.solution = None
         return list(removed)
