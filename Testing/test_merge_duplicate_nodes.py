@@ -18,9 +18,8 @@ def basic_model() -> Generator[FEModel3D, None, None]:
     model.materials = {'Steel': mat}
     model.sections = {'W10x30': sec}
     
-    # Add load combination
-    combo = LoadCombo('Combo 1')
-    model.load_combos = {'Combo 1': combo}
+    # Load combinations will be added by individual tests as needed
+    model.load_combos = {}
     
     yield model
 
@@ -466,6 +465,138 @@ class TestEdgeCasesAndRobustness:
         assert 'N4' in removed_nodes
 
 
+class TestAnalysisAfterMerging:
+    """Test that structural analysis works correctly after merging duplicate nodes."""
+
+    def test_analysis_with_merged_nodes(self, basic_model: FEModel3D) -> None:
+        """Test that analysis produces correct results after node merging."""
+        # Create a simple beam structure with duplicate nodes
+        basic_model.add_node('N1', 0, 0, 0)
+        basic_model.add_node('N1_DUP', 0.0005, 0, 0)  # Very close to N1
+        basic_model.add_node('N2', 120, 0, 0)  # 10 feet away
+        basic_model.add_node('N2_DUP', 120.0005, 0, 0)  # Very close to N2
+        basic_model.add_node('N3', 240, 0, 0)  # Another 10 feet
+
+        # Add members using duplicate nodes
+        basic_model.add_member('M1', 'N1_DUP', 'N2', 'Steel', 'W10x30')
+        basic_model.add_member('M2', 'N2_DUP', 'N3', 'Steel', 'W10x30')
+
+        # Add boundary conditions - simply supported beam
+        basic_model.def_support('N1', support_DX=True, support_DY=True, support_DZ=True, support_RX=True, support_RZ=True)
+        basic_model.def_support('N3', support_DY=True, support_DZ=True)
+
+        # Add load at midspan
+        basic_model.add_node_load(node_name='N2', direction='FY', P=-10000, case='Case 1')  # 10 kip downward
+
+        # Add load combination that uses Case 1
+        basic_model.add_load_combo('Combo 1', factors={'Case 1': 1.0})
+
+        # Merge duplicate nodes
+        removed_nodes = basic_model.merge_duplicate_nodes(tolerance=0.001)
+
+        # Verify nodes were merged
+        assert len(removed_nodes) == 2
+        assert 'N1_DUP' in removed_nodes
+        assert 'N2_DUP' in removed_nodes
+
+        # Verify member references updated
+        assert basic_model.members['M1'].i_node.name == 'N1'
+        assert basic_model.members['M2'].i_node.name == 'N2'
+
+        # Run analysis - should complete without errors
+        basic_model.analyze(check_statics=False)
+
+        # Verify analysis completed successfully
+        assert basic_model.solution is not None
+
+        # Verify members were discretized
+        for member in basic_model.members.values():
+            assert len(member.sub_members) > 0
+
+        # Check some basic structural behavior - N2 should have downward displacement
+        n2_displacement = basic_model.nodes['N2'].DY['Combo 1']
+        assert n2_displacement < 0, "Mid-span node should deflect downward under load"
+
+        # Check reactions at supports
+        n1_reaction = basic_model.nodes['N1'].RxnFY['Combo 1']
+        n3_reaction = basic_model.nodes['N3'].RxnFY['Combo 1']
+
+        # Total upward reactions should equal applied load
+        total_reaction = n1_reaction + n3_reaction
+        assert abs(total_reaction - 10000) < 1, "Reactions should balance applied load"
+
+    def test_complex_structure_with_merging(self, basic_model: FEModel3D) -> None:
+        """Test analysis of a more complex structure after node merging."""
+        # Create a simple truss with duplicate nodes
+        # Bottom chord
+        basic_model.add_node('N1', 0, 0, 0)
+        basic_model.add_node('N2', 120, 0, 0)
+        basic_model.add_node('N3', 240, 0, 0)
+        basic_model.add_node('N4', 360, 0, 0)
+
+        # Top chord with some duplicates
+        basic_model.add_node('N5', 60, 60, 0)
+        basic_model.add_node('N5_DUP', 60.0005, 60.0005, 0)  # Near N5
+        basic_model.add_node('N6', 180, 60, 0)
+        basic_model.add_node('N6_DUP', 180.0005, 59.9995, 0)  # Near N6
+        basic_model.add_node('N7', 300, 60, 0)
+
+        # Bottom chord members
+        basic_model.add_member('M1', 'N1', 'N2', 'Steel', 'W10x30')
+        basic_model.add_member('M2', 'N2', 'N3', 'Steel', 'W10x30')
+        basic_model.add_member('M3', 'N3', 'N4', 'Steel', 'W10x30')
+
+        # Top chord members using duplicate nodes
+        basic_model.add_member('M4', 'N5_DUP', 'N6', 'Steel', 'W10x30')
+        basic_model.add_member('M5', 'N6_DUP', 'N7', 'Steel', 'W10x30')
+
+        # Web members
+        basic_model.add_member('M6', 'N1', 'N5', 'Steel', 'W10x30')
+        basic_model.add_member('M7', 'N2', 'N5_DUP', 'Steel', 'W10x30')
+        basic_model.add_member('M8', 'N2', 'N6', 'Steel', 'W10x30')
+        basic_model.add_member('M9', 'N3', 'N6_DUP', 'Steel', 'W10x30')
+        basic_model.add_member('M10', 'N3', 'N7', 'Steel', 'W10x30')
+        basic_model.add_member('M11', 'N4', 'N7', 'Steel', 'W10x30')
+
+        # Supports - pinned at N1, roller at N4
+        basic_model.def_support('N1', support_DX=True, support_DY=True, support_DZ=True)
+        basic_model.def_support('N4', support_DY=True, support_DZ=True)
+
+        # Loads on top chord
+        basic_model.add_node_load(node_name='N5', direction='FY', P=-5000, case='Case 1')
+        basic_model.add_node_load(node_name='N6', direction='FY', P=-5000, case='Case 1')
+        basic_model.add_node_load(node_name='N7', direction='FY', P=-5000, case='Case 1')
+
+        # Add load combination that uses Case 1
+        basic_model.add_load_combo('Combo 1', factors={'Case 1': 1.0})
+
+        # Merge duplicate nodes
+        removed_nodes = basic_model.merge_duplicate_nodes(tolerance=0.001)
+
+        # Verify merging occurred
+        assert len(removed_nodes) == 2
+        assert 'N5_DUP' in removed_nodes
+        assert 'N6_DUP' in removed_nodes
+
+        # Run analysis
+        basic_model.analyze(check_statics=False)
+
+        # Verify successful analysis
+        assert basic_model.solution is not None
+
+        # Check equilibrium - sum of reactions should equal sum of loads
+        total_load = 15000  # 3 loads of 5000 each
+        total_reaction = (basic_model.nodes['N1'].RxnFY['Combo 1'] +
+                         basic_model.nodes['N4'].RxnFY['Combo 1'])
+
+        assert abs(total_reaction - total_load) < 1, "Structure should be in equilibrium"
+
+        # Top chord nodes should deflect downward
+        assert basic_model.nodes['N5'].DY['Combo 1'] < 0
+        assert basic_model.nodes['N6'].DY['Combo 1'] < 0
+        assert basic_model.nodes['N7'].DY['Combo 1'] < 0
+
+
 class TestPerformanceAndScale:
     """Test performance and scalability scenarios."""
 
@@ -475,15 +606,15 @@ class TestPerformanceAndScale:
         for i in range(20):
             for j in range(20):
                 basic_model.add_node(f'N_{i}_{j}', i * 1.0, j * 1.0, 0)
-        
+
         # Add some duplicate nodes
         basic_model.add_node('DUP1', 5.0001, 5.0, 0)  # Near N_5_5
         basic_model.add_node('DUP2', 10.0001, 10.0, 0)  # Near N_10_10
         basic_model.add_node('DUP3', 15.0001, 15.0, 0)  # Near N_15_15
-        
+
         initial_count = len(basic_model.nodes)
         removed_nodes = basic_model.merge_duplicate_nodes(tolerance=0.001)
-        
+
         # Should merge the 3 duplicate nodes
         assert len(removed_nodes) == 3
         assert len(basic_model.nodes) == initial_count - 3

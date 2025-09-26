@@ -57,11 +57,11 @@ def _prepare_model(model: FEModel3D) -> None:
         for combo_name in model.load_combos.keys():
             phys_member.active[combo_name] = True
 
+    # build the KDTree for fast spatial queries before renumbering, since discretize() uses it
+    _build_kdtree(model)
+
     # Assign an internal ID to all nodes and elements in the model. This number is different from the name used by the user to identify nodes and elements.
     _renumber(model)
-
-    # build the KDTree for fast spatial queries
-    _build_kdtree(model)
 
 
 def _identify_combos(model: FEModel3D, combo_tags: List[str] | None = None) -> List[LoadCombo]:
