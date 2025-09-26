@@ -4,7 +4,6 @@ from __future__ import annotations  # Allows more recent type hints features
 from typing import TYPE_CHECKING, Any, cast, Literal
 
 from numpy import array, zeros, matmul, subtract
-from numpy._typing._generic_alias import NDArray
 from numpy.linalg import solve
 from scipy.sparse._coo import coo_matrix
 from scipy.spatial import cKDTree
@@ -2421,7 +2420,7 @@ class FEModel3D():
         # Flag the model as solved
         self.solution = 'P-Delta'
 
-    def _not_ready_yet_analyze_pushover(self, log: bool=False, check_stability: bool=True, push_combo: str='Push', max_iter: int=30, tol: float=0.01, sparse: bool=True, combo_tags: list[str] | None = None) -> None:
+    def _not_ready_yet_analyze_pushover(self, log: bool=False, check_stability: bool=True, push_combo: str='Push', max_iter: int=30, tol: float=0.01, sparse: bool=True, combo_tags: list[str] |None = None) -> None:
 
         if log:
             print('+---------------------+')
