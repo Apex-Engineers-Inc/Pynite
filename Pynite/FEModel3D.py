@@ -2111,7 +2111,7 @@ class FEModel3D():
     #     # Flag the model as solved
     #     self.solution = 'Linear TC'
 
-    def analyze_linear(self, log: bool = False, check_stability: bool = True, check_statics: bool = False, sparse: bool = True, combo_tags: list[str] = None) -> None:
+    def analyze_linear(self, log: bool = False, check_stability: bool = True, check_statics: bool = False, sparse: bool = True, combo_tags: list[str] | None = None) -> None:
         """Performs first-order static analysis. This analysis procedure is much faster since it only assembles the global stiffness matrix once, rather than once for each load combination. It is not appropriate when non-linear behavior such as tension/compression only analysis or P-Delta analysis are required.
 
         :param log: Prints the analysis log to the console if set to True. Default is False.
@@ -2204,7 +2204,7 @@ class FEModel3D():
         # Flag the model as solved
         self.solution = 'Linear'
 
-    def analyze(self, log: bool = False, check_stability: bool = True, check_statics: bool = False, max_iter: int = 30, sparse: bool = True, combo_tags: list[str] = None, spring_tolerance: float = 0, member_tolerance: float = 0, num_steps: int = 1) -> None:
+    def analyze(self, log: bool = False, check_stability: bool = True, check_statics: bool = False, max_iter: int = 30, sparse: bool = True, combo_tags: list[str] | None = None, spring_tolerance: float = 0, member_tolerance: float = 0, num_steps: int = 1) -> None:
         """
         Performs a first-order elastic analysis of the model.
 
@@ -2365,7 +2365,7 @@ class FEModel3D():
         # Flag the model as solved
         self.solution = 'Nonlinear TC'
 
-    def analyze_PDelta(self, log: bool=False, check_stability: bool=True, max_iter: int=30, sparse: bool=True, combo_tags: list[str]|None = None) -> None:
+    def analyze_PDelta(self, log: bool=False, check_stability: bool=True, max_iter: int=30, sparse: bool=True, combo_tags: list[str] | None = None) -> None:
         """Performs second order (P-Delta) analysis. This type of analysis is appropriate for most models using beams, columns and braces. Second order analysis is usually required by material specific codes. The analysis is iterative and takes longer to solve. Models with slender members and/or members with combined bending and axial loads will generally have more significant P-Delta effects. P-Delta effects in plates/quads are not considered.
 
         :param log: Prints updates to the console if set to True. Default is False.
@@ -2421,7 +2421,7 @@ class FEModel3D():
         # Flag the model as solved
         self.solution = 'P-Delta'
 
-    def _not_ready_yet_analyze_pushover(self, log: bool=False, check_stability: bool=True, push_combo: str='Push', max_iter: int=30, tol: float=0.01, sparse: bool=True, combo_tags: list[str]|None = None) -> None:
+    def _not_ready_yet_analyze_pushover(self, log: bool=False, check_stability: bool=True, push_combo: str='Push', max_iter: int=30, tol: float=0.01, sparse: bool=True, combo_tags: list[str] |None = None) -> None:
 
         if log:
             print('+---------------------+')
