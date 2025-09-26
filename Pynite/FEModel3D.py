@@ -4,7 +4,6 @@ from __future__ import annotations  # Allows more recent type hints features
 from typing import TYPE_CHECKING, Any, cast, Literal
 
 from numpy import array, zeros, matmul, subtract
-from numpy._typing._generic_alias import NDArray
 from numpy.linalg import solve
 from scipy.sparse._coo import coo_matrix
 from scipy.spatial import cKDTree
