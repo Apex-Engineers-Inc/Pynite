@@ -23,15 +23,15 @@ setuptools.setup(
         'numpy',
         'PrettyTable',
         'scipy',
-        'matplotlib',
     ],
     extras_require = {
-        'all': ['Ipython', 'vtk', 'pyvista[all,trame]', 'trame_jupyter_extension', 'ipywidgets', 'pdfkit', 'Jinja2', 'numba>=0.56'],
+        'all': ['Ipython', 'vtk', 'pyvista[all,trame]', 'trame_jupyter_extension', 'ipywidgets', 'pdfkit', 'Jinja2', 'numba>=0.56', 'matplotlib'],
         'numba': ['numba>=0.56'],
         'vtk':  ['IPython', 'vtk'],
         'pyvista': ['pyvista[all,trame]', 'trame_jupyter_extension', 'ipywidgets'],
         'reporting': ['pdfkit', 'Jinja2'],
-        'derivations': ['jupyterlab', 'sympy']
+        'derivations': ['jupyterlab', 'sympy'],
+        'plotting': ['matplotlib']
     },
     include_package_data = True,
     python_requires = '>=3.7',

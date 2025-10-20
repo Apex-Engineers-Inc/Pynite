@@ -6,13 +6,11 @@ from typing import TYPE_CHECKING, Literal
 
 from prettytable import PrettyTable
 
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
-
 if TYPE_CHECKING:
     from typing import List, Dict, Tuple
     from Pynite.Quad3D import Quad3D
     import matplotlib.figure
+    from matplotlib.axes import Axes
 
 
 class ShearWall():
@@ -630,14 +628,22 @@ class ShearWall():
                     beam.plates.append(plate)
 
     def draw_piers(self, show: bool = False) -> None | matplotlib.figure.Figure:
-        
+
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            raise ImportError(
+                "Matplotlib is required for plotting features.\n"
+                "Install with: pip install PyNiteFEA[plotting]"
+            ) from e
+
         fig, ax = plt.subplots()
 
         ax.patch.set_facecolor((0.8, 0.8, 0.8))
 
         for pier in self.piers.values():
             self._add_rectangle(ax, pier.x, pier.y, pier.width, pier.height, pier.name)
-        
+
         # Adjust the aspect ratio of the plot
         ax.set_aspect('equal')
 
@@ -649,7 +655,15 @@ class ShearWall():
         else: return plt
 
     def draw_coupling_beams(self, show: bool = False) -> None | matplotlib.figure.Figure:
-        
+
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            raise ImportError(
+                "Matplotlib is required for plotting features.\n"
+                "Install with: pip install PyNiteFEA[plotting]"
+            ) from e
+
         fig, ax = plt.subplots()
 
         ax.patch.set_facecolor((0.8, 0.8, 0.8))
@@ -663,7 +677,7 @@ class ShearWall():
 
         for beam in self.coupling_beams.values():
             self._add_rectangle(ax, beam.x, beam.y, beam.length, beam.height, beam.name, 'white')
-        
+
         # Adjust the aspect ratio of the plot
         ax.set_aspect('equal')
 
@@ -673,10 +687,19 @@ class ShearWall():
         # show plot or return it
         if show == True: plt.show()
         else: return plt
-
-    def _add_rectangle(self, ax: matplotlib.axes.Axes, x: float, y: float, w: float, h: float, name: str, color: str = 'white') -> None:
+    def _add_rectangle(self, ax: Axes, x: float, y: float, w: float, h: float, name: str, color: str = 'white') -> None:
         """Adds a rectangle to the pyplot
         """
+
+        try:
+            import matplotlib.patches as patches
+        except ImportError as e:
+            raise ImportError(
+                "Matplotlib is required for plotting features.\n"
+                "Install with: pip install PyNiteFEA[plotting]"
+            ) from e
+
+        Rectangle = patches.Rectangle
 
         # create rectangle
         rect = Rectangle((x, y), w, h, linewidth=1, edgecolor='r', facecolor=color)

@@ -3,7 +3,6 @@ from json import load
 import warnings
 from typing import TYPE_CHECKING, Callable, List, Any
 
-from IPython.display import Image
 import numpy as np
 import pyvista as pv
 import math

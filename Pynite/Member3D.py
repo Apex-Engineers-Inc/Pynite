@@ -45,9 +45,6 @@ class Member3D():
     Most users will not need to interface with this class directly. Rather, the physical member class, which inherits from this class and stitches together a seires of colinear `Member3D` objects will be more useful.
     """
 
-    # '__plt' is used to store the 'pyplot' from matplotlib once it gets imported. Setting it to 'None' for now allows us to defer importing it until it's actually needed.
-    __plt = None
-
 # %%
     def __init__(self, model: FEModel3D, name: str, i_node: Node3D,
                  j_node: Node3D, material_name: str, section_name: str,
@@ -1070,22 +1067,25 @@ class Member3D():
             self._segment_member(combo_name)
             self._solved_combo = self.model.load_combos[combo_name]
 
-        # Import 'pyplot' if not already done
-        if Member3D.__plt is None:
-            from matplotlib import pyplot as plt
-            Member3D.__plt = plt
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            raise ImportError(
+                "Matplotlib is required for plotting features.\n"
+                "Install with: pip install PyNiteFEA[plotting]"
+            ) from e
 
-        fig, ax = Member3D.__plt.subplots()
+        fig, ax = plt.subplots()
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
         x, V = self.shear_array(Direction, n_points, combo_name)
 
-        Member3D.__plt.plot(x, V)
-        Member3D.__plt.ylabel('Shear')
-        Member3D.__plt.xlabel('Location')
-        Member3D.__plt.title('Member ' + self.name + '\n' + combo_name)
-        Member3D.__plt.show()    
+        plt.plot(x, V)
+        plt.ylabel('Shear')
+        plt.xlabel('Location')
+        plt.title('Member ' + self.name + '\n' + combo_name)
+        plt.show()    
 
     def shear_array(self, Direction: Literal['Fy', 'Fz'], n_points: int, combo_name='Combo 1', x_array=None) -> NDArray[float64]:
         """
@@ -1359,23 +1359,26 @@ class Member3D():
             self._segment_member(combo_name)
             self._solved_combo = self.model.load_combos[combo_name]
 
-        # Import 'pyplot' if not already done
-        if Member3D.__plt is None:
-            from matplotlib import pyplot as plt
-            Member3D.__plt = plt
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            raise ImportError(
+                "Matplotlib is required for plotting features.\n"
+                "Install with: pip install PyNiteFEA[plotting]"
+            ) from e
 
-        fig, ax = Member3D.__plt.subplots()
+        fig, ax = plt.subplots()
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
         # Generate the moment diagram coordinates
         x, M = self.moment_array(Direction, n_points, combo_name)
 
-        Member3D.__plt.plot(x, M)
-        Member3D.__plt.ylabel('Moment')
-        Member3D.__plt.xlabel('Location')
-        Member3D.__plt.title('Member ' + self.name + '\n' + combo_name)
-        Member3D.__plt.show()
+        plt.plot(x, M)
+        plt.ylabel('Moment')
+        plt.xlabel('Location')
+        plt.title('Member ' + self.name + '\n' + combo_name)
+        plt.show()
 
     def moment_array(self, Direction: Literal['My', 'Mz'], n_points: int, combo_name: str = 'Combo 1', x_array: Optional[NDArray[float64]] = None) -> NDArray[float64]:
         """
@@ -1599,22 +1602,25 @@ class Member3D():
             self._segment_member(combo_name)
             self._solved_combo = self.model.load_combos[combo_name]
 
-        # Import 'pyplot' if not already done
-        if Member3D.__plt is None:
-            from matplotlib import pyplot as plt
-            Member3D.__plt = plt
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            raise ImportError(
+                "Matplotlib is required for plotting features.\n"
+                "Install with: pip install PyNiteFEA[plotting]"
+            ) from e
 
-        fig, ax = Member3D.__plt.subplots()
+        fig, ax = plt.subplots()
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
         x, T = self.torque_array(n_points, combo_name)
 
-        Member3D.__plt.plot(x, T)
-        Member3D.__plt.ylabel('Torsional Moment (Warping Torsion Not Included)') # Torsion results are for pure torsion. Torsional warping has not been considered
-        Member3D.__plt.xlabel('Location')
-        Member3D.__plt.title('Member ' + self.name + '\n' + combo_name)
-        Member3D.__plt.show()
+        plt.plot(x, T)
+        plt.ylabel('Torsional Moment (Warping Torsion Not Included)') # Torsion results are for pure torsion. Torsional warping has not been considered
+        plt.xlabel('Location')
+        plt.title('Member ' + self.name + '\n' + combo_name)
+        plt.show()
 
     def torque_array(self, n_points, combo_name='Combo 1', x_array = None) -> NDArray[float64]:
         """
@@ -1812,23 +1818,26 @@ class Member3D():
         if self._solved_combo is None or combo_name != self._solved_combo.name:
             self._segment_member(combo_name)
             self._solved_combo = self.model.load_combos[combo_name]
-        
-        # Import 'pyplot' if not already done
-        if Member3D.__plt is None:
-            from matplotlib import pyplot as plt
-            Member3D.__plt = plt
 
-        fig, ax = Member3D.__plt.subplots()
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            raise ImportError(
+                "Matplotlib is required for plotting features.\n"
+                "Install with: pip install PyNiteFEA[plotting]"
+            ) from e
+
+        fig, ax = plt.subplots()
         ax.axhline(0, color='black', lw=1)
         ax.grid()
-        
+
         x, P = self.axial_array(n_points, combo_name)
 
-        Member3D.__plt.plot(x, P)
-        Member3D.__plt.ylabel('Axial Force')
-        Member3D.__plt.xlabel('Location')
-        Member3D.__plt.title('Member ' + self.name + '\n' + combo_name)
-        Member3D.__plt.show()    
+        plt.plot(x, P)
+        plt.ylabel('Axial Force')
+        plt.xlabel('Location')
+        plt.title('Member ' + self.name + '\n' + combo_name)
+        plt.show()    
 
     def axial_array(self, n_points: int, combo_name: str = 'Combo 1', x_array: Optional[NDArray[float64]] = None) -> NDArray[float64]:
         """
@@ -2087,23 +2096,26 @@ class Member3D():
         if self._solved_combo is None or combo_name != self._solved_combo.name:
             self._segment_member(combo_name)
             self._solved_combo = self.model.load_combos[combo_name]
-                
-        # Import 'pyplot' if not already done
-        if Member3D.__plt is None:
-            from matplotlib import pyplot as plt
-            Member3D.__plt = plt
-        
-        fig, ax = Member3D.__plt.subplots()
+
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            raise ImportError(
+                "Matplotlib is required for plotting features.\n"
+                "Install with: pip install PyNiteFEA[plotting]"
+            ) from e
+
+        fig, ax = plt.subplots()
         ax.axhline(0, color='black', lw=1)
         ax.grid()
-        
+
         x, d = self.deflection_array(Direction, n_points, combo_name)
 
-        Member3D.__plt.plot(x, d)
-        Member3D.__plt.ylabel('Deflection')
-        Member3D.__plt.xlabel('Location')
-        Member3D.__plt.title('Member ' + self.name + '\n' + combo_name)
-        Member3D.__plt.show()
+        plt.plot(x, d)
+        plt.ylabel('Deflection')
+        plt.xlabel('Location')
+        plt.title('Member ' + self.name + '\n' + combo_name)
+        plt.show()
 
     def deflection_array(self, Direction: Literal['dx', 'dy', 'dz'], n_points: int, combo_name: str = 'Combo 1', x_array: Optional[NDArray[float64]] = None) -> NDArray[float64]:
         """
@@ -2247,23 +2259,26 @@ class Member3D():
         if self._solved_combo is None or combo_name != self._solved_combo.name:
             self._segment_member(combo_name)
             self._solved_combo = self.model.load_combos[combo_name]
-                
-        # Import 'pyplot' if not already done
-        if Member3D.__plt is None:
-            from matplotlib import pyplot as plt
-            Member3D.__plt = plt
-        
-        fig, ax = Member3D.__plt.subplots()
+
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            raise ImportError(
+                "Matplotlib is required for plotting features.\n"
+                "Install with: pip install PyNiteFEA[plotting]"
+            ) from e
+
+        fig, ax = plt.subplots()
         ax.axhline(0, color='black', lw=1)
         ax.grid()
-        
+
         x, d_relative = self.rel_deflection_array(Direction, n_points, combo_name)
 
-        Member3D.__plt.plot(x, d_relative)
-        Member3D.__plt.ylabel('Relative Deflection')
-        Member3D.__plt.xlabel('Location')
-        Member3D.__plt.title('Member ' + self.name + '\n' + combo_name)
-        Member3D.__plt.show()
+        plt.plot(x, d_relative)
+        plt.ylabel('Relative Deflection')
+        plt.xlabel('Location')
+        plt.title('Member ' + self.name + '\n' + combo_name)
+        plt.show()
 
     def rel_deflection_array(self, Direction: Literal['dx', 'dy', 'dz'], n_points: int, combo_name: str = 'Combo 1', x_array: Optional[NDArray[float64]] = None) -> NDArray[float64]:
         """

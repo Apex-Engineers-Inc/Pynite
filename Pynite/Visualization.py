@@ -2,7 +2,6 @@ from __future__ import annotations # Allows more recent type hints features
 from json import load
 import warnings
 
-from IPython.display import Image
 from numpy import array, empty, append, cross
 from numpy.linalg import norm
 import vtk
@@ -183,6 +182,13 @@ class Renderer():
             window.Finalize()
 
             if filepath == 'console':
+                try:
+                    from IPython.display import Image
+                except ImportError as e:
+                    raise ImportError(
+                        "IPython is required for console display.\n"
+                        "Install with: pip install PyNiteFEA[vtk]"
+                    ) from e
                 return Image(fig_file)
             elif filepath == 'BytesIO':
                 from io import BytesIO

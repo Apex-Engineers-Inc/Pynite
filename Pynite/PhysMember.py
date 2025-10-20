@@ -22,9 +22,6 @@ class PhysMember(Member3D):
     nodes.
     """
 
-    # '__plt' is used to store the 'pyplot' from matplotlib once it gets imported. Setting it to 'None' for now allows us to defer importing it until it's actually needed.
-    __plt = None
-
     def __init__(self, model: FEModel3D, name: str, i_node: Node3D, j_node: Node3D, material_name: str, section_name: str, rotation: float = 0.0,
                  tension_only: bool = False, comp_only: bool = False) -> None:
 
@@ -415,12 +412,15 @@ class PhysMember(Member3D):
             The number of points used to generate the plot
         """
 
-        # Import 'pyplot' if not already done
-        if PhysMember.__plt is None:
-            from matplotlib import pyplot as plt
-            PhysMember.__plt = plt
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            raise ImportError(
+                "Matplotlib is required for plotting features.\n"
+                "Install with: pip install PyNiteFEA[plotting]"
+            ) from e
 
-        fig, ax = PhysMember.__plt.subplots()
+        fig, ax = plt.subplots()
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -429,11 +429,11 @@ class PhysMember(Member3D):
         x = V_array[0]
         V = V_array[1]
 
-        PhysMember.__plt.plot(x, V)
-        PhysMember.__plt.ylabel('Shear')
-        PhysMember.__plt.xlabel('Location')
-        PhysMember.__plt.title('Member ' + self.name + '\n' + combo_name)
-        PhysMember.__plt.show()
+        plt.plot(x, V)
+        plt.ylabel('Shear')
+        plt.xlabel('Location')
+        plt.title('Member ' + self.name + '\n' + combo_name)
+        plt.show()
 
     def shear_array(self, Direction: Literal['Fy', 'Fz'], n_points: int, combo_name='Combo 1', x_array=None) -> NDArray[float64]:
         """
@@ -588,12 +588,15 @@ class PhysMember(Member3D):
             The number of points used to generate the plot
         """
 
-        # Import 'pyplot' if not already done
-        if PhysMember.__plt is None:
-            from matplotlib import pyplot as plt
-            PhysMember.__plt = plt
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            raise ImportError(
+                "Matplotlib is required for plotting features.\n"
+                "Install with: pip install PyNiteFEA[plotting]"
+            ) from e
 
-        fig, ax = PhysMember.__plt.subplots()
+        fig, ax = plt.subplots()
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -602,11 +605,11 @@ class PhysMember(Member3D):
         x = M_array[0]
         M = M_array[1]
 
-        PhysMember.__plt.plot(x, M)
-        PhysMember.__plt.ylabel('Moment')
-        PhysMember.__plt.xlabel('Location')
-        PhysMember.__plt.title('Member ' + self.name + '\n' + combo_name)
-        PhysMember.__plt.show()
+        plt.plot(x, M)
+        plt.ylabel('Moment')
+        plt.xlabel('Location')
+        plt.title('Member ' + self.name + '\n' + combo_name)
+        plt.show()
 
     def moment_array(self, Direction: Literal['My', 'Mz'], n_points: int, combo_name='Combo 1', x_array=None) -> NDArray[float64]:
         """
@@ -743,12 +746,15 @@ class PhysMember(Member3D):
             The number of points used to generate the plot
         """
 
-        # Import 'pyplot' if not already done
-        if PhysMember.__plt is None:
-            from matplotlib import pyplot as plt
-            PhysMember.__plt = plt
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            raise ImportError(
+                "Matplotlib is required for plotting features.\n"
+                "Install with: pip install PyNiteFEA[plotting]"
+            ) from e
 
-        fig, ax = PhysMember.__plt.subplots()
+        fig, ax = plt.subplots()
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -757,11 +763,11 @@ class PhysMember(Member3D):
         x = T_array[0]
         T = T_array[1]
 
-        PhysMember.__plt.plot(x, T)
-        PhysMember.__plt.ylabel('Torque')
-        PhysMember.__plt.xlabel('Location')
-        PhysMember.__plt.title('Member ' + self.name + '\n' + combo_name)
-        PhysMember.__plt.show()
+        plt.plot(x, T)
+        plt.ylabel('Torque')
+        plt.xlabel('Location')
+        plt.title('Member ' + self.name + '\n' + combo_name)
+        plt.show()
 
     def torque_array(self, n_points: int, combo_name='Combo 1', x_array=None) -> NDArray[float64]:
         """
@@ -875,12 +881,15 @@ class PhysMember(Member3D):
             The number of points used to generate the plot
         """
 
-        # Import 'pyplot' if not already done
-        if PhysMember.__plt is None:
-            from matplotlib import pyplot as plt
-            PhysMember.__plt = plt
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            raise ImportError(
+                "Matplotlib is required for plotting features.\n"
+                "Install with: pip install PyNiteFEA[plotting]"
+            ) from e
 
-        fig, ax = PhysMember.__plt.subplots()
+        fig, ax = plt.subplots()
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -889,11 +898,11 @@ class PhysMember(Member3D):
         x = P_array[0]
         P = P_array[1]
 
-        PhysMember.__plt.plot(x, P)
-        PhysMember.__plt.ylabel('Axial Force')
-        PhysMember.__plt.xlabel('Location')
-        PhysMember.__plt.title('Member ' + self.name + '\n' + combo_name)
-        PhysMember.__plt.show()
+        plt.plot(x, P)
+        plt.ylabel('Axial Force')
+        plt.xlabel('Location')
+        plt.title('Member ' + self.name + '\n' + combo_name)
+        plt.show()
 
     def axial_array(self, n_points: int, combo_name='Combo 1', x_array=None) -> NDArray[float64]:
         """
@@ -1055,12 +1064,15 @@ class PhysMember(Member3D):
             The number of points used to generate the plot
         """
 
-        # Import 'pyplot' if not already done
-        if PhysMember.__plt is None:
-            from matplotlib import pyplot as plt
-            PhysMember.__plt = plt
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            raise ImportError(
+                "Matplotlib is required for plotting features.\n"
+                "Install with: pip install PyNiteFEA[plotting]"
+            ) from e
 
-        fig, ax = PhysMember.__plt.subplots()
+        fig, ax = plt.subplots()
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -1068,11 +1080,11 @@ class PhysMember(Member3D):
         x = d_array[0]
         d = d_array[1]
 
-        PhysMember.__plt.plot(x, d)
-        PhysMember.__plt.ylabel('Deflection')
-        PhysMember.__plt.xlabel('Location')
-        PhysMember.__plt.title('Member ' + self.name + '\n' + combo_name)
-        PhysMember.__plt.show()
+        plt.plot(x, d)
+        plt.ylabel('Deflection')
+        plt.xlabel('Location')
+        plt.title('Member ' + self.name + '\n' + combo_name)
+        plt.show()
 
     def deflection_array(self, Direction: Literal['dx', 'dy', 'dz'], n_points: int, combo_name='Combo 1', x_array=None) -> NDArray[float64]:
         """

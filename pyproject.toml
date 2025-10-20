@@ -21,7 +21,6 @@ dependencies = [
     "numpy",
     "PrettyTable",
     "scipy",
-    "matplotlib",
     "pytest>=8.3.5",
     "pip>=25.0.1",
 ]
@@ -36,12 +35,14 @@ all = [
     "pdfkit",
     "Jinja2",
     "numba>=0.56",
+    "matplotlib",
 ]
 numba = ["numba>=0.56"]
 vtk = ["IPython", "vtk"]
 pyvista = ["pyvista[all,trame]", "trame_jupyter_extension", "ipywidgets"]
 reporting = ["pdfkit", "Jinja2"]
 derivations = ["jupyterlab", "sympy"]
+plotting = ["matplotlib"]
 dev = ["pytest", "pyinstrument", "poethepoet"]
 
 [project.urls]
