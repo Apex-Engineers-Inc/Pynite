@@ -18,13 +18,13 @@ class Renderer():
         self.model = model
 
         # Default settings for rendering
-        self.annotation_size = 5
-        self.deformed_shape = False
-        self.deformed_scale = 30
-        self.render_nodes = True
-        self.render_loads = True
+        self.annotation_size: float = 5.0
+        self.deformed_shape: bool = False
+        self.deformed_scale: int = 30
+        self.render_nodes: bool = True
+        self.render_loads: bool = True
         self.color_map = None
-        self.combo_name = 'Combo 1'
+        self.combo_name: str = 'Combo 1'
         self.case = None
         self.labels = True
         self.scalar_bar = False

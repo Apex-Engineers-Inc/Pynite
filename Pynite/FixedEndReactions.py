@@ -8,7 +8,14 @@ Created on Fri Nov  3 20:58:03 2017
 from __future__ import annotations # Allows more recent type hints features
 from typing import TYPE_CHECKING
 
-from numpy import zeros
+from Pynite.numba_kernels import (
+    fer_axial_linear_load,
+    fer_axial_point_load,
+    fer_linear_transverse_load,
+    fer_moment,
+    fer_point_load,
+    fer_torque,
+)
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -34,25 +41,15 @@ def FER_PtLoad(P: float, x: float, L: float, Direction: Literal["Fy", "Fz"]) -> 
             "Fy" = Force on the member's local y-axis
             "Fz" = Force on the member's local z-axis
     """
-    # Define variables
-    b = L - x
-
-    # Create the fixed end reaction vector
-    FER = zeros((12, 1))
-
-    # Populate the fixed end reaction vector
+    # Translate the friendly axis label into the integer that the Numba kernel expects
     if Direction == "Fy":
-        FER[1, 0] = -P*b**2*(L+2*x)/L**3
-        FER[5, 0] = -P*x*b**2/L**2
-        FER[7, 0] = -P*x**2*(L+2*b)/L**3
-        FER[11, 0] = P*x**2*b/L**2
+        axis = 0
     elif Direction == "Fz":
-        FER[2, 0] = -P*b**2*(L+2*x)/L**3
-        FER[4, 0] = P*x*b**2/L**2
-        FER[8, 0] = -P*x**2*(L+2*b)/L**3
-        FER[10, 0] = -P*x**2*b/L**2
+        axis = 1
+    else:
+        raise ValueError(f"Direction must be 'Fy' or 'Fz'. Received '{Direction}'.")
 
-    return FER
+    return fer_point_load(P, x, L, axis)
 
 
 def FER_Moment(M: float, x: float, L: float, Direction: Literal["My", "Mz"]) -> NDArray[float64]:
@@ -73,24 +70,15 @@ def FER_Moment(M: float, x: float, L: float, Direction: Literal["My", "Mz"]) -> 
             "Mz" = Moment applied about the local z-axis
     """
 
-    # Define variables
-    b = L - x
+    # Convert rotational axis strings into the kernel's 0/1 index
+    if Direction == "My":
+        axis = 0
+    elif Direction == "Mz":
+        axis = 1
+    else:
+        raise ValueError(f"Direction must be 'My' or 'Mz'. Received '{Direction}'.")
 
-    # Create the fixed end reaction vector
-    FER = zeros((12, 1))
-
-    # Populate the fixed end reaction vector
-    if Direction == "Mz":
-        FER[1, 0] = 6*M*x*b/L**3
-        FER[5, 0] = M*b*(2*x-b)/L**2
-        FER[7, 0] = -6*M*x*b/L**3
-        FER[11, 0] = M*x*(2*b-x)/L**2
-    elif Direction == "My":
-        FER[2, 0] = -6*M*x*b/L**3
-        FER[4, 0] = M*b*(2*x-b)/L**2
-        FER[8, 0] = 6*M*x*b/L**3
-        FER[10, 0] = M*x*(2*b-x)/L**2
-    return FER
+    return fer_moment(M, x, L, axis)
 
 
 # Returns the fixed end reaction vector for a linear distributed load
@@ -116,22 +104,15 @@ def FER_LinLoad(w1: float, w2: float, x1: float, x2: float, L: float, Direction:
             "Fz" = Force on the member's local z-axis
     """
 
-    # Create the fixed end reaction vector
-    FER = zeros((12, 1))
+    # Direction label determines whether the transverse load acts about local y or z
+    if Direction == "Fy":
+        axis = 0
+    elif Direction == "Fz":
+        axis = 1
+    else:
+        raise ValueError(f"Direction must be 'Fy' or 'Fz'. Received '{Direction}'.")
 
-    # Populate the fixed end reaction vector
-    if Direction == 'Fy':
-        FER[1, 0] = (x1 - x2)*(10*L**3*w1 + 10*L**3*w2 - 15*L*w1*x1**2 - 10*L*w1*x1*x2 - 5*L*w1*x2**2 - 5*L*w2*x1**2 - 10*L*w2*x1*x2 - 15*L*w2*x2**2 + 8*w1*x1**3 + 6*w1*x1**2*x2 + 4*w1*x1*x2**2 + 2*w1*x2**3 + 2*w2*x1**3 + 4*w2*x1**2*x2 + 6*w2*x1*x2**2 + 8*w2*x2**3)/(20*L**3)
-        FER[5, 0] = (x1 - x2)*(20*L**2*w1*x1 + 10*L**2*w1*x2 + 10*L**2*w2*x1 + 20*L**2*w2*x2 - 30*L*w1*x1**2 - 20*L*w1*x1*x2 - 10*L*w1*x2**2 - 10*L*w2*x1**2 - 20*L*w2*x1*x2 - 30*L*w2*x2**2 + 12*w1*x1**3 + 9*w1*x1**2*x2 + 6*w1*x1*x2**2 + 3*w1*x2**3 + 3*w2*x1**3 + 6*w2*x1**2*x2 + 9*w2*x1*x2**2 + 12*w2*x2**3)/(60*L**2)
-        FER[7, 0] = -(x1 - x2)*(-15*L*w1*x1**2 - 10*L*w1*x1*x2 - 5*L*w1*x2**2 - 5*L*w2*x1**2 - 10*L*w2*x1*x2 - 15*L*w2*x2**2 + 8*w1*x1**3 + 6*w1*x1**2*x2 + 4*w1*x1*x2**2 + 2*w1*x2**3 + 2*w2*x1**3 + 4*w2*x1**2*x2 + 6*w2*x1*x2**2 + 8*w2*x2**3)/(20*L**3)
-        FER[11, 0] = (x1 - x2)*(-15*L*w1*x1**2 - 10*L*w1*x1*x2 - 5*L*w1*x2**2 - 5*L*w2*x1**2 - 10*L*w2*x1*x2 - 15*L*w2*x2**2 + 12*w1*x1**3 + 9*w1*x1**2*x2 + 6*w1*x1*x2**2 + 3*w1*x2**3 + 3*w2*x1**3 + 6*w2*x1**2*x2 + 9*w2*x1*x2**2 + 12*w2*x2**3)/(60*L**2)
-    elif Direction == 'Fz':
-        FER[2, 0] = (x1 - x2)*(10*L**3*w1 + 10*L**3*w2 - 15*L*w1*x1**2 - 10*L*w1*x1*x2 - 5*L*w1*x2**2 - 5*L*w2*x1**2 - 10*L*w2*x1*x2 - 15*L*w2*x2**2 + 8*w1*x1**3 + 6*w1*x1**2*x2 + 4*w1*x1*x2**2 + 2*w1*x2**3 + 2*w2*x1**3 + 4*w2*x1**2*x2 + 6*w2*x1*x2**2 + 8*w2*x2**3)/(20*L**3)
-        FER[4, 0] = -(x1 - x2)*(20*L**2*w1*x1 + 10*L**2*w1*x2 + 10*L**2*w2*x1 + 20*L**2*w2*x2 - 30*L*w1*x1**2 - 20*L*w1*x1*x2 - 10*L*w1*x2**2 - 10*L*w2*x1**2 - 20*L*w2*x1*x2 - 30*L*w2*x2**2 + 12*w1*x1**3 + 9*w1*x1**2*x2 + 6*w1*x1*x2**2 + 3*w1*x2**3 + 3*w2*x1**3 + 6*w2*x1**2*x2 + 9*w2*x1*x2**2 + 12*w2*x2**3)/(60*L**2)
-        FER[8, 0] = -(x1 - x2)*(-15*L*w1*x1**2 - 10*L*w1*x1*x2 - 5*L*w1*x2**2 - 5*L*w2*x1**2 - 10*L*w2*x1*x2 - 15*L*w2*x2**2 + 8*w1*x1**3 + 6*w1*x1**2*x2 + 4*w1*x1*x2**2 + 2*w1*x2**3 + 2*w2*x1**3 + 4*w2*x1**2*x2 + 6*w2*x1*x2**2 + 8*w2*x2**3)/(20*L**3)
-        FER[10, 0] = -(x1 - x2)*(-15*L*w1*x1**2 - 10*L*w1*x1*x2 - 5*L*w1*x2**2 - 5*L*w2*x1**2 - 10*L*w2*x1*x2 - 15*L*w2*x2**2 + 12*w1*x1**3 + 9*w1*x1**2*x2 + 6*w1*x1*x2**2 + 3*w1*x2**3 + 3*w2*x1**3 + 6*w2*x1**2*x2 + 9*w2*x1*x2**2 + 12*w2*x2**3)/(60*L**2)
-
-    return FER
+    return fer_linear_transverse_load(w1, w2, x1, x2, L, axis)
 
 
 # Returns the fixed end reaction vector for an axial point load
@@ -149,14 +130,7 @@ def FER_AxialPtLoad(P: float, x: float, L: float) -> NDArray[float64]:
         The length of the member
     """
 
-    # Create the fixed end reaction vector
-    FER = zeros((12, 1))
-
-    # Populate the fixed end reaction vector
-    FER[0, 0] = -P*(L-x)/L
-    FER[6, 0] = -P*x/L
-
-    return FER
+    return fer_axial_point_load(P, x, L)
 
 
 # Returns the fixed end reaction vector for a distributed axial load
@@ -178,14 +152,7 @@ def FER_AxialLinLoad(p1: float, p2: float, x1: float, x2: float, L: float) -> ND
         The length of the member
     """
 
-    # Create the fixed end reaction vector
-    FER = zeros((12, 1))
-
-    # Populate the fixed end reaction vector
-    FER[0, 0] = 1/(6*L)*(x1-x2)*(3*L*p1+3*L*p2-2*p1*x1-p1*x2-p2*x1-2*p2*x2)
-    FER[6, 0] = 1/(6*L)*(x1-x2)*(2*p1*x1+p1*x2+p2*x1+2*p2*x2)
-
-    return FER
+    return fer_axial_linear_load(p1, p2, x1, x2, L)
 
 
 def FER_Torque(T: float, x: float, L: float) -> NDArray[float64]:
@@ -202,11 +169,4 @@ def FER_Torque(T: float, x: float, L: float) -> NDArray[float64]:
         The length of the member
     """
 
-    # Create the fixed end reaction vector
-    FER = zeros((12, 1))
-
-    # Populate the fixed end reaction vector
-    FER[3, 0] = -T*(L - x)/L
-    FER[9, 0] = -T*x/L
-
-    return FER
+    return fer_torque(T, x, L)

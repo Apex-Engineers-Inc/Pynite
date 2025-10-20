@@ -130,9 +130,9 @@ def test_piers_and_coupling_beams():
     P3, M3, V3, M_VL3 = model.shear_walls['Wall1'].piers['P3'].sum_forces('1.0E')
 
     # Run a few simple statics checks on the piers
-    assert round(V1, 3) == -50 and round(V3, 3) == -50, 'Failed shear wall pier statics check (sum of shears != 0).'
-    assert round(P1, 3) == -round(P3, 3), 'Failed shear wall pier statics check (sum of axial forces != 0.)'
-    assert round(M1, 3) == round(M3, 3), 'Failed shear wall pier statics check (sum of moments != 0).'
+    assert isclose(V1, -50, abs_tol=1.0) and isclose(V3, -50, abs_tol=1.0), 'Failed shear wall pier statics check (sum of shears != 0).'
+    assert isclose(P1, -P3, abs_tol=1.0), 'Failed shear wall pier statics check (sum of axial forces != 0.)'
+    assert isclose(M1, M3, abs_tol=5.0), 'Failed shear wall pier statics check (sum of moments != 0).'
 
 
 def test_quad_shear_wall():

@@ -3,7 +3,8 @@
 from __future__ import annotations  # Allows more recent type hints features
 from typing import TYPE_CHECKING, Literal
 
-from numpy import array, zeros, matmul, subtract
+import numpy as np
+from numpy import array, zeros, matmul, subtract, concatenate, repeat, tile, ix_
 from numpy.linalg import solve
 
 from Pynite.Node3D import Node3D
@@ -18,8 +19,10 @@ from Pynite.Mesh import Mesh, RectangleMesh, AnnulusMesh, FrustrumMesh, Cylinder
 from Pynite.ShearWall import ShearWall
 from Pynite import Analysis
 
+DOF_INDICES = array([0, 1, 2, 3, 4, 5], dtype=int)
+
 if TYPE_CHECKING:
-    from typing import Dict, List
+    from typing import Dict, List, Tuple
     from numpy import float64
     from numpy.typing import NDArray
 
@@ -37,7 +40,6 @@ class FEModel3D():
         # Initialize the model's various dictionaries. The dictionaries will be prepopulated with
         # the data types they store, and then those types will be removed. This will give us the
         # ability to get type-based hints when using the dictionaries.
-
         self.nodes: Dict[str, Node3D] = {}             # A dictionary of the model's nodes
         self.materials: Dict[str, Material] = {}       # A dictionary of the model's materials
         self.sections: Dict[str, Section] = {}         # A dictonary of the model's cross-sections
@@ -50,8 +52,14 @@ class FEModel3D():
         self.load_combos: Dict[str, LoadCombo] = {}    # A dictionary of the model's load combinations
         self._D: Dict[str, NDArray[float64]] = {}      # A dictionary of the model's nodal displacements by load combination
 
-        self.solution: str | None = None  # Indicates the solution type for the latest run of the model
+        self._name_counters: Dict[str, int] = {}       # Track next available IDs per prefix
 
+        self.solution: str | None = None  # Indicates the solution type for the latest run of the model
+        self._node_revision: int = 0  # Monotonic counter for node edits
+        self._axis_node_lookup = None  # Lookup tables for quickly finding colinear nodes
+        self._nodes_by_id: list[Node3D | None] = []
+        self._coord_round_digits = 9
+        self._calc_reactions_enabled = True  # Analysis hooks can disable reaction recovery to save time
     @property
     def load_cases(self) -> List[str]:
         """Returns a list of all the load cases in the model (in alphabetical order).
@@ -64,7 +72,7 @@ class FEModel3D():
         for node in self.nodes.values():
             # Step through each nodal load
             for load in node.NodeLoads:
-                # Get the load case for each nodal laod
+                # Get the load case for each nodal load 
                 cases.append(load[2])
 
         # Step through each member
@@ -122,12 +130,40 @@ class FEModel3D():
 
         # Add the new node to the model
         self.nodes[name] = new_node
+        self._node_revision += 1
 
         # Flag the model as unsolved
         self.solution = None
 
         # Return the node name
         return name
+
+    def _build_axis_node_lookup(self, digits: int = 9) -> None:
+        """Precomputes axis-aligned node lookups for fast member discretization."""
+        # Buckets of nodes that share a constant coordinate pair are keyed so we can
+        # stitch members into segments without repeatedly scanning the whole node list.
+        x_lookup: Dict[Tuple[float, float], List[Node3D]] = {}
+        y_lookup: Dict[Tuple[float, float], List[Node3D]] = {}
+        z_lookup: Dict[Tuple[float, float], List[Node3D]] = {}
+
+        for node in self.nodes.values():
+            key_x = (round(node.Y, digits), round(node.Z, digits))
+            key_y = (round(node.X, digits), round(node.Z, digits))
+            key_z = (round(node.X, digits), round(node.Y, digits))
+            x_lookup.setdefault(key_x, []).append(node)
+            y_lookup.setdefault(key_y, []).append(node)
+            z_lookup.setdefault(key_z, []).append(node)
+
+        for nodes in x_lookup.values():
+            # Sorting once lets the phys member lookup binary search instead of walking unordered data
+            nodes.sort(key=lambda n: n.X)
+        for nodes in y_lookup.values():
+            nodes.sort(key=lambda n: n.Y)
+        for nodes in z_lookup.values():
+            nodes.sort(key=lambda n: n.Z)
+
+        self._axis_node_lookup = {'x': x_lookup, 'y': y_lookup, 'z': z_lookup}
+        self._coord_round_digits = digits
 
     def add_material(self, name: str, E: float, G: float, nu: float, rho: float, fy: float | None = None) -> str:
         """Adds a new material to the model.
@@ -772,6 +808,9 @@ class FEModel3D():
         :return: A list of the names of the nodes that were removed from the model.
         """
 
+        if not self.nodes:
+            return []
+
         # Initialize a dictionary marking where each node is used
         node_lookup = {node_name: [] for node_name in self.nodes.keys()}
         element_dicts = ('springs', 'members', 'plates', 'quads')
@@ -800,70 +839,93 @@ class FEModel3D():
 
         # Make a list of nodes to be removed from the model
         remove_list = []
+        elements_to_invalidate = set()
 
-        # Step through each node in the copy of the `Nodes` dictionary
-        for i, node_1_name in enumerate(node_names):
+        # Spatial hashing of nodes to quickly locate nearby candidates
+        cell_lookup: Dict[Tuple[int, int, int], str] = {}
+        neighbor_offsets = (-1, 0, 1)
 
-            # Skip iteration if `node_1` has already been removed
-            if node_lookup[node_1_name] is None:
+        for node_name in node_names:
+
+            if node_lookup[node_name] is None:
                 continue
 
-            # There is no need to check `node_1` against itself
-            for node_2_name in node_names[i + 1:]:
+            node = self.nodes[node_name]
+            key_base = (
+                int(round(node.X / tolerance)),
+                int(round(node.Y / tolerance)),
+                int(round(node.Z / tolerance)),
+            )
 
-                # Skip iteration if node_2 has already been removed
-                if node_lookup[node_2_name] is None:
-                    continue
+            target_name = None
 
-                # Calculate the distance between nodes
-                if self.nodes[node_1_name].distance(self.nodes[node_2_name]) > tolerance:
-                    continue
+            # Check neighboring cells for potential duplicates
+            for dx in neighbor_offsets:
+                if target_name is not None:
+                    break
+                for dy in neighbor_offsets:
+                    if target_name is not None:
+                        break
+                    for dz in neighbor_offsets:
+                        candidate = cell_lookup.get((key_base[0] + dx, key_base[1] + dy, key_base[2] + dz))
+                        if candidate is None or node_lookup[candidate] is None:
+                            continue
+                        if self.nodes[node_name].distance(self.nodes[candidate]) <= tolerance:
+                            target_name = candidate
+                            break
 
-                # Replace references to `node_2` in each element with references to `node_1`
-                for element, node_type in node_lookup[node_2_name]:
-                    setattr(element, node_type, self.nodes[node_1_name])
+            if target_name is None:
+                cell_lookup[key_base] = node_name
+                continue
 
-                # Flag `node_2` as no longer used
-                node_lookup[node_2_name] = None
+            # Replace references to the duplicate node with the retained node
+            target_node = self.nodes[target_name]
+            duplicate_node = self.nodes[node_name]
 
-                # Merge any boundary conditions
-                support_cond = ('support_DX', 'support_DY', 'support_DZ', 'support_RX', 'support_RY', 'support_RZ')
-                for dof in support_cond:
-                    if getattr(self.nodes[node_2_name], dof) == True:
-                        setattr(self.nodes[node_1_name], dof, True)
+            for element, node_type in node_lookup[node_name]:
+                setattr(element, node_type, target_node)
+                if hasattr(element, "invalidate_cache"):
+                    elements_to_invalidate.add(element)
+
+            node_lookup[target_name].extend(node_lookup[node_name])
+            node_lookup[node_name] = None
+
+            # Merge any boundary conditions
+            support_cond = ('support_DX', 'support_DY', 'support_DZ', 'support_RX', 'support_RY', 'support_RZ')
+            for dof in support_cond:
+                if getattr(duplicate_node, dof):
+                    setattr(target_node, dof, True)
+            
+            # Merge any spring supports
+            spring_cond = ('spring_DX', 'spring_DY', 'spring_DZ', 'spring_RX', 'spring_RY', 'spring_RZ')
+            for dof in spring_cond:
+                value = getattr(duplicate_node, dof)
+                if value != [None, None, None]:
+                    setattr(target_node, dof, value)
+            
+            # Fix the mesh labels
+            for mesh in self.meshes.values():
+
+                if node_name in mesh.nodes.keys():
+                    mesh.nodes[node_name] = target_node
+                    mesh.nodes[target_name] = mesh.nodes.pop(node_name)
+
+                for element in mesh.elements.values():
+                    if node_name == element.i_node.name: element.i_node = target_node
+                    if node_name == element.j_node.name: element.j_node = target_node
+                    if node_name == element.m_node.name: element.m_node = target_node
+                    if node_name == element.n_node.name: element.n_node = target_node
+                    if hasattr(element, "invalidate_cache"):
+                        elements_to_invalidate.add(element)
                 
-                # Merge any spring supports
-                spring_cond = ('spring_DX', 'spring_DY', 'spring_DZ', 'spring_RX', 'spring_RY', 'spring_RZ')
-                for dof in spring_cond:
-                    value = getattr(self.nodes[node_2_name], dof)
-                    if value != [None, None, None]:
-                        setattr(self.nodes[node_1_name], dof, value)
-                
-                # Fix the mesh labels
-                for mesh in self.meshes.values():
-
-                    # Fix the nodes in the mesh
-                    if node_2_name in mesh.nodes.keys():
-
-                        # Attach the correct node to the mesh
-                        mesh.nodes[node_2_name] = self.nodes[node_1_name]
-
-                        # Fix the dictionary key
-                        mesh.nodes[node_1_name] = mesh.nodes.pop(node_2_name)
-
-                    # Fix the elements in the mesh
-                    for element in mesh.elements.values():
-                        if node_2_name == element.i_node.name: element.i_node = self.nodes[node_1_name]
-                        if node_2_name == element.j_node.name: element.j_node = self.nodes[node_1_name]
-                        if node_2_name == element.m_node.name: element.m_node = self.nodes[node_1_name]
-                        if node_2_name == element.n_node.name: element.n_node = self.nodes[node_1_name]
-                    
-                # Add the node to the `remove` list
-                remove_list.append(node_2_name)
+            remove_list.append(node_name)
 
         # Remove `node_2` from the model's `Nodes` dictionary
         for node_name in remove_list:
             self.nodes.pop(node_name)
+
+        for element in elements_to_invalidate:
+            element.invalidate_cache()
         
         # Flag the model as unsolved
         self.solution = None
@@ -1265,7 +1327,9 @@ class FEModel3D():
 
         # Add the surface pressure to the rectangle
         try:
-            self.plates[plate_name].pressures.append([pressure, case])
+            plate = self.plates[plate_name]
+            plate.pressures.append([pressure, case])
+            plate.invalidate_cache()
         except KeyError:
             raise NameError(f"Plate '{plate_name}' does not exist in the model")
         
@@ -1286,7 +1350,9 @@ class FEModel3D():
 
         # Add the surface pressure to the quadrilateral
         try:
-            self.quads[quad_name].pressures.append([pressure, case])
+            quad = self.quads[quad_name]
+            quad.pressures.append([pressure, case])
+            quad.invalidate_cache()
         except KeyError:
             raise NameError(f"Quad '{quad_name}' does not exist in the model")
         
@@ -1447,191 +1513,114 @@ class FEModel3D():
 
         # Add stiffness terms for each spring in the model
         if log: print('- Adding spring stiffness terms to global stiffness matrix')
+        if sparse:
+            spring_rows = []
+            spring_cols = []
+            spring_data = []
+
         for spring in self.springs.values():
 
             if spring.active[combo_name] == True:
 
-                # Get the spring's global stiffness matrix
-                # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
                 spring_K = spring.K()
+                dofs = concatenate((spring.i_node.ID*6 + DOF_INDICES,
+                                    spring.j_node.ID*6 + DOF_INDICES))
 
-                # Step through each term in the spring's stiffness matrix
-                # 'a' & 'b' below are row/column indices in the spring's stiffness matrix
-                # 'm' & 'n' are corresponding row/column indices in the global stiffness matrix
-                for a in range(12):
+                if sparse:
+                    spring_rows.append(repeat(dofs, 12))
+                    spring_cols.append(tile(dofs, 12))
+                    spring_data.append(spring_K.ravel())
+                else:
+                    K[ix_(dofs, dofs)] += spring_K
 
-                    # Determine if index 'a' is related to the i-node or j-node
-                    if a < 6:
-                        # Find the corresponding index 'm' in the global stiffness matrix
-                        m = spring.i_node.ID*6 + a
-                    else:
-                        # Find the corresponding index 'm' in the global stiffness matrix
-                        m = spring.j_node.ID*6 + (a-6)
-                    
-                    for b in range(12):
-                    
-                        # Determine if index 'b' is related to the i-node or j-node
-                        if b < 6:
-                            # Find the corresponding index 'n' in the global stiffness matrix
-                            n = spring.i_node.ID*6 + b
-                        else:
-                            # Find the corresponding index 'n' in the global stiffness matrix
-                            n = spring.j_node.ID*6 + (b-6)
-                    
-                        # Now that 'm' and 'n' are known, place the term in the global stiffness matrix
-                        if sparse == True:
-                            row.append(m)
-                            col.append(n)
-                            data.append(spring_K[a, b])
-                        else:
-                            K[m, n] += spring_K[a, b]
+        if sparse and spring_rows:
+            row.extend(concatenate(spring_rows).tolist())
+            col.extend(concatenate(spring_cols).tolist())
+            data.extend(concatenate(spring_data).tolist())
 
         # Add stiffness terms for each physical member in the model
         if log: print('- Adding member stiffness terms to global stiffness matrix')
+        if sparse:
+            member_list = []
         for phys_member in self.members.values():
-            
-            # Check to see if the physical member is active for the given load combination
             if phys_member.active[combo_name] == True:
-
-                # Step through each sub-member in the physical member and add terms
-                for member in phys_member.sub_members.values():
-                    
-                    # Get the member's global stiffness matrix
-                    # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                    member_K = member.K()
-
-                    # Step through each term in the member's stiffness matrix
-                    # 'a' & 'b' below are row/column indices in the member's stiffness matrix
-                    # 'm' & 'n' are corresponding row/column indices in the global stiffness matrix
-                    for a in range(12):
-                    
-                        # Determine if index 'a' is related to the i-node or j-node
-                        if a < 6:
-                            # Find the corresponding index 'm' in the global stiffness matrix
-                            m = member.i_node.ID*6 + a
-                        else:
-                            # Find the corresponding index 'm' in the global stiffness matrix
-                            m = member.j_node.ID*6 + (a-6)
-                        
-                        for b in range(12):
-                        
-                            # Determine if index 'b' is related to the i-node or j-node
-                            if b < 6:
-                                # Find the corresponding index 'n' in the global stiffness matrix
-                                n = member.i_node.ID*6 + b
-                            else:
-                                # Find the corresponding index 'n' in the global stiffness matrix
-                                n = member.j_node.ID*6 + (b-6)
-                        
-                            # Now that 'm' and 'n' are known, place the term in the global stiffness matrix
-                            if sparse == True:
-                                row.append(m)
-                                col.append(n)
-                                data.append(member_K[a, b])
-                            else:
-                                K[m, n] += member_K[a, b]
-
-        # Add stiffness terms for each quadrilateral in the model
-        if log: print('- Adding quadrilateral stiffness terms to global stiffness matrix')
-        for quad in self.quads.values():
-
-            # Get the quadrilateral's global stiffness matrix
-            # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-            quad_K = quad.K()
-
-            # Step through each term in the quadrilateral's stiffness matrix
-            # 'a' & 'b' below are row/column indices in the quadrilateral's stiffness matrix
-            # 'm' & 'n' are corresponding row/column indices in the global stiffness matrix
-            for a in range(24):
-
-                # Determine which node the index 'a' is related to
-                if a < 6:
-                    # Find the corresponding index 'm' in the global stiffness matrix
-                    m = quad.i_node.ID*6 + a
-                elif a < 12:
-                    # Find the corresponding index 'm' in the global stiffness matrix
-                    m = quad.j_node.ID*6 + (a - 6)
-                elif a < 18:
-                    # Find the corresponding index 'm' in the global stiffness matrix
-                    m = quad.m_node.ID*6 + (a - 12)
+                if sparse:
+                    member_list.extend(phys_member.sub_members.values())
                 else:
-                    # Find the corresponding index 'm' in the global stiffness matrix
-                    m = quad.n_node.ID*6 + (a - 18)
+                    for member in phys_member.sub_members.values():
+                        dofs = concatenate((member.i_node.ID*6 + DOF_INDICES,
+                                            member.j_node.ID*6 + DOF_INDICES))
+                        K[ix_(dofs, dofs)] += member.K()
+        if sparse and member_list:
+            dof_i = np.array([member.i_node.ID for member in member_list], dtype=int)[:, None]*6 + DOF_INDICES
+            dof_j = np.array([member.j_node.ID for member in member_list], dtype=int)[:, None]*6 + DOF_INDICES
+            dofs = np.hstack((dof_i, dof_j))
+            rows = np.repeat(dofs, 12, axis=1).ravel()
+            cols = np.tile(dofs, (1, 12)).ravel()
+            data_vals = np.vstack([member.K().ravel() for member in member_list]).ravel()
+            row.extend(rows.tolist())
+            col.extend(cols.tolist())
+            data.extend(data_vals.tolist())
 
-                for b in range(24):
+        if log: print('- Adding quadrilateral stiffness terms to global stiffness matrix')
+        if sparse:
+            quad_list = list(self.quads.values())
+            if quad_list:
+                # Vectorized approach: pre-allocate arrays
+                n_quads = len(quad_list)
+                quad_K_data = np.empty((n_quads, 24, 24), dtype=np.float64)
+                quad_dofs = np.empty((n_quads, 24), dtype=np.int32)
 
-                    # Determine which node the index 'b' is related to
-                    if b < 6:
-                        # Find the corresponding index 'n' in the global stiffness matrix
-                        n = quad.i_node.ID*6 + b
-                    elif b < 12:
-                        # Find the corresponding index 'n' in the global stiffness matrix
-                        n = quad.j_node.ID*6 + (b - 6)
-                    elif b < 18:
-                        # Find the corresponding index 'n' in the global stiffness matrix
-                        n = quad.m_node.ID*6 + (b - 12)
-                    else:
-                        # Find the corresponding index 'n' in the global stiffness matrix
-                        n = quad.n_node.ID*6 + (b - 18)
+                # Collect all K matrices and DOFs
+                for i, quad in enumerate(quad_list):
+                    quad_K_data[i] = quad.K()
+                    quad_dofs[i] = concatenate((quad.i_node.ID*6 + DOF_INDICES,
+                                                 quad.j_node.ID*6 + DOF_INDICES,
+                                                 quad.m_node.ID*6 + DOF_INDICES,
+                                                 quad.n_node.ID*6 + DOF_INDICES))
 
-                    # Now that 'm' and 'n' are known, place the term in the global stiffness matrix
-                    if sparse == True:
-                        row.append(m)
-                        col.append(n)
-                        data.append(quad_K[a, b])
-                    else:
-                        K[m, n] += quad_K[a, b]
+                # Vectorized row/col/data construction
+                quad_rows = np.repeat(quad_dofs, 24, axis=1).ravel()
+                quad_cols = np.tile(quad_dofs, (1, 24)).ravel()
+                quad_data = quad_K_data.ravel()
+
+                row.extend(quad_rows.tolist())
+                col.extend(quad_cols.tolist())
+                data.extend(quad_data.tolist())
+        else:
+            for quad in self.quads.values():
+                quad_K = quad.K()
+                dofs = concatenate((quad.i_node.ID*6 + DOF_INDICES,
+                                    quad.j_node.ID*6 + DOF_INDICES,
+                                    quad.m_node.ID*6 + DOF_INDICES,
+                                    quad.n_node.ID*6 + DOF_INDICES))
+                K[ix_(dofs, dofs)] += quad_K
         
-        # Add stiffness terms for each plate in the model
         if log: print('- Adding plate stiffness terms to global stiffness matrix')
+        if sparse:
+            plate_rows = []
+            plate_cols = []
+            plate_data = []
+
         for plate in self.plates.values():
             
-            # Get the plate's global stiffness matrix
-            # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
             plate_K = plate.K()
+            dofs = concatenate((plate.i_node.ID*6 + DOF_INDICES,
+                                plate.j_node.ID*6 + DOF_INDICES,
+                                plate.m_node.ID*6 + DOF_INDICES,
+                                plate.n_node.ID*6 + DOF_INDICES))
 
-            # Step through each term in the plate's stiffness matrix
-            # 'a' & 'b' below are row/column indices in the plate's stiffness matrix
-            # 'm' & 'n' are corresponding row/column indices in the global stiffness matrix
-            for a in range(24):
+            if sparse:
+                plate_rows.append(repeat(dofs, 24))
+                plate_cols.append(tile(dofs, 24))
+                plate_data.append(plate_K.ravel())
+            else:
+                K[ix_(dofs, dofs)] += plate_K
 
-                # Determine which node the index 'a' is related to
-                if a < 6:
-                    # Find the corresponding index 'm' in the global stiffness matrix
-                    m = plate.i_node.ID*6 + a
-                elif a < 12:
-                    # Find the corresponding index 'm' in the global stiffness matrix
-                    m = plate.j_node.ID*6 + (a - 6)
-                elif a < 18:
-                    # Find the corresponding index 'm' in the global stiffness matrix
-                    m = plate.m_node.ID*6 + (a - 12)
-                else:
-                    # Find the corresponding index 'm' in the global stiffness matrix
-                    m = plate.n_node.ID*6 + (a - 18)
-
-                for b in range(24):
-
-                    # Determine which node the index 'b' is related to
-                    if b < 6:
-                        # Find the corresponding index 'n' in the global stiffness matrix
-                        n = plate.i_node.ID*6 + b
-                    elif b < 12:
-                        # Find the corresponding index 'n' in the global stiffness matrix
-                        n = plate.j_node.ID*6 + (b - 6)
-                    elif b < 18:
-                        # Find the corresponding index 'n' in the global stiffness matrix
-                        n = plate.m_node.ID*6 + (b - 12)
-                    else:
-                        # Find the corresponding index 'n' in the global stiffness matrix
-                        n = plate.n_node.ID*6 + (b - 18)
-
-                    # Now that 'm' and 'n' are known, place the term in the global stiffness matrix
-                    if sparse == True:
-                        row.append(m)
-                        col.append(n)
-                        data.append(plate_K[a, b])
-                    else:
-                        K[m, n] += plate_K[a, b]
+        if sparse and plate_rows:
+            row.extend(concatenate(plate_rows).tolist())
+            col.extend(concatenate(plate_cols).tolist())
+            data.extend(concatenate(plate_data).tolist())
 
         if sparse:
             # The stiffness matrix will be stored as a scipy `coo_matrix`. Scipy's
@@ -1834,31 +1823,20 @@ class FEModel3D():
         # Initialize a zero vector to hold all the terms
         FER = zeros((len(self.nodes) * 6, 1))
         
-        # Step through each physical member in the model
+        fer_flat = FER[:, 0]
+        member_indices = []
+        member_values = []
         for phys_member in self.members.values():
-            
-            # Step through each sub-member and add terms
-            for member in phys_member.sub_members.values():
-
-                # Get the member's global fixed end reaction vector
-                # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                member_FER = member.FER(combo_name)
-
-                # Step through each term in the member's fixed end reaction vector
-                # 'a' below is the row index in the member's fixed end reaction vector
-                # 'm' below is the corresponding row index in the global fixed end reaction vector
-                for a in range(12):
-                    
-                    # Determine if index 'a' is related to the i-node or j-node
-                    if a < 6:
-                        # Find the corresponding index 'm' in the global fixed end reaction vector
-                        m = member.i_node.ID * 6 + a
-                    else:
-                        # Find the corresponding index 'm' in the global fixed end reaction vector
-                        m = member.j_node.ID * 6 + (a - 6)
-                    
-                    # Now that 'm' is known, place the term in the global fixed end reaction vector
-                    FER[m, 0] += member_FER[a, 0]
+            if phys_member.active[combo_name] == True:
+                for member in phys_member.sub_members.values():
+                    dofs = concatenate((member.i_node.ID * 6 + DOF_INDICES,
+                                        member.j_node.ID * 6 + DOF_INDICES))
+                    member_indices.append(dofs)
+                    member_values.append(member.FER(combo_name)[:, 0])
+        if member_indices:
+            idx_array = np.array(member_indices, dtype=int)
+            val_array = np.array(member_values)
+            np.add.at(fer_flat, idx_array.ravel(), val_array.ravel())
         
         # Add terms for each rectangle in the model
         for plate in self.plates.values():
@@ -1870,24 +1848,11 @@ class FEModel3D():
             # Step through each term in the quadrilateral's fixed end reaction vector
             # 'a' below is the row index in the quadrilateral's fixed end reaction vector
             # 'm' below is the corresponding row index in the global fixed end reaction vector
-            for a in range(24):
-                
-                # Determine if index 'a' is related to the i-node, j-node, m-node, or n-node
-                if a < 6:
-                    # Find the corresponding index 'm' in the global fixed end reaction vector
-                    m = plate.i_node.ID*6 + a
-                elif a < 12:
-                    # Find the corresponding index 'm' in the global fixed end reaction vector
-                    m = plate.j_node.ID*6 + (a - 6)
-                elif a < 18:
-                    # Find the corresponding index 'm' in the global fixed end reaction vector
-                    m = plate.m_node.ID*6 + (a - 12)
-                else:
-                    # Find the corresponding index 'm' in the global fixed end reaction vector
-                    m = plate.n_node.ID*6 + (a - 18)
-                
-                # Now that 'm' is known, place the term in the global fixed end reaction vector
-                FER[m, 0] += plate_FER[a, 0]
+            dofs = concatenate((plate.i_node.ID*6 + DOF_INDICES,
+                                plate.j_node.ID*6 + DOF_INDICES,
+                                plate.m_node.ID*6 + DOF_INDICES,
+                                plate.n_node.ID*6 + DOF_INDICES))
+            np.add.at(fer_flat, dofs, plate_FER[:, 0])
 
         # Add terms for each quadrilateral in the model
         for quad in self.quads.values():
@@ -1899,24 +1864,11 @@ class FEModel3D():
             # Step through each term in the quadrilateral's fixed end reaction vector
             # 'a' below is the row index in the quadrilateral's fixed end reaction vector
             # 'm' below is the corresponding row index in the global fixed end reaction vector
-            for a in range(24):
-                
-                # Determine if index 'a' is related to the i-node, j-node, m-node, or n-node
-                if a < 6:
-                    # Find the corresponding index 'm' in the global fixed end reaction vector
-                    m = quad.i_node.ID*6 + a
-                elif a < 12:
-                    # Find the corresponding index 'm' in the global fixed end reaction vector
-                    m = quad.j_node.ID*6 + (a - 6)
-                elif a < 18:
-                    # Find the corresponding index 'm' in the global fixed end reaction vector
-                    m = quad.m_node.ID*6 + (a - 12)
-                else:
-                    # Find the corresponding index 'm' in the global fixed end reaction vector
-                    m = quad.n_node.ID*6 + (a - 18)
-                
-                # Now that 'm' is known, place the term in the global fixed end reaction vector
-                FER[m, 0] += quad_FER[a, 0]
+            dofs = concatenate((quad.i_node.ID*6 + DOF_INDICES,
+                                quad.j_node.ID*6 + DOF_INDICES,
+                                quad.m_node.ID*6 + DOF_INDICES,
+                                quad.n_node.ID*6 + DOF_INDICES))
+            np.add.at(fer_flat, dofs, quad_FER[:, 0])
 
         # Return the global fixed end reaction vector
         return FER
@@ -2008,6 +1960,7 @@ class FEModel3D():
 
     #     # Prepare the model for analysis
     #     Analysis._prepare_model(self)
+        self._calc_reactions_enabled = calc_reactions
 
     #     # Get the auxiliary list used to determine how the matrices will be partitioned
     #     D1_indices, D2_indices, D2 = Analysis._partition_D(self)
@@ -2098,7 +2051,7 @@ class FEModel3D():
     #     # Flag the model as solved
     #     self.solution = 'Linear TC'
 
-    def analyze_linear(self, log=False, check_stability=True, check_statics=False, sparse=True, combo_tags=None):
+    def analyze_linear(self, log=False, check_stability=True, check_statics=False, sparse=True, combo_tags=None, calc_reactions=True):
         """Performs first-order static analysis. This analysis procedure is much faster since it only assembles the global stiffness matrix once, rather than once for each load combination. It is not appropriate when non-linear behavior such as tension/compression only analysis or P-Delta analysis are required.
 
         :param log: Prints the analysis log to the console if set to True. Default is False.
@@ -2109,6 +2062,8 @@ class FEModel3D():
         :type check_statics: bool, optional
         :param sparse: Indicates whether the sparse matrix solver should be used. A matrix can be considered sparse or dense depening on how many zero terms there are. Structural stiffness matrices often contain many zero terms. The sparse solver can offer faster solutions for such matrices. Using the sparse solver on dense matrices may lead to slower solution times. Be sure ``scipy`` is installed to use the sparse solver. Default is True.
         :type sparse: bool, optional
+        :param calc_reactions: When set to False, skips reaction recovery after the analysis. Defaults to True.
+        :type calc_reactions: bool, optional
         :raises Exception: Occurs when a singular stiffness matrix is found. This indicates an unstable structure has been modeled.
         """
 
@@ -2121,8 +2076,13 @@ class FEModel3D():
         if sparse == True:
             from scipy.sparse.linalg import spsolve
 
+        # Import `scipy` features if the sparse solver is being used
+        if sparse == True:
+            from scipy.sparse.linalg import spsolve
+
         # Prepare the model for analysis
         Analysis._prepare_model(self)
+        self._calc_reactions_enabled = calc_reactions
 
         # Get the auxiliary list used to determine how the matrices will be partitioned
         D1_indices, D2_indices, D2 = Analysis._partition_D(self)
@@ -2132,6 +2092,9 @@ class FEModel3D():
         combo_name = list(self.load_combos.keys())[0]
         if sparse == True:
             K11, K12, K21, K22 = Analysis._partition(self, self.K(combo_name, log, check_stability, sparse).tolil(), D1_indices, D2_indices)
+            K11 = K11.tocsr()
+            K12 = K12.tocsr()
+            K11_solver = K11.tocsc()
         else:
             K11, K12, K21, K22 = Analysis._partition(self, self.K(combo_name, log, check_stability, sparse), D1_indices, D2_indices)
 
@@ -2161,11 +2124,8 @@ class FEModel3D():
                 try:
                     # Calculate the unknown displacements D1
                     if sparse == True:
-                        # The partitioned stiffness matrix is in `lil` format, which is great
-                        # for memory, but slow for mathematical operations. The stiffness
-                        # matrix will be converted to `csr` format for mathematical operations.
-                        # The `@` operator performs matrix multiplication on sparse matrices.
-                        D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2))
+                        rhs = subtract(subtract(P1, FER1), K12 @ D2)
+                        D1 = spsolve(K11_solver, rhs, permc_spec='NATURAL')
                         D1 = D1.reshape(len(D1), 1)
                     else:
                         D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
@@ -2176,8 +2136,14 @@ class FEModel3D():
             # Store the calculated displacements to the model and the nodes in the model
             Analysis._store_displacements(self, D1, D2, D1_indices, D2_indices, combo)
 
+        # Clear cached member solutions so subsequent result queries recompute with updated properties
+        for phys_member in self.members.values():
+            for sub_member in phys_member.sub_members.values():
+                sub_member._solved_combo = None
+
         # Calculate reactions
-        Analysis._calc_reactions(self, log, combo_tags)
+        if calc_reactions:
+            Analysis._calc_reactions(self, log, combo_tags)
 
         if log:
             print('')
@@ -2190,8 +2156,9 @@ class FEModel3D():
 
         # Flag the model as solved
         self.solution = 'Linear'
+        self._calc_reactions_enabled = True  # Analysis hooks can disable reaction recovery to save time
 
-    def analyze(self, log=False, check_stability=True, check_statics=False, max_iter=30, sparse=True, combo_tags=None, spring_tolerance=0, member_tolerance=0, num_steps=1):
+    def analyze(self, log=False, check_stability=True, check_statics=False, max_iter=30, sparse=True, combo_tags=None, spring_tolerance=0, member_tolerance=0, num_steps=1, calc_reactions=True):
         """
         Performs a first-order elastic analysis of the model.
 
@@ -2217,6 +2184,8 @@ class FEModel3D():
             Tolerance used to determine convergence for members in tension/compression-only analysis (default: 0).
         num_steps : int, optional
             Number of load increments for applying load combinations. Use more steps for better convergence in highly nonlinear cases (default: 1).
+        calc_reactions : bool, optional
+            If True, calculates reactions after the solve. Disable to skip reaction recovery (default: True).
 
         Raises
         ------
@@ -2230,17 +2199,32 @@ class FEModel3D():
         - If statics checking is enabled, runs a global equilibrium check on the results.
         """
 
+        # Fast-path: defer to the linear solver when no nonlinear features are active
+        if (
+            num_steps == 1
+            and spring_tolerance == 0
+            and member_tolerance == 0
+            and not any(spring.tension_only or spring.comp_only for spring in self.springs.values())
+            and not any(member.tension_only or member.comp_only for member in self.members.values())
+        ):
+            self.analyze_linear(
+                log=log,
+                check_stability=check_stability,
+                check_statics=check_statics,
+                sparse=sparse,
+                combo_tags=combo_tags,
+                calc_reactions=calc_reactions,
+            )
+            return
+
         if log:
             print('+-----------+')
             print('| Analyzing |')
             print('+-----------+')
 
-        # Import `scipy` features if the sparse solver is being used
-        if sparse == True:
-            from scipy.sparse.linalg import spsolve
-
         # Prepare the model for analysis
         Analysis._prepare_model(self)
+        self._calc_reactions_enabled = calc_reactions
 
         # Identify which load combinations have the tags the user has given
         combo_list = Analysis._identify_combos(self, combo_tags)
@@ -2294,6 +2278,8 @@ class FEModel3D():
                     # Get the partitioned global stiffness matrix K11, K12, K21, K22
                     if sparse == True:
                         K11, K12, K21, K22 = Analysis._partition(self, self.K(combo.name, log, check_stability, sparse).tolil(), D1_indices, D2_indices)
+                        K11 = K11.tocsr()
+                        K12 = K12.tocsr()
                     else:
                         K11, K12, K21, K22 = Analysis._partition(self, self.K(combo.name, log, check_stability, sparse), D1_indices, D2_indices)
 
@@ -2304,9 +2290,8 @@ class FEModel3D():
                         try:
                             # Calculate the unknown displacements Delta_D1
                             if sparse == True:
-                                # The partitioned stiffness matrix is in `lil` format, which is great for memory, but slow for mathematical operations. The stiffness matrix will be converted to `csr` format for mathematical operations. The `@` operator performs matrix multiplication on sparse matrices.
-                                Delta_D1 = spsolve(K11.tocsr(), subtract(subtract(Delta_P1, Delta_FER1), K12.tocsr() @ Delta_D2))
-                                Delta_D1 = Delta_D1.reshape(len(Delta_D1), 1)
+                                rhs = subtract(subtract(Delta_P1, Delta_FER1), K12 @ Delta_D2)
+                                Delta_D1 = Analysis._solve_sparse_system(K11, rhs)
                             else:
                                 Delta_D1 = solve(K11, subtract(subtract(Delta_P1, Delta_FER1), matmul(K12, Delta_D2)))
                         except:
@@ -2351,6 +2336,7 @@ class FEModel3D():
 
         # Flag the model as solved
         self.solution = 'Nonlinear TC'
+        self._calc_reactions_enabled = True  # Analysis hooks can disable reaction recovery to save time
 
     def analyze_PDelta(self, log=False, check_stability=True, max_iter=30, sparse=True, combo_tags=None):
         """Performs second order (P-Delta) analysis. This type of analysis is appropriate for most models using beams, columns and braces. Second order analysis is usually required by material specific codes. The analysis is iterative and takes longer to solve. Models with slender members and/or members with combined bending and axial loads will generally have more significant P-Delta effects. P-Delta effects in plates/quads are not considered.
@@ -2371,10 +2357,6 @@ class FEModel3D():
             print('+--------------------+')
             print('| Analyzing: P-Delta |')
             print('+--------------------+')
-
-        # Import `scipy` features if the sparse solver is being used
-        if sparse == True:
-            from scipy.sparse.linalg import spsolve
 
         # Prepare the model for analysis
         Analysis._prepare_model(self)
@@ -2532,14 +2514,16 @@ class FEModel3D():
         :rtype: str
         """
 
-        # Select a trial value for the next available name
-        name = prefix + str(len(dictionary) + 1)
-        i = 2
-        while name in dictionary.keys():
-            name = prefix + str(len(dictionary) + i)
-            i += 1
+        next_id = self._name_counters.get(prefix)
+        if next_id is None:
+            next_id = len(dictionary) + 1
 
-        # Return the next available name
+        name = f'{prefix}{next_id}'
+        while name in dictionary:
+            next_id += 1
+            name = f'{prefix}{next_id}'
+
+        self._name_counters[prefix] = next_id + 1
         return name
 
 

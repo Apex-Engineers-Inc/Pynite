@@ -5,6 +5,7 @@ from math import pi, sin, cos, ceil, isclose
 from Pynite.Node3D import Node3D
 from Pynite.Quad3D import Quad3D
 from Pynite.Plate3D import Plate3D
+from Pynite.numba_kernels import compute_ring_trig
 
 if TYPE_CHECKING:
     from typing import List, Union, Dict
@@ -1217,57 +1218,59 @@ class AnnulusRingMesh(Mesh):
 
         axis = self.axis
 
-        theta = 2*pi/self.n  # Angle between nodes in the ring
-
         # Each node number will be increased by the offset calculated below
         node_offset = int(self.start_node[1:]) - 1
 
         # Each element number will be increased by the offset calculated below
         element_offset = int(self.start_element[1:]) - 1
 
-        # Generate the nodes that make up the ring, working from the inside to the outside
-        angle = 0
-        for i in range(1, 2*n + 1, 1):
+        # Precompute cos/sin pairs via Numba to avoid repeated math cost in the loop
+        cos_vals, sin_vals = compute_ring_trig(n)
 
-            # Assign the node a name
-            node_name = 'N' + str(i + node_offset)
+        # Inner radius nodes
+        for i in range(n):
+            node_name = f"N{i + 1 + node_offset}"
+            c = cos_vals[i]
+            s = sin_vals[i]
 
-            # Generate the inner radius of nodes
-            if i <= n:
-                angle = theta*(i - 1)
-                if axis == 'Y':
-                    x = Xo + inner_radius*cos(angle)
-                    y = Yo
-                    z = Zo + inner_radius*sin(angle)
-                elif axis == 'X':
-                    x = Xo
-                    y = Yo + inner_radius*sin(angle)
-                    z = Zo + inner_radius*cos(angle)
-                elif axis == 'Z':
-                    x = Xo + inner_radius*sin(angle)
-                    y = Yo + inner_radius*cos(angle)
-                    z = Zo
-                else:
-                    raise Exception('Invalid axis specified for AnnulusRingMesh.')
-            
-            # Generate the outer radius of nodes
+            if axis == 'Y':
+                x = Xo + inner_radius * c
+                y = Yo
+                z = Zo + inner_radius * s
+            elif axis == 'X':
+                x = Xo
+                y = Yo + inner_radius * s
+                z = Zo + inner_radius * c
+            elif axis == 'Z':
+                x = Xo + inner_radius * s
+                y = Yo + inner_radius * c
+                z = Zo
             else:
-                angle = theta*((i - n) - 1)
-                if axis == 'Y':
-                    x = Xo + outer_radius*cos(angle)
-                    y = Yo 
-                    z = Zo + outer_radius*sin(angle)
-                elif axis == 'X':
-                    x = Xo
-                    y = Yo + outer_radius*sin(angle)
-                    z = Zo + outer_radius*cos(angle)
-                elif axis == 'Z':
-                    x = Xo + outer_radius*sin(angle)
-                    y = Yo + outer_radius*cos(angle)
-                    z = Zo
-                else:
-                    raise Exception('Invalid axis specified for AnnulusRingMesh.')
-            
+                raise Exception('Invalid axis specified for AnnulusRingMesh.')
+
+            self.nodes[node_name] = Node3D(node_name, x, y, z)
+
+        # Outer radius nodes reuse the same angle distribution
+        for i in range(n):
+            node_name = f"N{i + 1 + n + node_offset}"
+            c = cos_vals[i]
+            s = sin_vals[i]
+
+            if axis == 'Y':
+                x = Xo + outer_radius * c
+                y = Yo
+                z = Zo + outer_radius * s
+            elif axis == 'X':
+                x = Xo
+                y = Yo + outer_radius * s
+                z = Zo + outer_radius * c
+            elif axis == 'Z':
+                x = Xo + outer_radius * s
+                y = Yo + outer_radius * c
+                z = Zo
+            else:
+                raise Exception('Invalid axis specified for AnnulusRingMesh.')
+
             self.nodes[node_name] = Node3D(node_name, x, y, z)
 
         # Generate the elements that make up the ring

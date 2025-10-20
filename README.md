@@ -19,6 +19,11 @@ The easiest way to install Pynite is with pip: `pip install PyniteFEA[all]`.
 
 For a more detailed discussion on installation options and dependencies see https://pynite.readthedocs.io/en/latest/installation.html
 
+## Optional Performance Extras
+- `Pynite` can take advantage of [Numba](https://numba.pydata.org/) to JIT-compile its most expensive numeric kernels (member stiffness, fixed-end reactions, segment evaluations).
+- Install the extra dependency with `pip install PyniteFEA[numba]` or include it alongside your existing extras (e.g., `pip install PyniteFEA[all,numba]`).
+- JIT acceleration is enabled automatically when Numba is available. Set the environment variable `PYNITE_USE_NUMBA=0` if you need to force the pure-Python implementation (for debugging or platform compatibility).
+
 # Current Capabilities
 * 3D static analysis of elastic structures.
 * P-&Delta; analysis of frame type structures.

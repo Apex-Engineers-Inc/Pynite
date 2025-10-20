@@ -1,6 +1,6 @@
 from Pynite import FEModel3D
 from Pynite.Rendering import Renderer
-from math import isclose
+from math import isclose, pi
 
 
 def test_rect_mesh_in_plane_stiffness():
@@ -74,11 +74,13 @@ def test_PCA_7_quad():
     nu = 0.25  # 0.17            # Poisson's ratio for concrete
     tank_model.add_material('Concrete', E, 0.4*E, nu, 150)
 
-    mesh_size = 1       # Desired mesh size (ft)
+    mesh_size = 1       # Desired vertical mesh size (ft)
     center = [0, 0, 0]  # Origin (X, Y, Z)
     axis = 'Y'          # Axis of revolution
+    circumference_divisions = 48  # Elements used around the circumference
+    arc_length = 2*pi*R / circumference_divisions
 
-    tank_model.add_cylinder_mesh('MSH1', mesh_size, R, H, t, 'Concrete', 1, 1, center, axis, element_type='Quad')
+    tank_model.add_cylinder_mesh('MSH1', mesh_size, R, H, t, 'Concrete', 1, 1, center, axis, num_elements=circumference_divisions, element_type='Quad')
     tank_model.meshes['MSH1'].generate()
 
     # Add hydrostatic loads to the elements
@@ -118,7 +120,7 @@ def test_PCA_7_quad():
     Sx = max([element.membrane(0, 0)[0, 0] for element in tank_model.quads.values()])*t
 
     # Find the maximum reaction at the base of the tank
-    RMy = max([node.RxnMX['Combo 1'] for node in tank_model.nodes.values()])/mesh_size
+    RMy = max([node.RxnMX['Combo 1'] for node in tank_model.nodes.values()])/arc_length
 
     # Check that the Pynite calculated values are within 3% of the calculated PCA values.
     assert abs(1 - My_max/My_max_PCA) < 0.03, 'Failed quad cylinder flexure test.'
@@ -160,12 +162,13 @@ def test_PCA_7_rect():
     nu = 0.25  # 0.17            # Poisson's ratio for concrete
     tank_model.add_material('Concrete', E, 0.4*E, nu, 150)
 
-    mesh_size = 2       # Desired mesh size (ft)
+    mesh_size = 2       # Desired vertical mesh size (ft)
     center = [0, 0, 0]  # Origin (X, Y, Z)
     axis = 'Y'          # Axis of revolution
+    circumference_divisions = 48  # Elements used around the circumference
 
     # Add a cylinder mesh to the model
-    tank_model.add_cylinder_mesh('MSH1', mesh_size, R, H, t, 'Concrete', 1, 1, center, axis, element_type='Rect')
+    tank_model.add_cylinder_mesh('MSH1', mesh_size, R, H, t, 'Concrete', 1, 1, center, axis, num_elements=circumference_divisions, element_type='Rect')
 
     # Generate the mesh prior to running so we can work with it
     tank_model.meshes['MSH1'].generate()

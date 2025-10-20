@@ -5,13 +5,52 @@
 # 4. "Finite Element Analysis Fundamentals", Richard H. Gallagher
 
 from __future__ import annotations  # Allows more recent type hints features
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Dict, Tuple, ClassVar
 
-from math import sin, cos
+from math import sin, cos, sqrt
 import numpy as np
 from numpy import add
-from numpy.linalg import inv, det, norm
+from numpy.linalg import inv, norm
 import warnings
+
+from Pynite.numba_kernels import (
+    accumulate_membrane_stiffness,
+    accumulate_bending_shear_stiffness,
+    expand_membrane_matrix,
+    expand_bending_matrix,
+    quad_moment_at,
+    quad_moment_batch,
+    quad_membrane_at,
+    quad_membrane_batch,
+    compute_quad_local_coords,
+    compute_quad_transformation_matrix,
+)
+
+BENDING_SIGN_IDX = np.array([3, 9, 15, 21], dtype=np.int64)
+BENDING_ORDER = np.array([2, 4, 3, 8, 10, 9, 14, 16, 15, 20, 22, 21], dtype=np.int64)
+MEMBRANE_ORDER = np.array([0, 1, 6, 7, 12, 13, 18, 19], dtype=np.int64)
+
+_GAUSS_COORD = 1.0 / sqrt(3.0)
+_GAUSS_POINTS = (
+    (-_GAUSS_COORD, -_GAUSS_COORD),
+    (_GAUSS_COORD, -_GAUSS_COORD),
+    (_GAUSS_COORD, _GAUSS_COORD),
+    (-_GAUSS_COORD, _GAUSS_COORD),
+)
+
+
+def _hw_row(xi: float, eta: float) -> np.ndarray:
+    """Precompute the shear load interpolation row for a given Gauss point."""
+    return 0.25 * np.array([
+        (1 - xi) * (1 - eta), 0.0, 0.0,
+        (1 + xi) * (1 - eta), 0.0, 0.0,
+        (1 + xi) * (1 + eta), 0.0, 0.0,
+        (1 - xi) * (1 + eta), 0.0, 0.0,
+    ], dtype=np.float64)
+
+
+_HW_GAUSS = np.stack([_hw_row(xi, eta) for xi, eta in _GAUSS_POINTS])
+_FER_EXPANSION_MAP = np.array([2, 3, 4, 8, 9, 10, 14, 15, 16, 20, 21, 22], dtype=np.int64)
 
 if TYPE_CHECKING:
     from typing import List, Tuple, Optional
@@ -26,6 +65,9 @@ class Quad3D():
 
     This element performs well for thick and thin plates, and for skewed plates. Minor errors are introduced into the solution due to the drilling approximation. Orthotropic behavior is limited to acting along the plate's local axes.
     """
+
+    # Reuse stiffness assembly results when multiple quads share geometry/material
+    _GLOBAL_STIFFNESS_CACHE: ClassVar[Dict[Tuple[float, ...], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]] = {}
 
     def __init__(self, name: str, i_node: Node3D, j_node: Node3D, m_node: Node3D, n_node: Node3D, 
                  t: float, material_name: str, model: FEModel3D, kx_mod: float = 1.0,
@@ -55,6 +97,55 @@ class Quad3D():
             self.nu: float = self.model.materials[material_name].nu
         except:
             raise KeyError('Please define the material ' + str(material_name) + ' before assigning it to plates.')
+
+        # Cached data for accelerated post-processing (populated when stiffness matrices are assembled)
+        self._Bb_stack = None
+        self._B_m_stack = None
+        self._Hb_cache = None
+        self._Cm_cache = None
+        self._k_cache: Optional[np.ndarray] = None
+        self._K_global_cache: Optional[np.ndarray] = None
+        self._k_b_cache: Optional[np.ndarray] = None
+        self._k_m_cache: Optional[np.ndarray] = None
+        self._fer_local_cache: dict[str, np.ndarray] = {}
+        self._fer_cache: dict[str, np.ndarray] = {}
+        self._T_cache: Optional[np.ndarray] = None
+        self._J_cache: Dict[Tuple[float, float], np.ndarray] = {}
+        self._L_cache: Dict[int, float] = {}
+        self._dir_cos_cache: Dict[int, Tuple[float, float]] = {}
+        self._local_coords_valid: bool = False
+        self._gauss_jacobians_cache: Optional[Tuple] = None
+        self.x1: float = 0.0
+        self.y1: float = 0.0
+        self.x2: float = 0.0
+        self.y2: float = 0.0
+        self.x3: float = 0.0
+        self.y3: float = 0.0
+        self.x4: float = 0.0
+        self.y4: float = 0.0
+
+    def invalidate_cache(self) -> None:
+        """
+        Clears cached stiffness, transformation, and fixed-end reaction data.
+        Call this whenever element properties, loads, or orientation change.
+        """
+
+        self._Bb_stack = None
+        self._B_m_stack = None
+        self._Hb_cache = None
+        self._Cm_cache = None
+        self._k_cache = None
+        self._K_global_cache = None
+        self._k_b_cache = None
+        self._k_m_cache = None
+        self._fer_local_cache.clear()
+        self._fer_cache.clear()
+        self._T_cache = None
+        self._J_cache.clear()
+        self._L_cache.clear()
+        self._dir_cos_cache.clear()
+        self._local_coords_valid = False
+        self._gauss_jacobians_cache = None
 
     # def _local_coords(self):
     #     """
@@ -106,52 +197,70 @@ class Quad3D():
         Calculates or recalculates and stores the local (x, y) coordinates for each node of the quadrilateral.
         """
 
+        if self._local_coords_valid:
+            return
+
         # Get the global coordinates for each node
         X1, Y1, Z1 = self.i_node.X, self.i_node.Y, self.i_node.Z
         X2, Y2, Z2 = self.j_node.X, self.j_node.Y, self.j_node.Z
         X3, Y3, Z3 = self.m_node.X, self.m_node.Y, self.m_node.Z
         X4, Y4, Z4 = self.n_node.X, self.n_node.Y, self.n_node.Z
 
-        # Node 1 will be used as the origin of the plate's local (x, y) coordinate system. Find the
-        # vector from the origin to each node.
-        vector_12 = np.array([X2 - X1, Y2 - Y1, Z2 - Z1]).T
-        vector_13 = np.array([X3 - X1, Y3 - Y1, Z3 - Z1]).T
-        vector_14 = np.array([X4 - X1, Y4 - Y1, Z4 - Z1]).T
+        # Use optimized numba function
+        self.x1, self.y1, self.x2, self.y2, self.x3, self.y3, self.x4, self.y4 = compute_quad_local_coords(
+            X1, Y1, Z1, X2, Y2, Z2, X3, Y3, Z3, X4, Y4, Z4
+        )
 
-        # Define the plate's local x, y, and z axes
-        x_axis = vector_12
-        z_axis = np.cross(x_axis, vector_13)
-        y_axis = np.cross(z_axis, x_axis)
+        self._J_cache.clear()
+        self._L_cache.clear()
+        self._dir_cos_cache.clear()
+        self._local_coords_valid = True
+        self._gauss_jacobians_cache = None
 
-        # Convert the x and y axes into unit vectors
-        x_axis = x_axis/norm(x_axis)
-        y_axis = y_axis/norm(y_axis)
-
-        # Calculate the local (x, y) coordinates for each node
-        self.x1: float = 0.0
-        self.x2: float = np.dot(vector_12, x_axis)
-        self.x3: float = np.dot(vector_13, x_axis)
-        self.x4: float = np.dot(vector_14, x_axis)
-        self.y1: float = 0.0
-        self.y2: float = np.dot(vector_12, y_axis)
-        self.y3: float = np.dot(vector_13, y_axis)
-        self.y4: float = np.dot(vector_14, y_axis)
+    def _cache_key(self) -> Tuple[float, ...]:
+        self._local_coords()
+        return (
+            round(self.x1, 8),
+            round(self.y1, 8),
+            round(self.x2, 8),
+            round(self.y2, 8),
+            round(self.x3, 8),
+            round(self.y3, 8),
+            round(self.x4, 8),
+            round(self.y4, 8),
+            round(self.t, 8),
+            round(self.E, 8),
+            round(self.nu, 8),
+            round(self.kx_mod, 8),
+            round(self.ky_mod, 8),
+        )
 
     def L_k(self, k: Literal[5, 6, 7, 8]) -> float:
-        
+
+        cached = self._L_cache.get(k)
+        if cached is not None:
+            return cached
+
         # Figures 3 and 5
         if k == 5:
-            return ((self.x2 - self.x1)**2 + (self.y2 - self.y1)**2)**0.5
+            length = ((self.x2 - self.x1)**2 + (self.y2 - self.y1)**2)**0.5
         elif k == 6:
-            return ((self.x3 - self.x2)**2 + (self.y3 - self.y2)**2)**0.5
+            length = ((self.x3 - self.x2)**2 + (self.y3 - self.y2)**2)**0.5
         elif k == 7:
-            return ((self.x4 - self.x3)**2 + (self.y4 - self.y3)**2)**0.5
+            length = ((self.x4 - self.x3)**2 + (self.y4 - self.y3)**2)**0.5
         elif k == 8:
-            return ((self.x1 - self.x4)**2 + (self.y1 - self.y4)**2)**0.5
+            length = ((self.x1 - self.x4)**2 + (self.y1 - self.y4)**2)**0.5
         else:
             raise Exception('Invalid value for k. k must be 5, 6, 7, or 8.')
+
+        self._L_cache[k] = length
+        return length
     
     def dir_cos(self, k: Literal[5, 6, 7, 8]) -> Tuple[float, float]:
+
+        cached = self._dir_cos_cache.get(k)
+        if cached is not None:
+            return cached
 
         L_k = self.L_k(k)
 
@@ -171,7 +280,9 @@ class Quad3D():
         else:
             raise Exception('Invalid value for k. k must be 5, 6, 7, or 8.')
 
-        return C, S
+        result = (C, S)
+        self._dir_cos_cache[k] = result
+        return result
 
     def phi_k(self, k: Literal[5, 6, 7, 8]) -> float:
 
@@ -270,17 +381,66 @@ class Quad3D():
         
         return Co
 
-    def J(self, xi: float, eta: float) -> NDArray[float64]:
-        """
-        Returns the Jacobian matrix for the element
-        """
+    def _gauss_jacobians(self) -> Tuple:
+        """Pre-compute Jacobian data for all 4 Gauss points."""
+        if self._gauss_jacobians_cache is not None:
+            return self._gauss_jacobians_cache
+
+        gp = 1.0 / sqrt(3.0)
+        gauss_pts = [(-gp, -gp), (gp, -gp), (gp, gp), (-gp, gp)]
+
+        results = []
+        for xi, eta in gauss_pts:
+            J, invJ, detJ = self._jacobian_data(xi, eta)
+            results.append((J, invJ, detJ))
+
+        self._gauss_jacobians_cache = tuple(results)
+        return self._gauss_jacobians_cache
+
+    def _jacobian_data(self, xi: float, eta: float) -> Tuple[np.ndarray, np.ndarray, float]:
+        key = (round(xi, 12), round(eta, 12))
+        cached = self._J_cache.get(key)
+        if cached is not None:
+            return cached
 
         # Get the local coordinates for the element
         x1, y1, x2, y2, x3, y3, x4, y4 = self.x1, self.y1, self.x2, self.y2, self.x3, self.y3, self.x4, self.y4
 
-        # Return the Jacobian matrix
-        return 1/4*np.array([[x1*(eta - 1) - x2*(eta - 1) + x3*(eta + 1) - x4*(eta + 1), y1*(eta - 1) - y2*(eta - 1) + y3*(eta + 1) - y4*(eta + 1)],
-                             [x1*(xi - 1)  - x2*(xi + 1)  + x3*(xi + 1)  - x4*(xi - 1),  y1*(xi - 1)  - y2*(xi + 1)  + y3*(xi + 1)  - y4*(xi - 1)]])
+        J = 0.25 * np.array([
+            [x1 * (eta - 1) - x2 * (eta - 1) + x3 * (eta + 1) - x4 * (eta + 1),
+             y1 * (eta - 1) - y2 * (eta - 1) + y3 * (eta + 1) - y4 * (eta + 1)],
+            [x1 * (xi - 1) - x2 * (xi + 1) + x3 * (xi + 1) - x4 * (xi - 1),
+             y1 * (xi - 1) - y2 * (xi + 1) + y3 * (xi + 1) - y4 * (xi - 1)],
+        ])
+
+        detJ = J[0, 0] * J[1, 1] - J[0, 1] * J[1, 0]
+        if abs(detJ) <= 1e-12:
+            raise ValueError(f'Jacobian determinant is zero for quad element {self.name} at ({xi}, {eta}).')
+
+        invJ = np.array([[J[1, 1], -J[0, 1]],
+                         [-J[1, 0], J[0, 0]]], dtype=J.dtype) / detJ
+
+        data = (J, invJ, detJ)
+        self._J_cache[key] = data
+        return data
+
+    def J(self, xi: float, eta: float) -> NDArray[float64]:
+        """
+        Returns the Jacobian matrix for the element
+        """
+        return self._jacobian_data(xi, eta)[0]
+
+    def J_inv(self, xi: float, eta: float) -> NDArray[float64]:
+        """
+        Returns the inverse Jacobian matrix for the element
+        """
+        return self._jacobian_data(xi, eta)[1]
+
+    def J_det(self, xi: float, eta: float) -> float:
+        """
+        Returns the determinant of the Jacobian matrix for the element
+        """
+        return self._jacobian_data(xi, eta)[2]
 
     def N_gamma(self, xi: float, eta: float) -> NDArray[float64]:
 
@@ -348,7 +508,7 @@ class Quad3D():
     def B_b_beta(self, xi: float, eta: float) -> NDArray[float64]:
 
         # Get the inverse of the Jacobian matrix
-        J_inv = inv(self.J(xi, eta))
+        J_inv = self.J_inv(xi, eta)
 
         # Get the individual terms for the Jacobian inverse
         j11 = J_inv[0, 0]
@@ -382,7 +542,7 @@ class Quad3D():
     def B_b_Delta_beta(self, xi: float, eta: float) -> NDArray[float64]:
 
         # Get the inverse of the Jacobian matrix
-        J_inv = inv(self.J(xi, eta))
+        J_inv = self.J_inv(xi, eta)
 
         # Get the individual terms for the Jacobian inverse
         j11 = J_inv[0, 0]
@@ -432,7 +592,7 @@ class Quad3D():
         """
         
         # Return the [B] matrix for shear
-        return inv(self.J(xi, eta)) @ self.N_gamma(xi, eta) @ self.A_gamma() @ self.A_phi_Delta() @ self.A_u()
+        return self.J_inv(xi, eta) @ self.N_gamma(xi, eta) @ self.A_gamma() @ self.A_phi_Delta() @ self.A_u()
 
     def B_s_gamma(self, xi:float , eta: float) -> None:
         """Returns the [B_s_gamma] matrix for shear (Equation 39 in Reference 1)
@@ -451,7 +611,7 @@ class Quad3D():
         # Row 2 = interpolation functions differentiated with respect to y
         # Note that the inverse of the Jacobian converts from derivatives with
         # respect to xi and eta to derivatives with respect to x and y
-        dH = np.matmul(inv(self.J(xi, eta)), 1/4*np.array([[eta - 1, -eta + 1, eta + 1, -eta - 1],                 
+        dH = np.matmul(self.J_inv(xi, eta), 1/4*np.array([[eta - 1, -eta + 1, eta + 1, -eta - 1],                 
                                                            [xi - 1,  -xi - 1,  xi + 1,  -xi + 1 ]]))
 
         # Reference 2, Example 5.5 (page 353)
@@ -522,43 +682,41 @@ class Quad3D():
         Returns the local stiffness matrix for bending and shear stresses
         '''
 
+        if self._k_b_cache is not None:
+            return self._k_b_cache
+
         Hb = self.Hb()
         Hs = self.Hs()
 
         # Define the gauss point for numerical integration
         gp = 1/3**0.5
 
-        # Get the determinant of the Jacobian matrix for each gauss point. Doing this now will save us from doing it twice below.
-        det_J1 = det(self.J(-gp, -gp))
-        det_J2 = det(self.J( gp, -gp))
-        det_J3 = det(self.J( gp,  gp))
-        det_J4 = det(self.J(-gp,  gp))
+        dets = np.array([
+            self.J_det(-gp, -gp),
+            self.J_det(gp, -gp),
+            self.J_det(gp, gp),
+            self.J_det(-gp, gp)
+        ])
 
-        # Get the bending [B_b] matrices for each gauss point
-        B1 = self.B_b(-gp, -gp)
-        B2 = self.B_b( gp, -gp)
-        B3 = self.B_b( gp,  gp)
-        B4 = self.B_b(-gp,  gp)
+        Bb_stack = np.array([
+            self.B_b(-gp, -gp),
+            self.B_b(gp, -gp),
+            self.B_b(gp, gp),
+            self.B_b(-gp, gp)
+        ])
 
-        # Create the stiffness matrix with bending stiffness terms
-        # See 2, Equation 5.94
-        k = ((B1.T @ Hb @ B1)*det_J1 +
-             (B2.T @ Hb @ B2)*det_J2 +
-             (B3.T @ Hb @ B3)*det_J3 +
-             (B4.T @ Hb @ B4)*det_J4)
+        Bs_stack = np.array([
+            self.B_s(-gp, -gp),
+            self.B_s(gp, -gp),
+            self.B_s(gp, gp),
+            self.B_s(-gp, gp)
+        ])
 
-        # Get the shear [B_s] matrices for each gauss point
-        B1 = self.B_s(-gp, -gp)
-        B2 = self.B_s( gp, -gp)
-        B3 = self.B_s( gp,  gp)
-        B4 = self.B_s(-gp,  gp)
+        k_unexpanded = accumulate_bending_shear_stiffness(Bb_stack, Hb, Bs_stack, Hs, dets)
 
-        # Add shear stiffness terms to the stiffness matrix
-        k += ((B1.T @ Hs @ B1)*det_J1 +
-              (B2.T @ Hs @ B2)*det_J2 +
-              (B3.T @ Hs @ B3)*det_J3 +
-              (B4.T @ Hs @ B4)*det_J4)
-        
+        self._Bb_stack = np.ascontiguousarray(Bb_stack)
+        self._Hb_cache = np.ascontiguousarray(Hb)
+
         # Following Bathe's recommendation for the drilling degree of freedom
         # from Example 4.19 in "Finite Element Procedures, 2nd Ed.", calculate
         # the drilling stiffness as 1/1000 of the smallest diagonal term in
@@ -571,45 +729,11 @@ class Quad3D():
         # relate to translational stiffness. It seems more rational to only
         # look at the terms relating to rotational stiffness. That will be
         # Pynite's approach.
-        k_rz = min(abs(k[1, 1]), abs(k[2, 2]), abs(k[4, 4]), abs(k[5, 5]),
-                   abs(k[7, 7]), abs(k[8, 8]), abs(k[10, 10]), abs(k[11, 11])
+        k_rz = min(abs(k_unexpanded[1, 1]), abs(k_unexpanded[2, 2]), abs(k_unexpanded[4, 4]), abs(k_unexpanded[5, 5]),
+                   abs(k_unexpanded[7, 7]), abs(k_unexpanded[8, 8]), abs(k_unexpanded[10, 10]), abs(k_unexpanded[11, 11])
                    )/1000
-        
-        # Initialize the expanded stiffness matrix to all zeros
-        k_exp = np.zeros((24, 24))
 
-        # Step through each term in the unexpanded stiffness matrix
-        # i = Unexpanded matrix row
-        for i in range(12):
-
-            # j = Unexpanded matrix column
-            for j in range(12):
-                
-                # Find the corresponding term in the expanded stiffness
-                # matrix
-
-                # m = Expanded matrix row
-                if i in [0, 3, 6, 9]:  # indices associated with deflection in z
-                    m = 2*i + 2
-                if i in [1, 4, 7, 10]:  # indices associated with rotation about x
-                    m = 2*i + 1
-                if i in [2, 5, 8, 11]:  # indices associated with rotation about y
-                    m = 2*i
-
-                # n = Expanded matrix column
-                if j in [0, 3, 6, 9]:  # indices associated with deflection in z
-                    n = 2*j + 2
-                if j in [1, 4, 7, 10]:  # indices associated with rotation about x
-                    n = 2*j + 1
-                if j in [2, 5, 8, 11]:  # indices associated with rotation about y
-                    n = 2*j
-                
-                # Ensure the indices are integers rather than floats
-                m, n = round(m), round(n)
-
-                # Add the term from the unexpanded matrix into the expanded
-                # matrix
-                k_exp[m, n] = k[i, j]
+        k_exp = expand_bending_matrix(k_unexpanded)
 
         # Add the drilling degree of freedom's weak spring
         k_exp[5, 5] = k_rz
@@ -627,6 +751,7 @@ class Quad3D():
         k_exp[[3, 4, 9, 10, 15, 16, 21, 22], :] = k_exp[[4, 3, 10, 9, 16, 15, 22, 21], :]
         k_exp[:, [3, 4, 9, 10, 15, 16, 21, 22]] = k_exp[:, [4, 3, 10, 9, 16, 15, 22, 21]]
 
+        self._k_b_cache = k_exp
         return k_exp
 
     def k_m(self) -> NDArray[float64]:
@@ -636,76 +761,73 @@ class Quad3D():
         Plane stress is assumed
         '''
 
+        if self._k_m_cache is not None:
+            return self._k_m_cache
+
         t = self.t
         Cm = self.Cm()
 
         # Define the gauss point for numerical integration
         gp = 1/3**0.5
 
-        # Get the membrane B matrices for each gauss point
-        # Doing this now will save us from doing it twice below
-        B1 = self.B_m(-gp, -gp)
-        B2 = self.B_m( gp, -gp)
-        B3 = self.B_m( gp,  gp)
-        B4 = self.B_m(-gp,  gp)
+        B_stack = np.array([
+            self.B_m(-gp, -gp),
+            self.B_m(gp, -gp),
+            self.B_m(gp, gp),
+            self.B_m(-gp, gp)
+        ])
 
-        # Calculate the determinant of the Jacobian matrix at each gauss point
-        det_J1 = det(self.J(-gp, -gp))
-        det_J2 = det(self.J(gp, -gp))
-        det_J3 = det(self.J(gp, gp))
-        det_J4 = det(self.J(-gp, gp))
+        dets = np.array([
+            self.J_det(-gp, -gp),
+            self.J_det(gp, -gp),
+            self.J_det(gp, gp),
+            self.J_det(-gp, gp)
+        ])
 
-        if det_J1 <= 0 or det_J2 <= 0 or det_J3 <= 0 or det_J4 <= 0:
+        if np.any(dets <= 0):
             warnings.warn(f'The Jacobian matrix for quad element {self.name} is less than or equal to zero, indicating the element is invalid or badly distorted.')
 
-        # See reference 2 at the bottom of page 353, and reference 2 page 466
-        k = t*((B1.T @ Cm @ B1)*det_J1 +
-               (B2.T @ Cm @ B2)*det_J2 +
-               (B3.T @ Cm @ B3)*det_J3 +
-               (B4.T @ Cm @ B4)*det_J4)
-        
-        k_exp = np.zeros((24, 24))
+        k_unexpanded = accumulate_membrane_stiffness(B_stack, Cm, dets, t)
 
-        # Step through each term in the unexpanded stiffness matrix
-        # i = Unexpanded matrix row
-        for i in range(8):
-
-            # j = Unexpanded matrix column
-            for j in range(8):
-                
-                # Find the corresponding term in the expanded stiffness
-                # matrix
-
-                # m = Expanded matrix row
-                if i in [0, 2, 4, 6]:  # indices associated with displacement in x
-                    m = i*3
-                if i in [1, 3, 5, 7]:  # indices associated with displacement in y
-                    m = i*3 - 2
-
-                # n = Expanded matrix column
-                if j in [0, 2, 4, 6]:  # indices associated with displacement in x
-                    n = j*3
-                if j in [1, 3, 5, 7]:  # indices associated with displacement in y
-                    n = j*3 - 2
-                
-                # Ensure the indices are integers rather than floats
-                m, n = round(m), round(n)
-
-                # Add the term from the unexpanded matrix into the expanded matrix
-                k_exp[m, n] = k[i, j]
-        
-        return k_exp
+        self._B_m_stack = np.ascontiguousarray(B_stack)
+        self._Cm_cache = np.ascontiguousarray(Cm)
+        self._k_m_cache = expand_membrane_matrix(k_unexpanded)
+        return self._k_m_cache
 
     def k(self) -> NDArray[float64]:
         '''
         Returns the quad element's local stiffness matrix.
         '''
 
-        # Recalculate the local coordinate system
-        self._local_coords()
+        if self._k_cache is not None:
+            return self._k_cache
 
-        # Sum the bending and membrane stiffness matrices
-        return np.add(self.k_b(), self.k_m())
+        key = self._cache_key()
+        cached = Quad3D._GLOBAL_STIFFNESS_CACHE.get(key)
+        if cached is not None:
+            (k_b_cached, Bb_cached, Hb_cached, k_m_cached, Bm_cached, Cm_cached) = cached
+            self._k_b_cache = k_b_cached.copy()
+            self._Bb_stack = Bb_cached.copy() if Bb_cached is not None else None
+            self._Hb_cache = Hb_cached.copy() if Hb_cached is not None else None
+            self._k_m_cache = k_m_cached.copy()
+            self._B_m_stack = Bm_cached.copy() if Bm_cached is not None else None
+            self._Cm_cache = Cm_cached.copy() if Cm_cached is not None else None
+            self._k_cache = np.add(self._k_b_cache, self._k_m_cache)
+            return self._k_cache
+
+        # Sum the bending and membrane stiffness matrices using freshly computed values
+        k_b_local = self.k_b()
+        k_m_local = self.k_m()
+        self._k_cache = np.add(k_b_local, k_m_local)
+        Quad3D._GLOBAL_STIFFNESS_CACHE[key] = (
+            k_b_local.copy(),
+            self._Bb_stack.copy() if self._Bb_stack is not None else None,
+            self._Hb_cache.copy() if self._Hb_cache is not None else None,
+            k_m_local.copy(),
+            self._B_m_stack.copy() if self._B_m_stack is not None else None,
+            self._Cm_cache.copy() if self._Cm_cache is not None else None,
+        )
+        return self._k_cache
 
     def f(self, combo_name: str='Combo 1') -> NDArray[float64]:
         """
@@ -725,22 +847,21 @@ class Quad3D():
             The name of the load combination to get the consistent load vector for.
         """
 
+        cached = self._fer_local_cache.get(combo_name)
+        if cached is not None:
+            return cached
+
         # Update the local coordinate system
         self._local_coords()
 
-        Hw = lambda xi, eta : 1/4*np.array([[(1 - xi)*(1 - eta), 0, 0, (1 + xi)*(1 - eta), 0, 0, (1 + xi)*(1 + eta), 0, 0, (1 - xi)*(1 + eta), 0, 0]])
-
         # Initialize the fixed end reaction vector
-        fer = np.zeros((12, 1))
+        fer_local = None
 
         # Get the requested load combination
         combo = self.model.load_combos[combo_name]
 
-        # Define the gauss point used for numerical integration
-        gp = 1/3**0.5
-
         # Initialize the element's surface pressure to zero
-        p = 0
+        p = 0.0
 
         # Loop through each load case and factor in the load combination
         for case, factor in combo.factors.items():
@@ -754,34 +875,20 @@ class Quad3D():
                     # Sum the pressures
                     p -= factor*pressure[0]
 
-        fer = (Hw(-gp, -gp).T*p*det(self.J(-gp, -gp))
-             + Hw( gp, -gp).T*p*det(self.J( gp, -gp))
-             + Hw( gp,  gp).T*p*det(self.J( gp,  gp))
-             + Hw(-gp,  gp).T*p*det(self.J(-gp,  gp)))
+        if abs(p) < 1e-16:
+            fer_exp = np.zeros((24, 1))
+            self._fer_local_cache[combo_name] = fer_exp
+            return fer_exp
+
+        dets = np.array([self.J_det(xi, eta) for xi, eta in _GAUSS_POINTS], dtype=np.float64)
+        fer_local = (_HW_GAUSS * dets[:, None]).sum(axis=0) * p
 
         # Initialize the expanded vector to all zeros
-        fer_exp = np.zeros((24, 1))
+        fer_exp = np.zeros(24, dtype=np.float64)
+        fer_exp[_FER_EXPANSION_MAP] = fer_local
+        fer_exp = fer_exp.reshape(24, 1)
 
-        # Step through each term in the unexpanded vector
-        # i = Unexpanded vector row
-        for i in range(12):
-
-            # Find the corresponding term in the expanded vector
-
-            # m = Expanded vector row
-            if i in [0, 3, 6, 9]:   # indices associated with deflection in z
-                m = 2*i + 2
-            if i in [1, 4, 7, 10]:  # indices associated with rotation about x
-                m = 2*i + 1
-            if i in [2, 5, 8, 11]:  # indices associated with rotation about y
-                m = 2*i
-
-            # Ensure the index is an integer rather than a float
-            m = round(m)
-
-            # Add the term from the unexpanded vector into the expanded vector
-            fer_exp[m, 0] = fer[i, 0]
-
+        self._fer_local_cache[combo_name] = fer_exp
         return fer_exp
 
     def d(self, combo_name='Combo 1') -> NDArray[float64]:
@@ -857,11 +964,15 @@ class Quad3D():
         Returns the quad element's global stiffness matrix
         '''
 
+        if self._K_global_cache is not None:
+            return self._K_global_cache
+
         # Get the transformation matrix
         T = self.T()
 
         # Calculate and return the stiffness matrix in global coordinates
-        return inv(T) @ self.k() @ T
+        self._K_global_cache = T.T @ self.k() @ T
+        return self._K_global_cache
 
     # Global fixed end reaction vector
     def FER(self, combo_name:str='Combo 1') -> NDArray[float64]:
@@ -874,77 +985,30 @@ class Quad3D():
             The name of the load combination to calculate the fixed end
             reaction vector for (not the load combination itself).
         '''
-        
-        # Calculate and return the fixed end reaction vector
-        return inv(self.T()) @ self.fer(combo_name)
+        cached = self._fer_cache.get(combo_name)
+        if cached is not None:
+            return cached
+
+        result = self.T().T @ self.fer(combo_name)
+        self._fer_cache[combo_name] = result
+        return result
   
     def T(self) -> NDArray[float64]:
         """
         Returns the coordinate transformation matrix for the quad element.
         """
 
-        xi = self.i_node.X
-        xj = self.j_node.X
-        yi = self.i_node.Y
-        yj = self.j_node.Y
-        zi = self.i_node.Z
-        zj = self.j_node.Z
+        if self._T_cache is not None:
+            return self._T_cache
 
-        # Calculate the direction cosines for the local x-axis.The local x-axis will run from
-        # the i-node to the j-node
-        x = [xj - xi, yj - yi, zj - zi]
+        # Use optimized numba function
+        self._T_cache = compute_quad_transformation_matrix(
+            self.i_node.X, self.i_node.Y, self.i_node.Z,
+            self.j_node.X, self.j_node.Y, self.j_node.Z,
+            self.n_node.X, self.n_node.Y, self.n_node.Z,
+        )
 
-        # Divide the vector by its magnitude to produce a unit x-vector of
-        # direction cosines
-        # mag = (x[0]**2 + x[1]**2 + x[2]**2)**0.5
-        # x = [x[0]/mag, x[1]/mag, x[2]/mag]
-        x = x/norm(x)
-        
-        # The local y-axis will be in the plane of the plate. Find a vector in
-        # the plate's local xy plane.
-        xn = self.n_node.X
-        yn = self.n_node.Y
-        zn = self.n_node.Z
-        xy = [xn - xi, yn - yi, zn - zi]
-
-        # Find a vector perpendicular to the plate surface to get the
-        # orientation of the local z-axis.
-        z = np.cross(x, xy)
-        
-        # Divide the z-vector by its magnitude to produce a unit z-vector of
-        # direction cosines.
-        # mag = (z[0]**2 + z[1]**2 + z[2]**2)**0.5
-        # z = [z[0]/mag, z[1]/mag, z[2]/mag]
-        z = z/norm(z)
-
-        # Calculate the local y-axis as a vector perpendicular to the local z
-        # and x-axes.
-        y = np.cross(z, x)
-        
-        # Divide the y-vector by its magnitude to produce a unit vector of
-        # direction cosines.
-        # mag = (y[0]**2 + y[1]**2 + y[2]**2)**0.5
-        # y = [y[0]/mag, y[1]/mag, y[2]/mag]
-        y = y/norm(y)
-
-        # Create the direction cosines matrix.
-        dir_cos = np.array([x,
-                            y,
-                            z])
-        
-        # Build the transformation matrix.
-        T = np.zeros((24, 24))
-        T[0:3, 0:3] = dir_cos
-        T[3:6, 3:6] = dir_cos
-        T[6:9, 6:9] = dir_cos
-        T[9:12, 9:12] = dir_cos
-        T[12:15, 12:15] = dir_cos
-        T[15:18, 15:18] = dir_cos
-        T[18:21, 18:21] = dir_cos
-        T[21:24, 21:24] = dir_cos
-        
-        # Return the transformation matrix.
-        return T
+        return self._T_cache
     
     # def T(self):
     #     """
@@ -1108,54 +1172,30 @@ class Quad3D():
         Internal moment per unit length of the quad element: [[Mx], [My], [Mxy]]
         """
 
-        # Get the plate's local displacement vector
-        d = self.d(combo_name)
+        d_full = np.asarray(self.d(combo_name), dtype=float).reshape(-1).copy()
+        d_full[BENDING_SIGN_IDX] *= -1
+        d_local = np.ascontiguousarray(d_full[BENDING_ORDER])
 
-        # Correct the sign convention for x-axis rotation - note that +x bending and +x rotation are opposite in the DKMQ derivation. Hence when correcting d we correct the x terms, but when correcting k we correct the y terms
-        d[[3, 9, 15, 21], :] *= -1
+        if self._Bb_stack is None or self._Hb_cache is None:
+            self.k_b()
 
-        # Slice out terms not related to plate bending, and swap the local x and y to match the DKMQ derivation
-        d = d[[2, 4, 3, 8, 10, 9, 14, 16, 15, 20, 22, 21], :]
+        xi_arr = np.asarray(xi)
+        eta_arr = np.asarray(eta)
 
-        # Define the gauss point used for numerical integration
-        gp = 1/3**0.5
+        if xi_arr.ndim == 0 and eta_arr.ndim == 0:
+            xi_scalar = float(xi_arr)
+            eta_scalar = float(eta_arr)
+            results = quad_moment_at(d_local, self._Hb_cache, self._Bb_stack, xi_scalar, eta_scalar)
+            Mx = results[0]
+            My = results[1]
+            Mxy = results[2]
 
-        # # Define extrapolated `xi` and `eta` points
-        xi_ex = xi/gp
-        eta_ex = eta/gp
+            if local:
+                return np.array([[Mx],
+                                 [My],
+                                 [Mxy]])
 
-        # Define the interpolation functions
-        H = 1/4*np.array([(1 - xi_ex)*(1 - eta_ex), (1 + xi_ex)*(1 - eta_ex), (1 + xi_ex)*(1 + eta_ex), (1 - xi_ex)*(1 + eta_ex)])
-
-        # Get the stress-strain matrix
-        Hb = self.Hb()
-
-        # Calculate the internal moments [-My, Mx, Mxy] at each gauss point
-        m1 = np.matmul(Hb, np.matmul(self.B_b(-gp, -gp), d))
-        m2 = np.matmul(Hb, np.matmul(self.B_b( gp, -gp), d))
-        m3 = np.matmul(Hb, np.matmul(self.B_b( gp,  gp), d))
-        m4 = np.matmul(Hb, np.matmul(self.B_b(-gp,  gp), d))
-
-        # Extrapolate to get the value at the requested location
-        Mx = H[0]*m1[0] + H[1]*m2[0] + H[2]*m3[0] + H[3]*m4[0]
-        My = H[0]*m1[1] + H[1]*m2[1] + H[2]*m3[1] + H[3]*m4[1]
-        Mxy = H[0]*m1[2] + H[1]*m2[2] + H[2]*m3[2] + H[3]*m4[2]
-
-        if local:
-
-            return np.array([Mx,
-                             My,
-                             Mxy])
-
-        else:
-
-            # Get the direction cosines for the plate's local coordinate system
             dir_cos = self.T()[:3, :3]
-
-            # Convert the local results to global results
-            Mx = float(Mx)
-            My = float(-My)
-            Mxy = float(Mxy)
             M_local = np.array([
                 [Mx, Mxy, 0.0],
                 [Mxy, My, 0.0],
@@ -1164,60 +1204,70 @@ class Quad3D():
 
             M_global_tensor = dir_cos @ M_local @ dir_cos.T
 
-            # Extract the results for each direction
-            Mx_global = M_global_tensor[0, 0]
-            My_global = M_global_tensor[1, 1]
-            Mxy_global = M_global_tensor[0, 1]
+            return np.array([[M_global_tensor[0, 0]],
+                             [M_global_tensor[1, 1]],
+                             [M_global_tensor[0, 1]]])
 
-            return np.array([[Mx_global],
-                             [My_global],
-                             [Mxy_global]])
+        xi_b, eta_b = np.broadcast_arrays(xi_arr, eta_arr)
+        xi_flat = xi_b.astype(float).ravel()
+        eta_flat = eta_b.astype(float).ravel()
+
+        batch = quad_moment_batch(d_local, self._Hb_cache, self._Bb_stack, xi_flat, eta_flat)
+        Mx = batch[:, 0].reshape(xi_b.shape)
+        My = batch[:, 1].reshape(xi_b.shape)
+        Mxy = batch[:, 2].reshape(xi_b.shape)
+
+        if local:
+            return np.stack((Mx, My, Mxy), axis=0)
+
+        dir_cos = self.T()[:3, :3]
+        Mx_g = np.empty_like(Mx)
+        My_g = np.empty_like(My)
+        Mxy_g = np.empty_like(Mxy)
+
+        flat_Mx = Mx.ravel()
+        flat_My = My.ravel()
+        flat_Mxy = Mxy.ravel()
+
+        for idx in range(flat_Mx.size):
+            M_local = np.array([
+                [flat_Mx[idx], flat_Mxy[idx], 0.0],
+                [flat_Mxy[idx], flat_My[idx], 0.0],
+                [0.0, 0.0, 0.0]
+            ])
+            M_global_tensor = dir_cos @ M_local @ dir_cos.T
+            Mx_g.ravel()[idx] = M_global_tensor[0, 0]
+            My_g.ravel()[idx] = M_global_tensor[1, 1]
+            Mxy_g.ravel()[idx] = M_global_tensor[0, 1]
+
+        return np.stack((Mx_g, My_g, Mxy_g), axis=0)
 
 
     def membrane(self, xi:float=0, eta: float=0, local:bool=True, combo_name:str='Combo 1') -> NDArray[float64]:
 
-        # Get the plate's local displacement vector. Slice out terms not related to membrane stresses.
-        d = self.d(combo_name)[[0, 1, 6, 7, 12, 13, 18, 19], :]
+        d_full = np.asarray(self.d(combo_name), dtype=float).reshape(-1)
+        d_local = np.ascontiguousarray(d_full[MEMBRANE_ORDER])
 
-        # Define the gauss point used for numerical integration
-        gp = 1/3**0.5
+        if self._B_m_stack is None or self._Cm_cache is None:
+            self.k_m()
 
-        # Define extrapolated r and s points
-        xi_ex = xi/gp
-        eta_ex = eta/gp
+        xi_arr = np.asarray(xi)
+        eta_arr = np.asarray(eta)
 
-        # Define the interpolation functions
-        H = 1/4*np.array([(1 - xi_ex)*(1 - eta_ex), (1 + xi_ex)*(1 - eta_ex), (1 + xi_ex)*(1 + eta_ex), (1 - xi_ex)*(1 + eta_ex)])
+        if xi_arr.ndim == 0 and eta_arr.ndim == 0:
+            xi_scalar = float(xi_arr)
+            eta_scalar = float(eta_arr)
+            stresses = quad_membrane_at(d_local, self._Cm_cache, self._B_m_stack, xi_scalar, eta_scalar)
+            Sx = stresses[0]
+            Sy = stresses[1]
+            Txy = stresses[2]
 
-        # Get the stress-strain matrix
-        Cm = self.Cm()
+            if local:
+                return np.array([[Sx],
+                                 [Sy],
+                                 [Txy]])
 
-        # Calculate the internal stresses [Sx, Sy, Txy] at each gauss point
-        s1 = np.matmul(Cm, np.matmul(self.B_m(-gp, -gp), d))
-        s2 = np.matmul(Cm, np.matmul(self.B_m(gp, -gp), d))
-        s3 = np.matmul(Cm, np.matmul(self.B_m(gp, gp), d))
-        s4 = np.matmul(Cm, np.matmul(self.B_m(-gp, gp), d))
-
-        # Extrapolate to get the value at the requested location
-        Sx = H[0]*s1[0] + H[1]*s2[0] + H[2]*s3[0] + H[3]*s4[0]
-        Sy = H[0]*s1[1] + H[1]*s2[1] + H[2]*s3[1] + H[3]*s4[1]
-        Txy = H[0]*s1[2] + H[1]*s2[2] + H[2]*s3[2] + H[3]*s4[2]
-
-        if local:
-
-            return np.array([Sx,
-                             Sy,
-                             Txy])
-
-        else:
-
-            # Get the direction cosines for the plate's local coordinate system
             dir_cos = self.T()[:3, :3]
-
-            # Convert the local results to global results
-            Sx = float(Sx)
-            Sy = float(Sy)
-            Txy = float(Txy)
             S_local = np.array([
                 [Sx, Txy, 0.0],
                 [Txy, Sy, 0.0],
@@ -1226,11 +1276,40 @@ class Quad3D():
 
             S_global_tensor = dir_cos @ S_local @ dir_cos.T
 
-            # Extract the results for each direction
-            Sx_global = S_global_tensor[0, 0]
-            Sy_global = S_global_tensor[1, 1]
-            Sxy_global = S_global_tensor[0, 1]
+            return np.array([[S_global_tensor[0, 0]],
+                             [S_global_tensor[1, 1]],
+                             [S_global_tensor[0, 1]]])
 
-            return np.array([[Sx_global],
-                             [Sy_global],
-                             [Sxy_global]])
+        xi_b, eta_b = np.broadcast_arrays(xi_arr, eta_arr)
+        xi_flat = xi_b.astype(float).ravel()
+        eta_flat = eta_b.astype(float).ravel()
+
+        batch = quad_membrane_batch(d_local, self._Cm_cache, self._B_m_stack, xi_flat, eta_flat)
+        Sx = batch[:, 0].reshape(xi_b.shape)
+        Sy = batch[:, 1].reshape(xi_b.shape)
+        Txy = batch[:, 2].reshape(xi_b.shape)
+
+        if local:
+            return np.stack((Sx, Sy, Txy), axis=0)
+
+        dir_cos = self.T()[:3, :3]
+        Sx_g = np.empty_like(Sx)
+        Sy_g = np.empty_like(Sy)
+        Sxy_g = np.empty_like(Txy)
+
+        flat_Sx = Sx.ravel()
+        flat_Sy = Sy.ravel()
+        flat_Txy = Txy.ravel()
+
+        for idx in range(flat_Sx.size):
+            S_local = np.array([
+                [flat_Sx[idx], flat_Txy[idx], 0.0],
+                [flat_Txy[idx], flat_Sy[idx], 0.0],
+                [0.0, 0.0, 0.0]
+            ])
+            S_global_tensor = dir_cos @ S_local @ dir_cos.T
+            Sx_g.ravel()[idx] = S_global_tensor[0, 0]
+            Sy_g.ravel()[idx] = S_global_tensor[1, 1]
+            Sxy_g.ravel()[idx] = S_global_tensor[0, 1]
+
+        return np.stack((Sx_g, Sy_g, Sxy_g), axis=0)

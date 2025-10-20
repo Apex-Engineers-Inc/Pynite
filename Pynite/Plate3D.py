@@ -1,6 +1,7 @@
 from __future__ import annotations # Allows more recent type hints features
-from typing import List, Tuple, Optional,TYPE_CHECKING
+from typing import ClassVar, Dict, List, Tuple, Optional, TYPE_CHECKING
 
+import numpy as np
 from numpy import zeros, array, matmul, cross, add
 from numpy.linalg import inv, norm, det
 from numpy.typing import NDArray
@@ -12,6 +13,9 @@ if TYPE_CHECKING:
 
 #%%
 class Plate3D():
+
+    # Share stiffness builds between plates that have identical geometry/material
+    _GLOBAL_STIFFNESS_CACHE: ClassVar[Dict[Tuple[float, float, float, float, float, float, float], Tuple[np.ndarray, np.ndarray]]] = {}
 
     def __init__(self, name: str, i_node: Node3D, j_node: Node3D, m_node: Node3D, n_node: Node3D, 
                  t: float, material_name: str, model: FEModel3D, kx_mod: float = 1.0,
@@ -64,13 +68,34 @@ class Plate3D():
         # Plates need a link to the model they belong to
         self.model: FEModel3D = model
 
+        # Cache holders for stiffness matrices, transformations, and fixed-end reactions
+        self._k_cache: Optional[np.ndarray] = None
+        self._k_b_cache: Optional[np.ndarray] = None
+        self._k_m_cache: Optional[np.ndarray] = None
+        self._T_cache: Optional[np.ndarray] = None
+        self._fer_local_cache: Dict[str, np.ndarray] = {}
+        self._fer_cache: Dict[str, np.ndarray] = {}
+        self._C_cache: Optional[np.ndarray] = None
+        self._C_inv_cache: Optional[np.ndarray] = None
+
         # Get material properties for the plate from the model
         try:
             self.E: float = self.model.materials[material_name].E
             self.nu: float = self.model.materials[material_name].nu
         except:
             raise KeyError('Please define the material ' + str(material_name) + ' before assigning it to plates.')
-    
+
+    def invalidate_cache(self) -> None:
+        # Clears cached stiffness, transformation, and fixed-end reaction data.
+        self._k_cache = None
+        self._k_b_cache = None
+        self._k_m_cache = None
+        self._T_cache = None
+        self._fer_local_cache.clear()
+        self._fer_cache.clear()
+        self._C_cache = None
+        self._C_inv_cache = None
+
     def width(self) -> float:
         """
         Returns the width of the plate along its local x-axis
@@ -83,7 +108,20 @@ class Plate3D():
         """
         return self.i_node.distance(self.n_node)
     
+    def _cache_key(self) -> Tuple[float, float, float, float, float, float, float]:
+        """Returns a hashable key representing the plate's stiffness parameters."""
+        return (
+            round(self.width(), 8),
+            round(self.height(), 8),
+            round(self.t, 8),
+            round(self.E, 8),
+            round(self.nu, 8),
+            round(self.kx_mod, 8),
+            round(self.ky_mod, 8),
+        )
+
     def Dm(self) -> NDArray[float64]:
+
         """
         Returns the plane stress constitutive matrix for orthotropic materials [Dm]
         """
@@ -163,7 +201,23 @@ class Plate3D():
         """
         returns the plate's local stiffness matrix
         """
-        return add(self.k_b(), self.k_m())
+        if self._k_cache is not None:
+            return self._k_cache
+
+        key = self._cache_key()
+        cached = Plate3D._GLOBAL_STIFFNESS_CACHE.get(key)
+        if cached is not None:
+            k_b_cached, k_m_cached = cached
+            self._k_b_cache = k_b_cached.copy()
+            self._k_m_cache = k_m_cached.copy()
+            self._k_cache = add(self._k_b_cache, self._k_m_cache)
+            return self._k_cache
+
+        k_b_local = self.k_b()
+        k_m_local = self.k_m()
+        self._k_cache = add(k_b_local, k_m_local)
+        Plate3D._GLOBAL_STIFFNESS_CACHE[key] = (k_b_local.copy(), k_m_local.copy())
+        return self._k_cache
     
     def k_m(self) -> NDArray[float64]:
         '''
@@ -171,6 +225,8 @@ class Plate3D():
 
         Plane stress is assumed
         '''
+        if self._k_m_cache is not None:
+            return self._k_m_cache
 
         t = self.t
         Dm = self.Dm()
@@ -199,7 +255,7 @@ class Plate3D():
 
             # j = Unexpanded matrix column
             for j in range(8):
-                
+
                 # Find the corresponding term in the expanded stiffness
                 # matrix
 
@@ -214,19 +270,23 @@ class Plate3D():
                     n = j*3
                 if j in [1, 3, 5, 7]:  # indices associated with displacement in y
                     n = j*3 - 2
-                
+
                 # Ensure the indices are integers rather than floats
                 m, n = round(m), round(n)
 
                 # Add the term from the unexpanded matrix into the expanded matrix
                 k_exp[m, n] = k[i, j]
-        
-        return k_exp
+
+        self._k_m_cache = k_exp
+        return self._k_m_cache
     
     def k_b(self) -> NDArray[float64]:
         """
         Returns the local stiffness matrix for bending
         """
+
+        if self._k_b_cache is not None:
+            return self._k_b_cache
 
         b = self.width()/2
         c = self.height()/2
@@ -264,43 +324,29 @@ class Plate3D():
         # with placeholders for all the degrees of freedom so it can be directly added to the
         # membrane stiffness matrix later on.
 
-        # Initialize the expanded stiffness matrix to all zeros
+        # Expand the bending stiffness matrix using the optimized mapping
         k_exp = zeros((24, 24))
 
         # Step through each term in the unexpanded stiffness matrix
-
-        # i = Unexpanded matrix row
         for i in range(12):
-
-            # j = Unexpanded matrix column
             for j in range(12):
-                
-                # Find the corresponding term in the expanded stiffness
-                # matrix
-
-                # m = Expanded matrix row
-                if i in [0, 3, 6, 9]:  # indices associated with deflection in z
+                if i in [0, 3, 6, 9]:
                     m = 2*i + 2
-                if i in [1, 4, 7, 10]:  # indices associated with rotation about x
+                if i in [1, 4, 7, 10]:
                     m = 2*i + 1
-                if i in [2, 5, 8, 11]:  # indices associated with rotation about y
+                if i in [2, 5, 8, 11]:
                     m = 2*i
 
-                # n = Expanded matrix column
-                if j in [0, 3, 6, 9]:  # indices associated with deflection in z
+                if j in [0, 3, 6, 9]:
                     n = 2*j + 2
-                if j in [1, 4, 7, 10]:  # indices associated with rotation about x
+                if j in [1, 4, 7, 10]:
                     n = 2*j + 1
-                if j in [2, 5, 8, 11]:  # indices associated with rotation about y
+                if j in [2, 5, 8, 11]:
                     n = 2*j
-                
-                # Ensure the indices are integers rather than floats
-                m, n = round(m), round(n)
 
-                # Add the term from the unexpanded matrix into the expanded
-                # matrix
+                m, n = round(m), round(n)
                 k_exp[m, n] = k[i, j]
-        
+
         # Add the drilling degree of freedom's weak spring
         k_exp[5, 5] = k_rz
         k_exp[11, 11] = k_rz
@@ -308,7 +354,8 @@ class Plate3D():
         k_exp[23, 23] = k_rz
         
         # Return the local stiffness matrix
-        return k_exp
+        self._k_b_cache = k_exp
+        return self._k_b_cache
 
     def f(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
         """
@@ -327,7 +374,11 @@ class Plate3D():
         combo_name : string
             The name of the load combination to get the load vector for.
         """
-        
+
+        cached = self._fer_local_cache.get(combo_name)
+        if cached is not None:
+            return cached
+
         # Initialize the fixed end reaction vector
         fer = zeros((12, 1))
 
@@ -387,6 +438,7 @@ class Plate3D():
             # Add the term from the unexpanded vector into the expanded vector
             fer_exp[m, 0] = fer[i, 0]
 
+        self._fer_local_cache[combo_name] = fer_exp
         return fer_exp
         
     def d(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
@@ -403,7 +455,8 @@ class Plate3D():
         """
 
         # Calculate and return the global force vector
-        return matmul(inv(self.T()), self.f(combo_name))
+        T = self.T()
+        return matmul(T.T, self.f(combo_name))
 
     def D(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
         """
@@ -450,6 +503,9 @@ class Plate3D():
         Returns the plate's transformation matrix
         """
 
+        if self._T_cache is not None:
+            return self._T_cache
+
         # Calculate the direction cosines for the local x-axis
         # The local x-axis will run from the i-node to the j-node
         xi = self.i_node.X
@@ -494,6 +550,7 @@ class Plate3D():
         transMatrix[18:21, 18:21] = dirCos
         transMatrix[21:24, 21:24] = dirCos
         
+        self._T_cache = transMatrix
         return transMatrix
 
     def K(self) -> NDArray[float64]:
@@ -502,7 +559,8 @@ class Plate3D():
         """
 
         # Calculate and return the stiffness matrix in global coordinates
-        return matmul(matmul(inv(self.T()), self.k()), self.T())
+        T = self.T()
+        return matmul(matmul(T.T, self.k()), T)
 
     def FER(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
         """
@@ -514,14 +572,23 @@ class Plate3D():
             The name of the load combination to calculate the fixed end
             reaction vector for (not the load combination itself).
         """
-        
-        # Calculate and return the fixed end reaction vector
-        return matmul(inv(self.T()), self.fer(combo_name))
+
+        cached = self._fer_cache.get(combo_name)
+        if cached is not None:
+            return cached
+
+        T = self.T()
+        result = matmul(T.T, self.fer(combo_name))
+        self._fer_cache[combo_name] = result
+        return result
 
     def _C(self) -> NDArray[float64]:
         """
         Returns the plate's displacement coefficient matrix [C]
         """
+
+        if self._C_cache is not None:
+            return self._C_cache
 
         # Find the local x and y coordinates at each node
         xi = 0
@@ -551,6 +618,7 @@ class Plate3D():
                     [0, -1, 0, -2*xn, -yn, 0, -3*xn**2, -2*xn*yn, -yn**2, 0, -3*xn**2*yn, -yn**3]])
         
         # Return the coefficient matrix
+        self._C_cache = C
         return C
 
     def _Q(self, x: float, y: float) -> NDArray[float64]:
@@ -581,8 +649,10 @@ class Plate3D():
         # Slice out terms not related to plate bending
         d = self.d(combo_name)[[2, 3, 4, 8, 9, 10, 14, 15, 16, 20, 21, 22], :]
 
-        # Return the plate bending constants
-        return inv(self._C()) @ d
+        # Return the plate bending constants using cached inverse
+        if self._C_inv_cache is None:
+            self._C_inv_cache = inv(self._C())
+        return self._C_inv_cache @ d
 
     def moment(self, x: float, y: float, local: bool = True, combo_name: str = 'Combo 1') -> NDArray[float64]:
         """

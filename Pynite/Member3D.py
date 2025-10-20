@@ -1,14 +1,27 @@
 from __future__ import annotations  # Allows more recent type hints features
-from typing import TYPE_CHECKING, Literal, Union, List
+from typing import TYPE_CHECKING, Literal, Union, List, Tuple, Dict
 from math import isclose
 
-from numpy import array, zeros, add, subtract, matmul, insert, dot, cross, divide, count_nonzero, concatenate
+from numpy import array, zeros, add, subtract, matmul, insert, dot, cross, divide, count_nonzero, concatenate, float64
 from numpy import linspace, vstack, hstack, allclose, radians, sin, cos
 from numpy.linalg import inv, pinv, norm
+import numpy as np
 
 import Pynite.FixedEndReactions
 from Pynite.BeamSegZ import BeamSegZ
 from Pynite.BeamSegY import BeamSegY
+from Pynite.numba_kernels import beam_member_stiffness_matrix, evaluate_polynomial
+from Pynite.numba_utils import USE_NUMBA
+
+# Global caches let repeated members reuse stiffness/FER evaluations instead of recalculating them
+FER_UNCOND_CACHE: Dict[Tuple, object] = {}
+GLOBAL_K_CACHE: Dict[Tuple, object] = {}
+GLOBAL_FER_CACHE: Dict[Tuple, object] = {}
+GLOBAL_T_CACHE: Dict[Tuple, object] = {}
+
+def _orientation_signature(transform) -> Tuple[float, ...]:
+    # Round and flatten the transform so we can safely reuse cached matrices
+    return tuple(np.round(transform.flatten(), 12))
 
 if TYPE_CHECKING:
 
@@ -98,6 +111,14 @@ class Member3D():
         self.Releases: List[bool] = [False, False, False, False, False, False, False, False, False, False, False, False]
         self.tension_only: bool = tension_only  # Indicates whether the member is tension-only
         self.comp_only: bool = comp_only  # Indicates whether the member is compression-only
+        self._T_matrix = None  # Cached transformation matrix
+        self._T_transpose = None  # Cached transpose of the transformation matrix
+        self._T_signature = None  # (Xi, Yi, Zi, Xj, Yj, Zj, rotation)
+        self._k_unc_matrix = None  # Cached uncondensed local stiffness matrix
+        self._k_signature = None  # (E, G, Iy, Iz, J, A, L)
+        self._K_global_matrix = None  # Cached global stiffness matrix
+        self._K_signature = None  # Signature for cached global stiffness matrix
+        self._FER_global_cache = {}  # Cached global FER vectors keyed by combo/signature
 
         # Members need to track whether they are active or not for any given load combination. They may become inactive for a load combination during a tension/compression-only analysis. This dictionary will be used when the model is solved.
         self.active: Dict[str, bool] = {}  # Key = load combo name, Value = True or False
@@ -152,6 +173,10 @@ class Member3D():
         :rtype: ndarray
         """
 
+        if not any(self.Releases):
+            # Early exit: without releases the uncondensed stiffness already matches the physical DOF set
+            return self._k_unc()
+
         # Partition the local stiffness matrix as 4 submatrices in
         # preparation for static condensation
         k11, k12, k21, k22 = self._partition(self._k_unc())
@@ -190,22 +215,14 @@ class Member3D():
         A = self.section.A
         L = self.L()
 
-        # Create the uncondensed local stiffness matrix
-        k = array([[A*E/L,  0,             0,             0,      0,            0,            -A*E/L, 0,             0,             0,      0,            0           ],
-                   [0,      12*E*Iz/L**3,  0,             0,      0,            6*E*Iz/L**2,  0,      -12*E*Iz/L**3, 0,             0,      0,            6*E*Iz/L**2 ],
-                   [0,      0,             12*E*Iy/L**3,  0,      -6*E*Iy/L**2, 0,            0,      0,             -12*E*Iy/L**3, 0,      -6*E*Iy/L**2, 0           ],
-                   [0,      0,             0,             G*J/L,  0,            0,            0,      0,             0,             -G*J/L, 0,            0           ],
-                   [0,      0,             -6*E*Iy/L**2,  0,      4*E*Iy/L,     0,            0,      0,             6*E*Iy/L**2,   0,      2*E*Iy/L,     0           ],
-                   [0,      6*E*Iz/L**2,   0,             0,      0,            4*E*Iz/L,     0,      -6*E*Iz/L**2,  0,             0,      0,            2*E*Iz/L    ],
-                   [-A*E/L, 0,             0,             0,      0,            0,            A*E/L,  0,             0,             0,      0,            0           ],
-                   [0,      -12*E*Iz/L**3, 0,             0,      0,            -6*E*Iz/L**2, 0,      12*E*Iz/L**3,  0,             0,      0,            -6*E*Iz/L**2],
-                   [0,      0,             -12*E*Iy/L**3, 0,      6*E*Iy/L**2,  0,            0,      0,             12*E*Iy/L**3,  0,      6*E*Iy/L**2,  0           ],
-                   [0,      0,             0,             -G*J/L, 0,            0,            0,      0,             0,             G*J/L,  0,            0           ],
-                   [0,      0,             -6*E*Iy/L**2,  0,      2*E*Iy/L,     0,            0,      0,             6*E*Iy/L**2,   0,      4*E*Iy/L,     0           ],
-                   [0,      6*E*Iz/L**2,   0,             0,      0,            2*E*Iz/L,     0,      -6*E*Iz/L**2,  0,             0,      0,            4*E*Iz/L    ]])
+        signature = (E, G, Iy, Iz, J, A, L)
+        if self._k_signature == signature and self._k_unc_matrix is not None:
+            return self._k_unc_matrix
 
-        # Return the uncondensed local stiffness matrix
-        return k
+        # Create the uncondensed local stiffness matrix using the Numba-ready kernel.
+        self._k_unc_matrix = beam_member_stiffness_matrix(E, G, A, Iy, Iz, J, L)
+        self._k_signature = signature
+        return self._k_unc_matrix
 
     def kg(self, P: float = 0) -> NDArray[float64]:
         """
@@ -401,6 +418,10 @@ class Member3D():
         :rtype: NDArray[float64]
         """
 
+        if not any(self.Releases):
+            # No releases means the standard fixed-end reactions already satisfy the boundary DOF set
+            return self._fer_unc(combo_name)
+
         # Get the lists of unreleased and released degree of freedom indices
         R1_indices, R2_indices = self._partition_D()
 
@@ -420,7 +441,7 @@ class Member3D():
 
             i += 1
 
-        # Return the fixed end reaction vector        
+        # Return the fixed end reaction vector
         return ferCondensed
 
     def _fer_unc(self, combo_name:str = 'Combo 1') -> NDArray[float64]:
@@ -429,11 +450,25 @@ class Member3D():
         Needed to apply the slope-deflection equation properly.
         """
 
+        # Reuse FERs when the member's loads, orientation, and combo are unchanged.
+        T_matrix = self.T()
+        transform = T_matrix[:3, :3]
+        combo = self.model.load_combos[combo_name]
+        combo_key = tuple(sorted(combo.factors.items()))
+        pt_key = tuple(tuple(load) for load in self.PtLoads)
+        dist_key = tuple(tuple(load) for load in self.DistLoads)
+        L = self.L()
+        length_key = float(np.round(L, 12))
+        orientation_signature = _orientation_signature(transform)
+        cache_key = (combo_key, pt_key, dist_key, length_key, orientation_signature)
+
+        cached = FER_UNCOND_CACHE.get(cache_key)
+        if cached is not None:
+            # Work with a copy so downstream code does not accidentally mutate the shared cache entry
+            return cached.copy()
+
         # Initialize the fixed end reaction vector
         fer = zeros((12, 1))
-
-        # Get the requested load combination
-        combo = self.model.load_combos[combo_name]
 
         # Loop through each load case and factor in the load combination
         for case, factor in combo.factors.items():
@@ -445,35 +480,35 @@ class Member3D():
                 if ptLoad[3] == case:
 
                     if ptLoad[0] == 'Fx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*ptLoad[1], ptLoad[2], self.L()))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*ptLoad[1], ptLoad[2], L))
                     elif ptLoad[0] == 'Fy':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], self.L(), 'Fy'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], L, 'Fy'))
                     elif ptLoad[0] == 'Fz':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], self.L(), 'Fz'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], L, 'Fz'))
                     elif ptLoad[0] == 'Mx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*ptLoad[1], ptLoad[2], self.L()))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*ptLoad[1], ptLoad[2], L))
                     elif ptLoad[0] == 'My':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], self.L(), 'My'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], L, 'My'))
                     elif ptLoad[0] == 'Mz':     
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], self.L(), 'Mz'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], L, 'Mz'))
                     elif ptLoad[0] == 'FX' or ptLoad[0] == 'FY' or ptLoad[0] == 'FZ':
                         FX, FY, FZ = 0, 0, 0
                         if ptLoad[0] == 'FX': FX = 1
                         if ptLoad[0] == 'FY': FY = 1
                         if ptLoad[0] == 'FZ': FZ = 1
-                        f = self.T()[:3, :][:, :3] @ array([FX*ptLoad[1], FY*ptLoad[1], FZ*ptLoad[1]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*f[0], ptLoad[2], self.L()))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[1], ptLoad[2], self.L(), 'Fy'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[2], ptLoad[2], self.L(), 'Fz'))
+                        f = transform @ array([FX*ptLoad[1], FY*ptLoad[1], FZ*ptLoad[1]])
+                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*f[0], ptLoad[2], L))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[1], ptLoad[2], L, 'Fy'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[2], ptLoad[2], L, 'Fz'))
                     elif ptLoad[0] == 'MX' or ptLoad[0] == 'MY' or ptLoad[0] == 'MZ':
                         MX, MY, MZ = 0, 0, 0
                         if ptLoad[0] == 'MX': MX = 1
                         if ptLoad[0] == 'MY': MY = 1
                         if ptLoad[0] == 'MZ': MZ = 1
-                        f = self.T()[:3, :][:, :3] @ array([MX*ptLoad[1], MY*ptLoad[1], MZ*ptLoad[1]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*f[0], ptLoad[2], self.L()))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[1], ptLoad[2], self.L(), 'My'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[2], ptLoad[2], self.L(), 'Mz'))
+                        f = transform @ array([MX*ptLoad[1], MY*ptLoad[1], MZ*ptLoad[1]])
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*f[0], ptLoad[2], L))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[1], ptLoad[2], L, 'My'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[2], ptLoad[2], L, 'Mz'))
                     else:
                         raise Exception('Invalid member point load direction specified.')
 
@@ -484,20 +519,22 @@ class Member3D():
                 if distLoad[5] == case:
 
                     if distLoad[0] == 'Fx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], self.L()))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], L))
                     elif distLoad[0] == 'Fy' or distLoad[0] == 'Fz':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], self.L(), distLoad[0]))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], L, distLoad[0]))
                     elif distLoad[0] == 'FX' or distLoad[0] == 'FY' or distLoad[0] == 'FZ':
                         FX, FY, FZ = 0, 0, 0
                         if distLoad[0] == 'FX': FX = 1
                         if distLoad[0] == 'FY': FY = 1
                         if distLoad[0] == 'FZ': FZ = 1
-                        w1 = self.T()[:3, :][:, :3] @ array([FX*distLoad[1], FY*distLoad[1], FZ*distLoad[1]])
-                        w2 = self.T()[:3, :][:, :3] @ array([FX*distLoad[2], FY*distLoad[2], FZ*distLoad[2]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*w1[0], factor*w2[0], distLoad[3], distLoad[4], self.L()))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[1], factor*w2[1], distLoad[3], distLoad[4], self.L(), 'Fy'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[2], factor*w2[2], distLoad[3], distLoad[4], self.L(), 'Fz'))
+                        w1 = transform @ array([FX*distLoad[1], FY*distLoad[1], FZ*distLoad[1]])
+                        w2 = transform @ array([FX*distLoad[2], FY*distLoad[2], FZ*distLoad[2]])
+                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*w1[0], factor*w2[0], distLoad[3], distLoad[4], L))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[1], factor*w2[1], distLoad[3], distLoad[4], L, 'Fy'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[2], factor*w2[2], distLoad[3], distLoad[4], L, 'Fz'))
 
+        # Memoize the result so repeated load combinations on identical members short-circuit
+        FER_UNCOND_CACHE[cache_key] = fer.copy()
         # Return the fixed end reaction vector, uncondensed
         return fer
 
@@ -576,21 +613,34 @@ class Member3D():
         Returns the transformation matrix for the member.
         """
 
-        # Get the global coordinates for the two ends
         Xi = self.i_node.X
-        Xj = self.j_node.X
-
         Yi = self.i_node.Y
-        Yj = self.j_node.Y
-
         Zi = self.i_node.Z
+        Xj = self.j_node.X
+        Yj = self.j_node.Y
         Zj = self.j_node.Z
+
+        # The transformation only depends on node coordinates and the roll angle
+        signature = (Xi, Yi, Zi, Xj, Yj, Zj, self.rotation)
+
+        # Check instance cache first
+        if self._T_signature == signature and self._T_matrix is not None:
+            return self._T_matrix
+
+        # Check global cache
+        cached = GLOBAL_T_CACHE.get(signature)
+        if cached is not None:
+            # Cache hit: reuse and update the instance memo so later calls stay fast
+            self._T_matrix = cached
+            self._T_transpose = cached.T
+            self._T_signature = signature
+            return cached
 
         # Calculate the length of the member
         L = self.L()
 
         # Calculate the direction cosines for the local x-axis
-        x = [(Xj - Xi)/L, (Yj - Yi)/L, (Zj - Zi)/L]
+        x = array([(Xj - Xi)/L, (Yj - Yi)/L, (Zj - Zi)/L])
 
         # Calculate the remaining direction cosines.
         # For now, the local z-axis will be kept parallel to the global XZ plane in all cases. It will be adjusted later if a rotation has been applied to the member.
@@ -599,11 +649,11 @@ class Member3D():
 
             # For vertical members, keep the local y-axis in the XY plane to make 2D problems easier to solve in the XY plane
             if Yj > Yi:
-                y = [-1, 0, 0]
-                z = [0, 0, 1]
+                y = array([-1, 0, 0], dtype=float64)
+                z = array([0, 0, 1], dtype=float64)
             else:
-                y = [1, 0, 0]
-                z = [0, 0, 1]
+                y = array([1, 0, 0], dtype=float64)
+                z = array([0, 0, 1], dtype=float64)
 
         # Horizontal members
         elif isclose(Yi, Yj):
@@ -611,17 +661,19 @@ class Member3D():
             # Find a vector in the direction of the local z-axis by taking the cross-product
             # of the local x-axis and the local y-axis. This vector will be perpendicular to
             # both the local x-axis and the local y-axis.
-            y = [0, 1, 0]
-            z = cross(x, y)
+            y_temp = array([0, 1, 0], dtype=float64)
+            z = cross(x, y_temp)
 
             # Divide the z-vector by its magnitude to produce a unit vector of direction cosines
-            z = divide(z, (z[0]**2 + z[1]**2 + z[2]**2)**0.5)
+            z /= norm(z)
+            y = cross(z, x)
+            y /= norm(y)
 
         # Members neither vertical or horizontal
         else:
 
             # Find the projection of x on the global XZ plane
-            proj = [Xj - Xi, 0, Zj - Zi]
+            proj = array([Xj - Xi, 0, Zj - Zi], dtype=float64)
 
             # Find a vector in the direction of the local z-axis by taking the cross-product
             # of the local x-axis and its projection on a plane parallel to the XZ plane. This
@@ -635,11 +687,11 @@ class Member3D():
                 z = cross(x, proj)
 
             # Divide the z-vector by its magnitude to produce a unit vector of direction cosines
-            z = divide(z, (z[0]**2 + z[1]**2 + z[2]**2)**0.5)
+            z /= norm(z)
 
             # Find the direction cosines for the local y-axis
             y = cross(z, x)
-            y = divide(y, (y[0]**2 + y[1]**2 + y[2]**2)**0.5)
+            y /= norm(y)
 
         # Check if the member is rotated
         if self.rotation != 0.0:
@@ -651,17 +703,16 @@ class Member3D():
             c = cos(theta)
             s = sin(theta)
 
-            # Convert `x` to a numpy array
-            u = array(x)
-
             # Rotate y using the Rodrigues formula
-            v = array(y)
-            y = v * c + cross(u, v) * s + u * (dot(u, v)) * (1 - c)
+            u = x
+            v = y
+            u_cross_v = cross(u, v)
+            u_dot_v = dot(u, v)
+            y = v * c + u_cross_v * s + u * u_dot_v * (1 - c)
             y /= norm(y)
 
             # Rotate z using the Rodrigues formula
-            v = array(z)
-            z = v * c + cross(u, v) * s + u * (dot(u, v)) * (1 - c)
+            z = cross(x, y)
             z /= norm(z)
 
         # Create the direction cosines matrix
@@ -674,6 +725,13 @@ class Member3D():
         transMatrix[6:9, 6:9] = dirCos
         transMatrix[9:12, 9:12] = dirCos
 
+        # Store in global cache
+        GLOBAL_T_CACHE[signature] = transMatrix
+
+        self._T_matrix = transMatrix
+        self._T_transpose = transMatrix.T
+        self._T_signature = signature
+
         return transMatrix
 
     # Member global stiffness matrix
@@ -684,8 +742,22 @@ class Member3D():
         :rtype: array
         """
 
-        # Calculate and return the stiffness matrix in global coordinates
-        return matmul(matmul(inv(self.T()), self.k()), self.T())
+        T = self.T()
+        local_k = self.k()
+        orientation_signature = _orientation_signature(T[:3, :3])
+        signature = (self._k_signature, tuple(self.Releases), orientation_signature)
+
+        cached = GLOBAL_K_CACHE.get(signature)
+        if cached is not None:
+            self._K_global_matrix = cached
+            self._K_signature = signature
+            return cached
+
+        global_k = matmul(matmul(self._T_transpose, local_k), T)
+        GLOBAL_K_CACHE[signature] = global_k
+        self._K_global_matrix = global_k
+        self._K_signature = signature
+        return global_k
 
     def Kg(self, P: float=0.0):
         """Returns the global geometric stiffness matrix for the member. Used for P-Delta analysis.
@@ -697,7 +769,8 @@ class Member3D():
         """
 
         # Calculate and return the geometric stiffness matrix in global coordinates
-        return matmul(matmul(inv(self.T()), self.kg(P)), self.T())
+        T = self.T()
+        return matmul(matmul(self._T_transpose, self.kg(P)), T)
 
     def Km(self, combo_name: str) -> NDArray[float64]:
         """Returns the global plastic reduction matrix for the member. Used to modify member behavior for plastic hinges at the ends.
@@ -709,7 +782,8 @@ class Member3D():
         """
 
         # Calculate and return the plastic reduction matrix in global coordinates
-        return matmul(matmul(inv(self.T()), self.km(combo_name)), self.T())
+        T = self.T()
+        return matmul(matmul(self._T_transpose, self.km(combo_name)), T)
 
     def F(self, combo_name: str='Combo 1') -> NDArray[float64]:
         """
@@ -717,7 +791,8 @@ class Member3D():
         """
 
         # Calculate and return the global force vector
-        return matmul(inv(self.T()), self.f(combo_name))
+        self.T()
+        return matmul(self._T_transpose, self.f(combo_name))
 
     def FER(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
         """
@@ -729,8 +804,23 @@ class Member3D():
             The name of the load combination to calculate the fixed end reaction vector for (not the load combination itself).
         """
 
-        # Calculate and return the fixed end reaction vector
-        return matmul(inv(self.T()), self.fer(combo_name))
+        T_matrix = self.T()
+        load_signature = (
+            tuple(tuple(load) for load in self.PtLoads),
+            tuple(tuple(load) for load in self.DistLoads),
+        )
+        orientation_signature = _orientation_signature(T_matrix[:3, :3])
+        signature = (combo_name, tuple(self.Releases), orientation_signature, load_signature)
+
+        cached = GLOBAL_FER_CACHE.get(signature)
+        if cached is not None:
+            self._FER_global_cache[signature] = cached
+            return cached
+
+        result = matmul(self._T_transpose, self.fer(combo_name))
+        GLOBAL_FER_CACHE[signature] = result
+        self._FER_global_cache[signature] = result
+        return result
 
     def D(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
         """
@@ -2506,6 +2596,96 @@ class Member3D():
                                 SegmentsY[i].V1 += (f1[2] + f2[2])/2*(x2 - x1)
                                 SegmentsY[i].M1 += (x1 - x2)*(2*f1[2]*x1 - 3*f1[2]*x + f1[2]*x2 + f2[2]*x1 - 3*f2[2]*x + 2*f2[2]*x2)/6
 
+    @staticmethod
+    def _segment_polynomial_coefficients(segment, result_name: str):
+        """
+        Creates polynomial coefficients (lowest order first) for the requested result type.
+
+        Returns ``None`` if the coefficients cannot be formed (e.g. due to missing data),
+        signalling that the caller should fall back to the original Python/Numpy logic.
+        """
+
+        L = segment.Length()
+        if L is None or L == 0:
+            return None
+
+        if result_name == "moment":
+            M1 = segment.M1
+            V1 = segment.V1
+            w1 = segment.w1
+            w2 = segment.w2
+            if None in (M1, V1, w1, w2):
+                return None
+            return array([M1, -V1, -0.5 * w1, (w1 - w2) / (6 * L)], dtype='float64')
+
+        if result_name == "shear":
+            V1 = segment.V1
+            w1 = segment.w1
+            w2 = segment.w2
+            if None in (V1, w1, w2):
+                return None
+            return array([V1, w1, (-w1 + w2) / (2 * L)], dtype='float64')
+
+        if result_name == "axial":
+            P1 = segment.P1
+            p1 = segment.p1
+            p2 = segment.p2
+            if None in (P1, p1, p2):
+                return None
+            return array([P1, p1, (p2 - p1) / (2 * L)], dtype='float64')
+
+        if result_name == "deflection":
+            EI = segment.EI
+            if EI in (None, 0):
+                return None
+            delta1 = segment.delta1
+            theta1 = segment.theta1
+            V1 = segment.V1
+            M1 = segment.M1
+            w1 = segment.w1
+            w2 = segment.w2
+            if None in (delta1, theta1, V1, M1, w1, w2):
+                return None
+            return array(
+                [
+                    delta1,
+                    theta1,
+                    -M1 / (2 * EI),
+                    V1 / (6 * EI),
+                    w1 / (24 * EI),
+                    (-w1 + w2) / (120 * EI * L),
+                ],
+                dtype='float64',
+            )
+
+        if result_name == "axial_deflection":
+            EA = segment.EA
+            if EA in (None, 0):
+                return None
+            delta_x1 = segment.delta_x1
+            P1 = segment.P1
+            p1 = segment.p1
+            p2 = segment.p2
+            if None in (delta_x1, P1, p1, p2):
+                return None
+            return array(
+                [
+                    delta_x1,
+                    -P1 / EA,
+                    -p1 / (2 * EA),
+                    -(p2 - p1) / (6 * EA * L),
+                ],
+                dtype='float64',
+            )
+
+        if result_name == "torque":
+            T1 = segment.T1
+            if T1 is None:
+                return None
+            return array([T1], dtype='float64')
+
+        return None
+
     def _extract_vector_results(self, segments: List, x_array: NDArray[float64], result_name: Literal['moment', 'shear', 'axial', 'torque', 'deflection', 'axial_deflection'], P_delta: bool = False) -> NDArray[float64]:
         """
         Extracts result values at specified locations along a structural member using efficient, 
@@ -2565,6 +2745,9 @@ class Member3D():
         if compute_result is None:
             raise ValueError(f"Unsupported result_name: {result_name}")
 
+        polynomial_supported = {"moment", "shear", "axial", "deflection", "axial_deflection", "torque"}
+        use_polynomial_kernel = USE_NUMBA and not P_delta and result_name in polynomial_supported
+
         idx = 0  # Tracks current position in x_array
         n = x_array.size
 
@@ -2572,22 +2755,29 @@ class Member3D():
 
             # For the last segment, include points up to and including x2
             if i == len(segments) - 1:
-                filter = (x_array[idx:] >= segment.x1) & (x_array[idx:] <= segment.x2)
+                segment_mask = (x_array[idx:] >= segment.x1) & (x_array[idx:] <= segment.x2)
             else:
                 # For intermediate segments, include points up to but not including x2
-                filter = (x_array[idx:] >= segment.x1) & (x_array[idx:] < segment.x2)
+                segment_mask = (x_array[idx:] >= segment.x1) & (x_array[idx:] < segment.x2)
 
             # Count how many x-values fall within this segment
-            count = count_nonzero(filter)
+            count = count_nonzero(segment_mask)
             if count == 0:
                 continue  # No points to evaluate in this segment
 
             # Extract the relevant x-values for this segment
-            segment_x = x_array[idx:][filter]
-            local_x = segment_x - segment.x1  # Convert global x to local segment coordinates
+            segment_x = x_array[idx:][segment_mask]
+            local_x = (segment_x - segment.x1).astype('float64', copy=False)  # Convert global x to local segment coordinates
 
-            # Evaluate the selected result at each local x
-            segment_y = compute_result(segment, local_x)
+            if use_polynomial_kernel:
+                coeffs = self._segment_polynomial_coefficients(segment, result_name)
+                if coeffs is not None:
+                    segment_y = evaluate_polynomial(coeffs, local_x)
+                else:
+                    segment_y = compute_result(segment, local_x)
+            else:
+                # Evaluate the selected result at each local x
+                segment_y = compute_result(segment, local_x)
 
             # Store for final output
             x_results.append(segment_x)

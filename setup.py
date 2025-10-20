@@ -26,7 +26,8 @@ setuptools.setup(
         'matplotlib',
     ],
     extras_require = {
-        'all': ['Ipython', 'vtk', 'pyvista[all,trame]', 'trame_jupyter_extension', 'ipywidgets', 'pdfkit', 'Jinja2'],
+        'all': ['Ipython', 'vtk', 'pyvista[all,trame]', 'trame_jupyter_extension', 'ipywidgets', 'pdfkit', 'Jinja2', 'numba>=0.56'],
+        'numba': ['numba>=0.56'],
         'vtk':  ['IPython', 'vtk'],
         'pyvista': ['pyvista[all,trame]', 'trame_jupyter_extension', 'ipywidgets'],
         'reporting': ['pdfkit', 'Jinja2'],

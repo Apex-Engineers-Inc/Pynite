@@ -10,9 +10,9 @@ if TYPE_CHECKING:
     from numpy import float64
     from numpy.typing import NDArray
 
-from numpy import array, dot, linspace, hstack, empty
-from numpy.linalg import norm
-from math import isclose, acos
+import numpy as np
+from numpy import array, linspace, hstack, empty
+from math import isclose, sqrt
 
 class PhysMember(Member3D):
     """
@@ -30,11 +30,20 @@ class PhysMember(Member3D):
 
         super().__init__(model, name, i_node, j_node, material_name, section_name, rotation, tension_only, comp_only)
         self.sub_members: Dict[str, Member3D] = {}
+        # Track the last discretization inputs so we can skip regeneration unless something changed
+        self._discretize_signature: Tuple[int, float, float, float, float, float, float] | None = None
 
     def descritize(self) -> None:
         """
         Subdivides the physical member into sub-members at each node along the physical member
         """
+
+        model_rev = getattr(self.model, '_node_revision', None)
+        signature = (model_rev, self.i_node.X, self.i_node.Y, self.i_node.Z,
+                     self.j_node.X, self.j_node.Y, self.j_node.Z)
+        if self._discretize_signature == signature and self.sub_members:
+            # No topology change since the last run; keep the existing sub-member layout
+            return
 
         # Clear out any old sub_members
         self.sub_members = {}
@@ -45,33 +54,203 @@ class PhysMember(Member3D):
         # Create a vector from the i-node to the j-node
         Xi, Yi, Zi = self.i_node.X, self.i_node.Y, self.i_node.Z
         Xj, Yj, Zj = self.j_node.X, self.j_node.Y, self.j_node.Z
-        vector_ij = array([Xj-Xi, Yj-Yi, Zj-Zi])
 
-        # Add the i-node and j-node to the list
-        int_nodes.append((self.i_node, 0))
-        int_nodes.append((self.j_node, norm(vector_ij)))
+        dx = Xj - Xi
+        dy = Yj - Yi
+        dz = Zj - Zi
 
-        # Step through each node in the model
-        for node in self.model.nodes.values():
+        length_sq = dx*dx + dy*dy + dz*dz
+        if isclose(length_sq, 0.0):
+            # Degenerate member - nothing to discretize
+            int_nodes.append((self.i_node, 0.0))
+            int_nodes.append((self.j_node, 0.0))
+        else:
+            length = sqrt(length_sq)
 
-            # Check each node in the model (except the i and j-nodes)
-            if node is not self.i_node and node is not self.j_node:
+            # Add the i-node and j-node to the list
+            int_nodes.append((self.i_node, 0.0))
+            int_nodes.append((self.j_node, length))
 
-                # Create a vector from the i-node to the current node
-                X, Y, Z = node.X, node.Y, node.Z
-                vector_in = array([X-Xi, Y-Yi, Z-Zi])
+            # Pull cached coordinate arrays when available to avoid repeated object lookups
+            coords = getattr(self.model, '_node_coord_array', None)
+            nodes_by_id = getattr(self.model, '_nodes_by_id', None)
 
-                # Calculate the angle between the two vectors
-                angle = acos(round(dot(vector_in, vector_ij)/(norm(vector_in)*norm(vector_ij)), 10))
+            # Allow small angular deviation for floating point noise
+            colinear_tol = 1e-12
 
-                # Determine if the node is colinear with the member
-                if isclose(angle, 0):
+            if coords is not None and nodes_by_id is not None:
+                coords_x = coords[:, 0]
+                coords_y = coords[:, 1]
+                coords_z = coords[:, 2]
 
-                    # Determine if the node is on the member
-                    if norm(vector_in) < norm(vector_ij):
+                axis_tol = 1e-9
+                abs_dx = abs(dx)
+                abs_dy = abs(dy)
+                abs_dz = abs(dz)
 
-                        # Add the node to the list of intermediate nodes
-                        int_nodes.append((node, norm(vector_in)))
+                lookup = getattr(self.model, '_axis_node_lookup', None)
+                round_digits = getattr(self.model, '_coord_round_digits', 9)
+                handled = False
+
+                if abs_dy <= axis_tol and abs_dz <= axis_tol:
+                    # Member runs along the global X axis
+                    handled = True
+                    # Use the precomputed axis buckets when available to avoid scanning every node
+                    if lookup:
+                        key = (round(Yi, round_digits), round(Zi, round_digits))
+                        nodes_on_line = lookup['x'].get(key)
+                        if nodes_on_line:
+                            for node in nodes_on_line:
+                                if node is self.i_node or node is self.j_node:
+                                    continue
+                                if dx > 0 and Xi < node.X < Xj:
+                                    int_nodes.append((node, node.X - Xi))
+                                elif dx < 0 and Xj < node.X < Xi:
+                                    int_nodes.append((node, Xi - node.X))
+                    else:
+                        axis_mask = (np.abs(coords_y - Yi) <= axis_tol) & (np.abs(coords_z - Zi) <= axis_tol)
+                        axis_mask[self.i_node.ID] = False
+                        axis_mask[self.j_node.ID] = False
+                        candidate_ids = np.nonzero(axis_mask)[0]
+                        if candidate_ids.size:
+                            cx = (coords_x - Xi)[axis_mask]
+                            between = ((cx*dx) > 0.0) & (np.abs(cx) < length)
+                            candidate_ids = candidate_ids[between]
+                            if candidate_ids.size:
+                                distances = np.abs(cx[between])
+                                for node_id, dist in zip(candidate_ids.tolist(), distances.tolist()):
+                                    int_nodes.append((nodes_by_id[node_id], dist))
+                elif abs_dx <= axis_tol and abs_dz <= axis_tol:
+                    # Member runs along the global Y axis
+                    handled = True
+                    # Use the precomputed axis buckets when available to avoid scanning every node
+                    if lookup:
+                        key = (round(Xi, round_digits), round(Zi, round_digits))
+                        nodes_on_line = lookup['y'].get(key)
+                        if nodes_on_line:
+                            for node in nodes_on_line:
+                                if node is self.i_node or node is self.j_node:
+                                    continue
+                                if dy > 0 and Yi < node.Y < Yj:
+                                    int_nodes.append((node, node.Y - Yi))
+                                elif dy < 0 and Yj < node.Y < Yi:
+                                    int_nodes.append((node, Yi - node.Y))
+                    else:
+                        axis_mask = (np.abs(coords_x - Xi) <= axis_tol) & (np.abs(coords_z - Zi) <= axis_tol)
+                        axis_mask[self.i_node.ID] = False
+                        axis_mask[self.j_node.ID] = False
+                        candidate_ids = np.nonzero(axis_mask)[0]
+                        if candidate_ids.size:
+                            cy = (coords_y - Yi)[axis_mask]
+                            between = ((cy*dy) > 0.0) & (np.abs(cy) < length)
+                            candidate_ids = candidate_ids[between]
+                            if candidate_ids.size:
+                                distances = np.abs(cy[between])
+                                for node_id, dist in zip(candidate_ids.tolist(), distances.tolist()):
+                                    int_nodes.append((nodes_by_id[node_id], dist))
+                elif abs_dx <= axis_tol and abs_dy <= axis_tol:
+                    # Member runs along the global Z axis
+                    handled = True
+                    # Use the precomputed axis buckets when available to avoid scanning every node
+                    if lookup:
+                        key = (round(Xi, round_digits), round(Yi, round_digits))
+                        nodes_on_line = lookup['z'].get(key)
+                        if nodes_on_line:
+                            for node in nodes_on_line:
+                                if node is self.i_node or node is self.j_node:
+                                    continue
+                                if dz > 0 and Zi < node.Z < Zj:
+                                    int_nodes.append((node, node.Z - Zi))
+                                elif dz < 0 and Zj < node.Z < Zi:
+                                    int_nodes.append((node, Zi - node.Z))
+                    else:
+                        axis_mask = (np.abs(coords_x - Xi) <= axis_tol) & (np.abs(coords_y - Yi) <= axis_tol)
+                        axis_mask[self.i_node.ID] = False
+                        axis_mask[self.j_node.ID] = False
+                        candidate_ids = np.nonzero(axis_mask)[0]
+                        if candidate_ids.size:
+                            cz = (coords_z - Zi)[axis_mask]
+                            between = ((cz*dz) > 0.0) & (np.abs(cz) < length)
+                            candidate_ids = candidate_ids[between]
+                            if candidate_ids.size:
+                                distances = np.abs(cz[between])
+                                for node_id, dist in zip(candidate_ids.tolist(), distances.tolist()):
+                                    int_nodes.append((nodes_by_id[node_id], dist))
+
+                if not handled:
+                    # General skew member: test each node's projection onto the member axis
+                    axis_mask = np.ones(len(coords), dtype=bool)
+                    axis_mask[self.i_node.ID] = False
+                    axis_mask[self.j_node.ID] = False
+
+                    candidate_ids_all = np.nonzero(axis_mask)[0]
+                    if candidate_ids_all.size:
+                        offset_x = (coords_x - Xi)[axis_mask]
+                        offset_y = (coords_y - Yi)[axis_mask]
+                        offset_z = (coords_z - Zi)[axis_mask]
+
+                        projections = offset_x*dx + offset_y*dy + offset_z*dz
+                        node_len_sq = offset_x*offset_x + offset_y*offset_y + offset_z*offset_z
+                        cross_x = dy*offset_z - dz*offset_y
+                        cross_y = dz*offset_x - dx*offset_z
+                        cross_z = dx*offset_y - dy*offset_x
+                        cross_sq = cross_x*cross_x + cross_y*cross_y + cross_z*cross_z
+
+                        between = (projections > 0.0) & (projections < length_sq)
+                        nonzero_len = node_len_sq > 0.0
+                        near_axis = cross_sq <= colinear_tol * length_sq * node_len_sq
+
+                        mask = between & nonzero_len & near_axis
+                        candidate_ids = candidate_ids_all[mask]
+
+                        if candidate_ids.size:
+                            distances = projections[mask] / length
+                            for node_id, dist in zip(candidate_ids.tolist(), distances.tolist()):
+                                int_nodes.append((nodes_by_id[node_id], dist))
+            else:
+                # Fallback path when cached arrays are unavailable: loop through nodes
+                tol = 1e-9
+                min_x = min(Xi, Xj) - tol
+                max_x = max(Xi, Xj) + tol
+                min_y = min(Yi, Yj) - tol
+                max_y = max(Yi, Yj) + tol
+                min_z = min(Zi, Zj) - tol
+                max_z = max(Zi, Zj) + tol
+
+                for node in self.model.nodes.values():
+
+                    if node is self.i_node or node is self.j_node:
+                        continue
+
+                    X, Y, Z = node.X, node.Y, node.Z
+
+                    if (X < min_x or X > max_x or
+                        Y < min_y or Y > max_y or
+                        Z < min_z or Z > max_z):
+                        continue
+
+                    vx = X - Xi
+                    vy = Y - Yi
+                    vz = Z - Zi
+
+                    node_len_sq = vx*vx + vy*vy + vz*vz
+                    if node_len_sq == 0.0:
+                        continue
+
+                    proj = vx*dx + vy*dy + vz*dz
+                    if proj <= 0.0 or proj >= length_sq:
+                        continue
+
+                    cross_x = dy*vz - dz*vy
+                    cross_y = dz*vx - dx*vz
+                    cross_z = dx*vy - dy*vx
+                    cross_sq = cross_x*cross_x + cross_y*cross_y + cross_z*cross_z
+
+                    if cross_sq > colinear_tol * length_sq * node_len_sq:
+                        continue
+
+                    distance_along = proj / length
+                    int_nodes.append((node, distance_along))
 
         # Create a list of sorted intermediate nodes by distance from the i-node
         int_nodes = sorted(int_nodes, key=lambda x: x[1])
@@ -155,6 +334,9 @@ class PhysMember(Member3D):
 
             # Add the new sub-member to the sub-member dictionary for this physical member
             self.sub_members[name] = new_sub_member
+
+        # Remember the inputs that produced this discretization so we can skip redundant work
+        self._discretize_signature = signature
 
     def shear(self, Direction: Literal['Fy', 'Fz'], x: float, combo_name: str = 'Combo 1') -> float:
         """

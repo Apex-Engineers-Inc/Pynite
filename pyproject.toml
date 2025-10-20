@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "PyNiteFEA"
+version = "1.5.0"
+description = "A simple elastic 3D structural finite element library for Python."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT License" }
+authors = [
+    { name = "D. Craig Brinck, PE, SE", email = "Building.Code@outlook.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy",
+    "PrettyTable",
+    "scipy",
+    "matplotlib",
+    "pytest>=8.3.5",
+    "pip>=25.0.1",
+]
+
+[project.optional-dependencies]
+all = [
+    "Ipython",
+    "vtk",
+    "pyvista[all,trame]",
+    "trame_jupyter_extension",
+    "ipywidgets",
+    "pdfkit",
+    "Jinja2",
+    "numba>=0.56",
+]
+numba = ["numba>=0.56"]
+vtk = ["IPython", "vtk"]
+pyvista = ["pyvista[all,trame]", "trame_jupyter_extension", "ipywidgets"]
+reporting = ["pdfkit", "Jinja2"]
+derivations = ["jupyterlab", "sympy"]
+dev = ["pytest", "pyinstrument", "poethepoet"]
+
+[project.urls]
+Homepage = "https://github.com/JWock82/Pynite.git"
+Repository = "https://github.com/JWock82/Pynite.git"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["Pynite", "Pynite.*"]
+
+[tool.setuptools.package-data]
+Pynite = ["*html", "*.css", "*Full Logo No Buffer - Transparent.png"]
+
+[tool.poe.tasks]
+test-profile = { script = "scripts.profile_tests:main", help = "Run test suite with pyinstrument profiling" }
