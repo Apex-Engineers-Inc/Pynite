@@ -19,3 +19,5 @@ __pycache__/
 .ipynb_checkpoints/
 BytesIO.png
 console.png
+*.pstats
+baseline_profile.html

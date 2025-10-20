@@ -150,61 +150,46 @@ def _check_stability(model: FEModel3D, K: NDArray[float64]) -> None:
 
     """
 
-    # Initialize the `unstable` flag to `False`
+    # Convert to 1D diagonal regardless of dense/sparse input
+    if hasattr(K, "diagonal"):
+        diagonal = K.diagonal()
+    else:
+        diagonal = [K[i, i] for i in range(K.shape[0])]
+    diag = array(diagonal, ndmin=1).reshape(-1)
+
+    nodes_seq = getattr(model, "_nodes_by_id", None)
+    if nodes_seq:
+        nodes = nodes_seq
+    else:
+        nodes = tuple(model.nodes.values())
+    supports = []
+    for node in nodes:
+        supports.extend(
+            (
+                node.support_DX,
+                node.support_DY,
+                node.support_DZ,
+                node.support_RX,
+                node.support_RY,
+                node.support_RZ,
+            )
+        )
+
+    directions = (
+        "for translation in the global X direction.",
+        "for translation in the global Y direction.",
+        "for translation in the global Z direction.",
+        "for rotation about the global X axis.",
+        "for rotation about the global Y axis.",
+        "for rotation about the global Z axis.",
+    )
+
     unstable = False
-
-    # Step through each diagonal term in the stiffness matrix
-    for i in range(K.shape[0]):
-        # Determine which node this term belongs to
-        node = [node for node in model.nodes.values() if node.ID == int(i / 6)][0]
-
-        # Determine which degree of freedom this term belongs to
-        dof = i % 6
-
-        # Check to see if this degree of freedom is supported
-        if dof == 0:
-            supported = node.support_DX
-
-        elif dof == 1:
-            supported = node.support_DY
-
-        elif dof == 2:
-            supported = node.support_DZ
-
-        elif dof == 3:
-            supported = node.support_RX
-
-        elif dof == 4:
-            supported = node.support_RY
-
-        elif dof == 5:
-            supported = node.support_RZ
-
-        # Check if the degree of freedom on this diagonal is unstable
-        if isclose(K[i, i], 0) and not supported:
-            # Flag the model as unstable
+    for i, value in enumerate(diag):
+        if isclose(value, 0) and not supports[i]:
             unstable = True
-
-            # Identify which direction this instability affects
-            if i % 6 == 0:
-                direction = "for translation in the global X direction."
-
-            if i % 6 == 1:
-                direction = "for translation in the global Y direction."
-
-            if i % 6 == 2:
-                direction = "for translation in the global Z direction."
-
-            if i % 6 == 3:
-                direction = "for rotation about the global X axis."
-
-            if i % 6 == 4:
-                direction = "for rotation about the global Y axis."
-
-            if i % 6 == 5:
-                direction = "for rotation about the global Z axis."
-
-            # Print a message to the console
+            node = nodes[i // 6]
+            direction = directions[i % 6]
             print(
                 "* Nodal instability detected: node "
                 + node.name
@@ -645,20 +630,13 @@ def _unpartition_disp(
 
     """
 
-    D = zeros((len(model.nodes) * 6, 1))
+    total_dofs = len(model.nodes) * 6
+    D = zeros((total_dofs, 1))
 
-    # Step through each node in the model
-    for node in model.nodes.values():
-        # Step through each degree of freedom at the node
-        for i in range(6):
-            # Check if the dof is in the list of enforced displacements
-            if node.ID * 6 + i in D2_indices:
-                # Get the enforced displacement
-                D[(node.ID * 6 + i, 0)] = D2[D2_indices.index(node.ID * 6 + i), 0]
-
-            else:
-                # Get the calculated displacement
-                D[(node.ID * 6 + i, 0)] = D1[D1_indices.index(node.ID * 6 + i), 0]
+    if D1_indices:
+        D[array(D1_indices, dtype=int), 0] = D1.reshape(-1)
+    if D2_indices:
+        D[array(D2_indices, dtype=int), 0] = D2.reshape(-1)
 
     # Return the displacement vector
     return D
@@ -934,382 +912,129 @@ def _calc_reactions(
     # Identify which load combinations to evaluate
     combo_list = _identify_combos(model, combo_tags)
 
-    # Calculate the reactions node by node
-    for node in model.nodes.values():
-        # Step through each load combination
-        for combo in combo_list:
-            # Initialize reactions for this node and load combination
-            node.RxnFX[combo.name] = 0.0
+    nodes = tuple(model.nodes.values())
+    restraint_lookup = {
+        node: (
+            node.support_DX or (node.spring_DX[0] is not None and bool(node.spring_DX[2])),
+            node.support_DY or (node.spring_DY[0] is not None and bool(node.spring_DY[2])),
+            node.support_DZ or (node.spring_DZ[0] is not None and bool(node.spring_DZ[2])),
+            node.support_RX or (node.spring_RX[0] is not None and bool(node.spring_RX[2])),
+            node.support_RY or (node.spring_RY[0] is not None and bool(node.spring_RY[2])),
+            node.support_RZ or (node.spring_RZ[0] is not None and bool(node.spring_RZ[2])),
+        )
+        for node in nodes
+    }
+
+    for combo in combo_list:
+        combo_name = combo.name
+
+        for node in nodes:
+            node.RxnFX[combo_name] = 0.0
+            node.RxnFY[combo_name] = 0.0
+            node.RxnFZ[combo_name] = 0.0
+            node.RxnMX[combo_name] = 0.0
+            node.RxnMY[combo_name] = 0.0
+            node.RxnMZ[combo_name] = 0.0
+
+        def accumulate(node: "Node3D", offset: int, vector: NDArray[float64]) -> None:
+            flags = restraint_lookup[node]
+            if flags[0]:
+                node.RxnFX[combo_name] += vector[offset + 0, 0]
+            if flags[1]:
+                node.RxnFY[combo_name] += vector[offset + 1, 0]
+            if flags[2]:
+                node.RxnFZ[combo_name] += vector[offset + 2, 0]
+            if flags[3]:
+                node.RxnMX[combo_name] += vector[offset + 3, 0]
+            if flags[4]:
+                node.RxnMY[combo_name] += vector[offset + 4, 0]
+            if flags[5]:
+                node.RxnMZ[combo_name] += vector[offset + 5, 0]
+
+        # Springs
+        for spring in model.springs.values():
+            if not spring.active.get(combo_name, False):
+                continue
+
+            spring_F = spring.F(combo_name)
+            accumulate(spring.i_node, 0, spring_F)
+            accumulate(spring.j_node, 6, spring_F)
+
+        # Members
+        for phys_member in model.members.values():
+            if not phys_member.active.get(combo_name, False):
+                continue
+
+            for member in phys_member.sub_members.values():
+                flags_i = restraint_lookup[member.i_node]
+                flags_j = restraint_lookup[member.j_node]
+                if not any(flags_i) and not any(flags_j):
+                    continue
+
+                member_F = member.F(combo_name)
+                accumulate(member.i_node, 0, member_F)
+                accumulate(member.j_node, 6, member_F)
+
+        # Plates
+        for plate in model.plates.values():
+            nodes_offsets = (
+                (plate.i_node, 0),
+                (plate.j_node, 6),
+                (plate.m_node, 12),
+                (plate.n_node, 18),
+            )
+            if not any(any(restraint_lookup[node]) for node, _ in nodes_offsets):
+                continue
+
+            plate_F = plate.F(combo_name)
+            for node, offset in nodes_offsets:
+                accumulate(node, offset, plate_F)
+
+        # Quads
+        for quad in model.quads.values():
+            nodes_offsets = (
+                (quad.i_node, 0),
+                (quad.j_node, 6),
+                (quad.m_node, 12),
+                (quad.n_node, 18),
+            )
+            if not any(any(restraint_lookup[node]) for node, _ in nodes_offsets):
+                continue
+
+            quad_F = quad.F(combo_name)
+            for node, offset in nodes_offsets:
+                accumulate(node, offset, quad_F)
+
+        # Applied nodal loads and nodal springs
+        for node in nodes:
+            for load in node.NodeLoads:
+                for case, factor in combo.factors.items():
+                    if load[2] == case:
+                        if load[0] == "FX" and node.support_DX:
+                            node.RxnFX[combo.name] -= load[1] * factor
+                        elif load[0] == "FY" and node.support_DY:
+                            node.RxnFY[combo.name] -= load[1] * factor
+                        elif load[0] == "FZ" and node.support_DZ:
+                            node.RxnFZ[combo.name] -= load[1] * factor
+                        elif load[0] == "MX" and node.support_RX:
+                            node.RxnMX[combo.name] -= load[1] * factor
+                        elif load[0] == "MY" and node.support_RY:
+                            node.RxnMY[combo.name] -= load[1] * factor
+                        elif load[0] == "MZ" and node.support_RZ:
+                            node.RxnMZ[combo.name] -= load[1] * factor
 
-            node.RxnFY[combo.name] = 0.0
-
-            node.RxnFZ[combo.name] = 0.0
-
-            node.RxnMX[combo.name] = 0.0
-
-            node.RxnMY[combo.name] = 0.0
-
-            node.RxnMZ[combo.name] = 0.0
-
-            # Determine if the node has any supports
-            if (
-                node.support_DX
-                or node.support_DY
-                or node.support_DZ
-                or node.support_RX
-                or node.support_RY
-                or node.support_RZ
-            ):
-                # Sum the spring end forces at the node
-                for spring in model.springs.values():
-                    if spring.i_node == node and spring.active[combo.name]:
-                        # Get the spring's global force matrix
-                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                        spring_F = spring.F(combo.name)
-
-                        if node.support_DX:
-                            node.RxnFX[combo.name] += spring_F[0, 0]
-
-                        if node.support_DY:
-                            node.RxnFY[combo.name] += spring_F[1, 0]
-
-                        if node.support_DZ:
-                            node.RxnFZ[combo.name] += spring_F[2, 0]
-
-                        if node.support_RX:
-                            node.RxnMX[combo.name] += spring_F[3, 0]
-
-                        if node.support_RY:
-                            node.RxnMY[combo.name] += spring_F[4, 0]
-
-                        if node.support_RZ:
-                            node.RxnMZ[combo.name] += spring_F[5, 0]
-
-                    elif spring.j_node == node and spring.active[combo.name]:
-                        # Get the spring's global force matrix
-                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                        spring_F = spring.F(combo.name)
-
-                        if node.support_DX:
-                            node.RxnFX[combo.name] += spring_F[6, 0]
-
-                        if node.support_DY:
-                            node.RxnFY[combo.name] += spring_F[7, 0]
-
-                        if node.support_DZ:
-                            node.RxnFZ[combo.name] += spring_F[8, 0]
-
-                        if node.support_RX:
-                            node.RxnMX[combo.name] += spring_F[9, 0]
-
-                        if node.support_RY:
-                            node.RxnMY[combo.name] += spring_F[10, 0]
-
-                        if node.support_RZ:
-                            node.RxnMZ[combo.name] += spring_F[11, 0]
-
-                # Step through each physical member in the model
-                for phys_member in model.members.values():
-                    # Sum the sub-member end forces at the node
-                    for member in phys_member.sub_members.values():
-                        if member.i_node == node and phys_member.active[combo.name]:
-                            # Get the member's global force matrix
-                            # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                            member_F = member.F(combo.name)
-
-                            if node.support_DX:
-                                node.RxnFX[combo.name] += member_F[0, 0]
-
-                            if node.support_DY:
-                                node.RxnFY[combo.name] += member_F[1, 0]
-
-                            if node.support_DZ:
-                                node.RxnFZ[combo.name] += member_F[2, 0]
-
-                            if node.support_RX:
-                                node.RxnMX[combo.name] += member_F[3, 0]
-
-                            if node.support_RY:
-                                node.RxnMY[combo.name] += member_F[4, 0]
-
-                            if node.support_RZ:
-                                node.RxnMZ[combo.name] += member_F[5, 0]
-
-                        elif member.j_node == node and phys_member.active[combo.name]:
-                            # Get the member's global force matrix
-                            # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                            member_F = member.F(combo.name)
-
-                            if node.support_DX:
-                                node.RxnFX[combo.name] += member_F[6, 0]
-
-                            if node.support_DY:
-                                node.RxnFY[combo.name] += member_F[7, 0]
-
-                            if node.support_DZ:
-                                node.RxnFZ[combo.name] += member_F[8, 0]
-
-                            if node.support_RX:
-                                node.RxnMX[combo.name] += member_F[9, 0]
-
-                            if node.support_RY:
-                                node.RxnMY[combo.name] += member_F[10, 0]
-
-                            if node.support_RZ:
-                                node.RxnMZ[combo.name] += member_F[11, 0]
-
-                # Sum the plate forces at the node
-                for plate in model.plates.values():
-                    if plate.i_node == node:
-                        # Get the plate's global force matrix
-                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                        plate_F = plate.F(combo.name)
-
-                        if node.support_DX:
-                            node.RxnFX[combo.name] += plate_F[0, 0]
-
-                        if node.support_DY:
-                            node.RxnFY[combo.name] += plate_F[1, 0]
-
-                        if node.support_DZ:
-                            node.RxnFZ[combo.name] += plate_F[2, 0]
-
-                        if node.support_RX:
-                            node.RxnMX[combo.name] += plate_F[3, 0]
-
-                        if node.support_RY:
-                            node.RxnMY[combo.name] += plate_F[4, 0]
-
-                        if node.support_RZ:
-                            node.RxnMZ[combo.name] += plate_F[5, 0]
-
-                    elif plate.j_node == node:
-                        # Get the plate's global force matrix
-                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                        plate_F = plate.F(combo.name)
-
-                        if node.support_DX:
-                            node.RxnFX[combo.name] += plate_F[6, 0]
-
-                        if node.support_DY:
-                            node.RxnFY[combo.name] += plate_F[7, 0]
-
-                        if node.support_DZ:
-                            node.RxnFZ[combo.name] += plate_F[8, 0]
-
-                        if node.support_RX:
-                            node.RxnMX[combo.name] += plate_F[9, 0]
-
-                        if node.support_RY:
-                            node.RxnMY[combo.name] += plate_F[10, 0]
-
-                        if node.support_RZ:
-                            node.RxnMZ[combo.name] += plate_F[11, 0]
-
-                    elif plate.m_node == node:
-                        # Get the plate's global force matrix
-                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                        plate_F = plate.F(combo.name)
-
-                        if node.support_DX:
-                            node.RxnFX[combo.name] += plate_F[12, 0]
-
-                        if node.support_DY:
-                            node.RxnFY[combo.name] += plate_F[13, 0]
-
-                        if node.support_DZ:
-                            node.RxnFZ[combo.name] += plate_F[14, 0]
-
-                        if node.support_RX:
-                            node.RxnMX[combo.name] += plate_F[15, 0]
-
-                        if node.support_RY:
-                            node.RxnMY[combo.name] += plate_F[16, 0]
-
-                        if node.support_RZ:
-                            node.RxnMZ[combo.name] += plate_F[17, 0]
-
-                    elif plate.n_node == node:
-                        # Get the plate's global force matrix
-                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                        plate_F = plate.F(combo.name)
-
-                        if node.support_DX:
-                            node.RxnFX[combo.name] += plate_F[18, 0]
-
-                        if node.support_DY:
-                            node.RxnFY[combo.name] += plate_F[19, 0]
-
-                        if node.support_DZ:
-                            node.RxnFZ[combo.name] += plate_F[20, 0]
-
-                        if node.support_RX:
-                            node.RxnMX[combo.name] += plate_F[21, 0]
-
-                        if node.support_RY:
-                            node.RxnMY[combo.name] += plate_F[22, 0]
-
-                        if node.support_RZ:
-                            node.RxnMZ[combo.name] += plate_F[23, 0]
-
-                # Sum the quad forces at the node
-                for quad in model.quads.values():
-                    if quad.i_node == node:
-                        # Get the quad's global force matrix
-                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                        quad_F = quad.F(combo.name)
-
-                        if node.support_DX:
-                            node.RxnFX[combo.name] += quad_F[0, 0]
-
-                        if node.support_DY:
-                            node.RxnFY[combo.name] += quad_F[1, 0]
-
-                        if node.support_DZ:
-                            node.RxnFZ[combo.name] += quad_F[2, 0]
-
-                        if node.support_RX:
-                            node.RxnMX[combo.name] += quad_F[3, 0]
-
-                        if node.support_RY:
-                            node.RxnMY[combo.name] += quad_F[4, 0]
-
-                        if node.support_RZ:
-                            node.RxnMZ[combo.name] += quad_F[5, 0]
-
-                    elif quad.j_node == node:
-                        # Get the quad's global force matrix
-                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                        quad_F = quad.F(combo.name)
-
-                        if node.support_DX:
-                            node.RxnFX[combo.name] += quad_F[6, 0]
-
-                        if node.support_DY:
-                            node.RxnFY[combo.name] += quad_F[7, 0]
-
-                        if node.support_DZ:
-                            node.RxnFZ[combo.name] += quad_F[8, 0]
-
-                        if node.support_RX:
-                            node.RxnMX[combo.name] += quad_F[9, 0]
-
-                        if node.support_RY:
-                            node.RxnMY[combo.name] += quad_F[10, 0]
-
-                        if node.support_RZ:
-                            node.RxnMZ[combo.name] += quad_F[11, 0]
-
-                    elif quad.m_node == node:
-                        # Get the quad's global force matrix
-                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                        quad_F = quad.F(combo.name)
-
-                        if node.support_DX:
-                            node.RxnFX[combo.name] += quad_F[12, 0]
-
-                        if node.support_DY:
-                            node.RxnFY[combo.name] += quad_F[13, 0]
-
-                        if node.support_DZ:
-                            node.RxnFZ[combo.name] += quad_F[14, 0]
-
-                        if node.support_RX:
-                            node.RxnMX[combo.name] += quad_F[15, 0]
-
-                        if node.support_RY:
-                            node.RxnMY[combo.name] += quad_F[16, 0]
-
-                        if node.support_RZ:
-                            node.RxnMZ[combo.name] += quad_F[17, 0]
-
-                    elif quad.n_node == node:
-                        # Get the quad's global force matrix
-                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                        quad_F = quad.F(combo.name)
-
-                        if node.support_DX:
-                            node.RxnFX[combo.name] += quad_F[18, 0]
-
-                        if node.support_DY:
-                            node.RxnFY[combo.name] += quad_F[19, 0]
-
-                        if node.support_DZ:
-                            node.RxnFZ[combo.name] += quad_F[20, 0]
-
-                        if node.support_RX:
-                            node.RxnMX[combo.name] += quad_F[21, 0]
-
-                        if node.support_RY:
-                            node.RxnMY[combo.name] += quad_F[22, 0]
-
-                        if node.support_RZ:
-                            node.RxnMZ[combo.name] += quad_F[23, 0]
-
-                # Sum the joint loads applied to the node
-                for load in node.NodeLoads:
-                    for case, factor in combo.factors.items():
-                        if load[2] == case:
-                            if load[0] == "FX" and node.support_DX:
-                                node.RxnFX[combo.name] -= load[1] * factor
-
-                            elif load[0] == "FY" and node.support_DY:
-                                node.RxnFY[combo.name] -= load[1] * factor
-
-                            elif load[0] == "FZ" and node.support_DZ:
-                                node.RxnFZ[combo.name] -= load[1] * factor
-
-                            elif load[0] == "MX" and node.support_RX:
-                                node.RxnMX[combo.name] -= load[1] * factor
-
-                            elif load[0] == "MY" and node.support_RY:
-                                node.RxnMY[combo.name] -= load[1] * factor
-
-                            elif load[0] == "MZ" and node.support_RZ:
-                                node.RxnMZ[combo.name] -= load[1] * factor
-
-            # Calculate any reactions due to active spring supports at the node
             if node.spring_DX[0] is not None and node.spring_DX[2]:
-                k = float(node.spring_DX[0])
-
-                DX = node.DX[combo.name]
-
-                node.RxnFX[combo.name] -= k * DX
-
+                node.RxnFX[combo.name] -= float(node.spring_DX[0]) * node.DX[combo.name]
             if node.spring_DY[0] is not None and node.spring_DY[2]:
-                k = float(node.spring_DY[0])
-
-                DY = node.DY[combo.name]
-
-                node.RxnFY[combo.name] -= k * DY
-
+                node.RxnFY[combo.name] -= float(node.spring_DY[0]) * node.DY[combo.name]
             if node.spring_DZ[0] is not None and node.spring_DZ[2]:
-                k = float(node.spring_DZ[0])
-
-                DZ = node.DZ[combo.name]
-
-                node.RxnFZ[combo.name] -= k * DZ
-
+                node.RxnFZ[combo.name] -= float(node.spring_DZ[0]) * node.DZ[combo.name]
             if node.spring_RX[0] is not None and node.spring_RX[2]:
-                k = float(node.spring_RX[0])
-
-                RX = node.RX[combo.name]
-
-                node.RxnMX[combo.name] -= k * RX
-
+                node.RxnMX[combo.name] -= float(node.spring_RX[0]) * node.RX[combo.name]
             if node.spring_RY[0] is not None and node.spring_RY[2]:
-                k = float(node.spring_RY[0])
-
-                RY = node.RY[combo.name]
-
-                node.RxnMY[combo.name] -= k * RY
-
+                node.RxnMY[combo.name] -= float(node.spring_RY[0]) * node.RY[combo.name]
             if node.spring_RZ[0] is not None and node.spring_RZ[2]:
-                k = float(node.spring_RZ[0])
-
-                RZ = node.RZ[combo.name]
-
-                node.RxnMZ[combo.name] -= k * RZ
+                node.RxnMZ[combo.name] -= float(node.spring_RZ[0]) * node.RZ[combo.name]
 
 
 def _check_statics(model: FEModel3D, combo_tags: List[str] | None = None) -> None:
@@ -1605,26 +1330,32 @@ def _partition(
 
     """
 
+    is_sparse = hasattr(unp_matrix, "tocsr")
+    matrix = unp_matrix.tocsr() if is_sparse else unp_matrix
+
     # Determine if this is a 1D vector or a 2D matrix
     # 1D vectors
-    if unp_matrix.shape[1] == 1:
+    if matrix.shape[1] == 1:
         # Partition the vector into 2 subvectors
-        m1 = unp_matrix[D1_indices, :]
+        m1 = matrix[D1_indices, :]
 
-        m2 = unp_matrix[D2_indices, :]
+        m2 = matrix[D2_indices, :]
+
+        if is_sparse:
+            return m1.toarray(), m2.toarray()
 
         return m1, m2
 
     # 2D matrices
     else:
         # Partition the matrix into 4 submatrices
-        m11 = unp_matrix[D1_indices, :][:, D1_indices]
+        m11 = matrix[D1_indices, :][:, D1_indices]
 
-        m12 = unp_matrix[D1_indices, :][:, D2_indices]
+        m12 = matrix[D1_indices, :][:, D2_indices]
 
-        m21 = unp_matrix[D2_indices, :][:, D1_indices]
+        m21 = matrix[D2_indices, :][:, D1_indices]
 
-        m22 = unp_matrix[D2_indices, :][:, D2_indices]
+        m22 = matrix[D2_indices, :][:, D2_indices]
 
         return m11, m12, m21, m22
 
@@ -1636,9 +1367,21 @@ def _renumber(model: FEModel3D) -> None:
 
     """
 
-    # Number each node in the model
-    for id, node in enumerate(model.nodes.values()):
+    # Number each node in the model and cache coordinate lookups for fast reuse
+    nodes = list(model.nodes.values())
+    for id, node in enumerate(nodes):
         node.ID = id
+
+    model._nodes_by_id = nodes
+    if nodes:
+        model._node_coord_array = array(
+            [(node.X, node.Y, node.Z) for node in nodes], dtype=float64
+        )
+    else:
+        model._node_coord_array = array([], dtype=float64).reshape(0, 3)
+
+    if hasattr(model, "_build_axis_node_lookup"):
+        model._build_axis_node_lookup(model._coord_round_digits)
 
     # Number each spring in the model
     for id, spring in enumerate(model.springs.values()):

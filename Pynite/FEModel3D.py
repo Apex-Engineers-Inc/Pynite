@@ -2,6 +2,8 @@
 # `__future__` import required to use bar operators for optional type annotations
 from __future__ import annotations  # Allows more recent type hints features
 from typing import TYPE_CHECKING, Literal
+from concurrent.futures import ThreadPoolExecutor
+import os
 
 import numpy as np
 from numpy import array, zeros, matmul, subtract, concatenate, repeat, tile, ix_
@@ -20,6 +22,36 @@ from Pynite.ShearWall import ShearWall
 from Pynite import Analysis
 
 DOF_INDICES = array([0, 1, 2, 3, 4, 5], dtype=int)
+
+
+def _assemble_quad_sparse_chunk(quads: list[Quad3D]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if not quads:
+        empty_i = np.empty(0, dtype=np.int32)
+        return empty_i, empty_i, np.empty(0, dtype=np.float64)
+
+    rows = []
+    cols = []
+    data = []
+
+    for quad in quads:
+        dofs = np.hstack(
+            (
+                quad.i_node.ID * 6 + DOF_INDICES,
+                quad.j_node.ID * 6 + DOF_INDICES,
+                quad.m_node.ID * 6 + DOF_INDICES,
+                quad.n_node.ID * 6 + DOF_INDICES,
+            )
+        ).astype(np.int32, copy=False)
+        k_global = quad.K()
+        rows.append(np.repeat(dofs, 24))
+        cols.append(np.tile(dofs, 24))
+        data.append(k_global.ravel())
+
+    row_vec = np.concatenate(rows).astype(np.int32, copy=False)
+    col_vec = np.concatenate(cols).astype(np.int32, copy=False)
+    data_vec = np.concatenate(data)
+    return row_vec, col_vec, data_vec
+
 
 if TYPE_CHECKING:
     from typing import Dict, List, Tuple
@@ -57,6 +89,8 @@ class FEModel3D():
         self.solution: str | None = None  # Indicates the solution type for the latest run of the model
         self._node_revision: int = 0  # Monotonic counter for node edits
         self._axis_node_lookup = None  # Lookup tables for quickly finding colinear nodes
+        self._axis_lookup_revision: int = -1
+        self._node_coord_array = None
         self._nodes_by_id: list[Node3D | None] = []
         self._coord_round_digits = 9
         self._calc_reactions_enabled = True  # Analysis hooks can disable reaction recovery to save time
@@ -140,6 +174,13 @@ class FEModel3D():
 
     def _build_axis_node_lookup(self, digits: int = 9) -> None:
         """Precomputes axis-aligned node lookups for fast member discretization."""
+        if (
+            self._axis_node_lookup is not None
+            and self._axis_lookup_revision == self._node_revision
+            and self._coord_round_digits == digits
+        ):
+            return
+
         # Buckets of nodes that share a constant coordinate pair are keyed so we can
         # stitch members into segments without repeatedly scanning the whole node list.
         x_lookup: Dict[Tuple[float, float], List[Node3D]] = {}
@@ -164,6 +205,7 @@ class FEModel3D():
 
         self._axis_node_lookup = {'x': x_lookup, 'y': y_lookup, 'z': z_lookup}
         self._coord_round_digits = digits
+        self._axis_lookup_revision = self._node_revision
 
     def add_material(self, name: str, E: float, G: float, nu: float, rho: float, fy: float | None = None) -> str:
         """Adds a new material to the model.
@@ -1146,7 +1188,7 @@ class FEModel3D():
         # Flag the model as unsolved
         self.solution = None
 
-    def add_load_combo(self, name:str, factors:dict, combo_tags:list | None = None):
+    def add_load_combo(self, name:str, factors:dict, combo_tags:list[str] | None = None):
         """Adds a load combination to the model.
 
         :param name: A unique name for the load combination (e.g. '1.2D+1.6L+0.5S' or 'Gravity Combo').
@@ -1566,27 +1608,51 @@ class FEModel3D():
         if sparse:
             quad_list = list(self.quads.values())
             if quad_list:
-                # Vectorized approach: pre-allocate arrays
-                n_quads = len(quad_list)
-                quad_K_data = np.empty((n_quads, 24, 24), dtype=np.float64)
-                quad_dofs = np.empty((n_quads, 24), dtype=np.int32)
-
-                # Collect all K matrices and DOFs
-                for i, quad in enumerate(quad_list):
-                    quad_K_data[i] = quad.K()
-                    quad_dofs[i] = concatenate((quad.i_node.ID*6 + DOF_INDICES,
-                                                 quad.j_node.ID*6 + DOF_INDICES,
-                                                 quad.m_node.ID*6 + DOF_INDICES,
-                                                 quad.n_node.ID*6 + DOF_INDICES))
-
-                # Vectorized row/col/data construction
-                quad_rows = np.repeat(quad_dofs, 24, axis=1).ravel()
-                quad_cols = np.tile(quad_dofs, (1, 24)).ravel()
-                quad_data = quad_K_data.ravel()
-
-                row.extend(quad_rows.tolist())
-                col.extend(quad_cols.tolist())
-                data.extend(quad_data.tolist())
+                max_workers = min(4, os.cpu_count() or 1, len(quad_list))
+                if max_workers > 1 and len(quad_list) >= 64:
+                    chunk_size = (len(quad_list) + max_workers - 1) // max_workers
+                    chunks = [
+                        quad_list[i : i + chunk_size]
+                        for i in range(0, len(quad_list), chunk_size)
+                    ]
+                    rows_chunks = []
+                    cols_chunks = []
+                    data_chunks = []
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        for q_rows, q_cols, q_data in executor.map(
+                            _assemble_quad_sparse_chunk, chunks
+                        ):
+                            if q_rows.size:
+                                rows_chunks.append(q_rows)
+                                cols_chunks.append(q_cols)
+                                data_chunks.append(q_data)
+                    if rows_chunks:
+                        row.extend(np.concatenate(rows_chunks).tolist())
+                        col.extend(np.concatenate(cols_chunks).tolist())
+                        data.extend(np.concatenate(data_chunks).tolist())
+                else:
+                    quad_K_data = []
+                    quad_dofs = []
+                    for quad in quad_list:
+                        quad_K_data.append(quad.K())
+                        quad_dofs.append(
+                            concatenate(
+                                (
+                                    quad.i_node.ID * 6 + DOF_INDICES,
+                                    quad.j_node.ID * 6 + DOF_INDICES,
+                                    quad.m_node.ID * 6 + DOF_INDICES,
+                                    quad.n_node.ID * 6 + DOF_INDICES,
+                                )
+                            )
+                        )
+                    if quad_K_data:
+                        quad_dofs = np.array(quad_dofs, dtype=np.int32)
+                        quad_rows = np.repeat(quad_dofs, 24, axis=1).ravel()
+                        quad_cols = np.tile(quad_dofs, (1, 24)).ravel()
+                        quad_data = np.vstack(quad_K_data).ravel()
+                        row.extend(quad_rows.tolist())
+                        col.extend(quad_cols.tolist())
+                        data.extend(quad_data.tolist())
         else:
             for quad in self.quads.values():
                 quad_K = quad.K()
@@ -2074,11 +2140,7 @@ class FEModel3D():
         
         # Import `scipy` features if the sparse solver is being used
         if sparse == True:
-            from scipy.sparse.linalg import spsolve
-
-        # Import `scipy` features if the sparse solver is being used
-        if sparse == True:
-            from scipy.sparse.linalg import spsolve
+            from scipy.sparse.linalg import spsolve, splu
 
         # Prepare the model for analysis
         Analysis._prepare_model(self)
@@ -2095,8 +2157,16 @@ class FEModel3D():
             K11 = K11.tocsr()
             K12 = K12.tocsr()
             K11_solver = K11.tocsc()
+            if K11_solver.shape[0]:
+                try:
+                    lu_solver = splu(K11_solver, permc_spec='NATURAL')
+                except RuntimeError:
+                    lu_solver = None
+            else:
+                lu_solver = None
         else:
             K11, K12, K21, K22 = Analysis._partition(self, self.K(combo_name, log, check_stability, sparse), D1_indices, D2_indices)
+            lu_solver = None
 
         # Identify which load combinations have the tags the user has given
         combo_list = Analysis._identify_combos(self, combo_tags)
@@ -2125,7 +2195,10 @@ class FEModel3D():
                     # Calculate the unknown displacements D1
                     if sparse == True:
                         rhs = subtract(subtract(P1, FER1), K12 @ D2)
-                        D1 = spsolve(K11_solver, rhs, permc_spec='NATURAL')
+                        if lu_solver is not None:
+                            D1 = lu_solver.solve(rhs)
+                        else:
+                            D1 = spsolve(K11_solver, rhs, permc_spec='NATURAL')
                         D1 = D1.reshape(len(D1), 1)
                     else:
                         D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
