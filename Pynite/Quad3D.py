@@ -13,17 +13,19 @@ from numpy import add
 from numpy.linalg import inv, norm
 import warnings
 
-from Pynite.numba_kernels import (
+from Pynite.quad_assembly import (
     accumulate_membrane_stiffness,
     accumulate_bending_shear_stiffness,
     expand_membrane_matrix,
     expand_bending_matrix,
+    compute_quad_local_coords,
+    compute_quad_transformation_matrix,
+)
+from Pynite.cython import (
     quad_moment_at,
     quad_moment_batch,
     quad_membrane_at,
     quad_membrane_batch,
-    compute_quad_local_coords,
-    compute_quad_transformation_matrix,
 )
 
 BENDING_SIGN_IDX = np.array([3, 9, 15, 21], dtype=np.int64)
@@ -206,7 +208,7 @@ class Quad3D():
         X3, Y3, Z3 = self.m_node.X, self.m_node.Y, self.m_node.Z
         X4, Y4, Z4 = self.n_node.X, self.n_node.Y, self.n_node.Z
 
-        # Use optimized numba function
+        # Use optimized Cython function
         self.x1, self.y1, self.x2, self.y2, self.x3, self.y3, self.x4, self.y4 = compute_quad_local_coords(
             X1, Y1, Z1, X2, Y2, Z2, X3, Y3, Z3, X4, Y4, Z4
         )
@@ -1001,7 +1003,7 @@ class Quad3D():
         if self._T_cache is not None:
             return self._T_cache
 
-        # Use optimized numba function
+        # Use optimized Cython function
         self._T_cache = compute_quad_transformation_matrix(
             self.i_node.X, self.i_node.Y, self.i_node.Z,
             self.j_node.X, self.j_node.Y, self.j_node.Z,

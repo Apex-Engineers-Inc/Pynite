@@ -1,94 +1,46 @@
 from __future__ import annotations  # Allows more recent type hints features
-
-from typing import TYPE_CHECKING, Any, Tuple
-
+from typing import TYPE_CHECKING
 from math import isclose
 
-from numpy import array, float64, zeros, subtract, matmul
+from numpy import array, asarray, atleast_2d, zeros, subtract, matmul, divide, seterr, nanmax, sort, ix_
 from numpy.linalg import solve
-from numpy.typing import NDArray
+from scipy.spatial import KDTree
+from scipy.sparse import lil_matrix, csr_matrix
+
 from Pynite.LoadCombo import LoadCombo
 
 if TYPE_CHECKING:
-    from typing import List
+    from typing import List, Tuple, Union
     from Pynite.FEModel3D import FEModel3D
-    from scipy.sparse import lil_matrix
-
-else:
-    lil_matrix = Any  # type: ignore[assignment]
-
-
-def _solve_sparse_system(
-    matrix: "lil_matrix", rhs: NDArray[float64]
-) -> NDArray[float64]:
-    """
-    Solves a sparse linear system using SciPy's sparse solver.
-
-    Parameters
-    ----------
-    matrix : scipy.sparse matrix
-        Sparse coefficient matrix for the linear system.
-    rhs : ndarray
-        Right-hand-side vector for the system.
-
-    Returns
-    -------
-    ndarray
-        Column vector containing the solved displacements.
-
-    Raises
-    ------
-    ImportError
-        If SciPy is not installed when a sparse solution is requested.
-    """
-
-    try:
-        from scipy.sparse.linalg import spsolve
-    except ImportError as exc:  # pragma: no cover - import guard
-        raise ImportError(
-            "SciPy is required for sparse solves. Install SciPy or run with sparse=False."
-        ) from exc
-
-    rhs_vector = rhs.reshape((-1,))
-    solution = spsolve(matrix, rhs_vector)
-
-    if solution.ndim == 1:
-        solution = solution.reshape((solution.shape[0], 1))
-
-    return solution
+    from numpy import float64
+    from numpy.typing import NDArray
 
 
 def _prepare_model(model: FEModel3D) -> None:
     """Prepares a model for analysis by ensuring at least one load combination is defined, generating all meshes that have not already been generated, activating all non-linear members, and internally numbering all nodes and elements.
+
     :param model: The model being prepared for analysis.
     :type model: FEModel3D
-
     """
 
     # Reset any nodal displacements
     model._D = {}
-
     for node in model.nodes.values():
         node.DX = {}
-
         node.DY = {}
-
         node.DZ = {}
-
         node.RX = {}
-
         node.RY = {}
-
         node.RZ = {}
 
     # Ensure there is at least 1 load combination to solve if the user didn't define any
-    if not model.load_combos:
+    if model.load_combos == {}:
         # Create and add a default load combination to the dictionary of load combinations
-        model.load_combos["Combo 1"] = LoadCombo("Combo 1", factors={"Case 1": 1.0})
+        model.load_combos['Combo 1'] = LoadCombo('Combo 1', factors={'Case 1':1.0})
 
     # Generate all basic meshes
     for mesh in model.meshes.values():
-        if not mesh.is_generated:
+        if mesh.is_generated == False:
             mesh.generate()
 
     # Generate all shear wall meshes
@@ -105,38 +57,35 @@ def _prepare_model(model: FEModel3D) -> None:
         for combo_name in model.load_combos.keys():
             phys_member.active[combo_name] = True
 
+    # build the KDTree for fast spatial queries before renumbering, since discretize() uses it
+    _build_kdtree(model)
+
     # Assign an internal ID to all nodes and elements in the model. This number is different from the name used by the user to identify nodes and elements.
     _renumber(model)
 
 
-def _identify_combos(
-    model: FEModel3D, combo_tags: List[str] | None = None
-) -> List[LoadCombo]:
+def _identify_combos(model: FEModel3D, combo_tags: List[str] | None = None) -> List[LoadCombo]:
     """Returns a list of load combinations that are to be run based on tags given by the user.
+
     :param model: The model being analyzed.
     :type model: FEModel3D
     :param combo_tags: A list of tags used for the load combinations to be evaluated. Defaults to `None` in which case all load combinations will be added to the list of load combinations to be run.
     :type combo_tags: list, optional
     :return: A list containing the load combinations to be analyzed.
     :rtype: list
-
     """
 
     # Identify which load combinations to evaluate
     if combo_tags is None:
         # Evaluate all load combinations if not tags have been provided
         combo_list = list(model.load_combos.values())
-
     else:
         # Initialize the list of load combinations to be evaluated
         combo_list = []
-
         # Step through each load combination in the model
         for combo in model.load_combos.values():
             # Check if this load combination is tagged with any of the tags we're looking for
-            if combo.combo_tags is not None and any(
-                tag in combo.combo_tags for tag in combo_tags
-            ):
+            if combo.combo_tags is not None and any(tag in combo.combo_tags for tag in combo_tags):
                 # Add the load combination to the list of load combinations to be evaluated
                 combo_list.append(combo)
 
@@ -147,76 +96,50 @@ def _identify_combos(
 def _check_stability(model: FEModel3D, K: NDArray[float64]) -> None:
     """
     Identifies nodal instabilities in a model's stiffness matrix.
-
     """
-
-    # Convert to 1D diagonal regardless of dense/sparse input
-    if hasattr(K, "diagonal"):
-        diagonal = K.diagonal()
-    else:
-        diagonal = [K[i, i] for i in range(K.shape[0])]
-    diag = array(diagonal, ndmin=1).reshape(-1)
-
-    nodes_seq = getattr(model, "_nodes_by_id", None)
-    if nodes_seq:
-        nodes = nodes_seq
-    else:
-        nodes = tuple(model.nodes.values())
-    supports = []
-    for node in nodes:
-        supports.extend(
-            (
-                node.support_DX,
-                node.support_DY,
-                node.support_DZ,
-                node.support_RX,
-                node.support_RY,
-                node.support_RZ,
-            )
-        )
-
+    id_to_node = {node.ID: node for node in model.nodes.values()}
     directions = (
-        "for translation in the global X direction.",
-        "for translation in the global Y direction.",
-        "for translation in the global Z direction.",
-        "for rotation about the global X axis.",
-        "for rotation about the global Y axis.",
-        "for rotation about the global Z axis.",
+        'for translation in the global X direction.',
+        'for translation in the global Y direction.',
+        'for translation in the global Z direction.',
+        'for rotation about the global X axis.',
+        'for rotation about the global Y axis.',
+        'for rotation about the global Z axis.',
     )
 
     unstable = False
-    for i, value in enumerate(diag):
-        if isclose(value, 0) and not supports[i]:
-            unstable = True
-            node = nodes[i // 6]
-            direction = directions[i % 6]
-            print(
-                "* Nodal instability detected: node "
-                + node.name
-                + " is unstable "
-                + direction
-            )
+
+    # Extract the diagonal once to avoid repeated sparse indexing
+    diagonal = array(K.diagonal()).reshape(-1)
+    dof_count = diagonal.shape[0]
+
+    for node_id, node in id_to_node.items():
+        base = node_id * 6
+        if base + 6 > dof_count:
+            break
+
+        dof_supports = (
+            node.support_DX,
+            node.support_DY,
+            node.support_DZ,
+            node.support_RX,
+            node.support_RY,
+            node.support_RZ,
+        )
+
+        node_diagonal = diagonal[base:base + 6]
+        for dof, value in enumerate(node_diagonal):
+            if isclose(value, 0.0) and not dof_supports[dof]:
+                unstable = True
+                print(f'* Nodal instability detected: node {node.name} is unstable {directions[dof]}')
 
     if unstable:
-        raise Exception("Unstable node(s). See console output for details.")
-
-    return
+        raise Exception('Unstable node(s). See console output for details.')
 
 
-def _PDelta(
-    model: FEModel3D,
-    combo_name: str,
-    P1: NDArray[float64],
-    FER1: NDArray[float64],
-    D1_indices: List[int],
-    D2_indices: List[int],
-    D2: NDArray[float64],
-    log: bool = True,
-    sparse: bool = True,
-    check_stability: bool = False,
-    max_iter: int = 30,
-) -> None:
+def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArray[float64], D1_indices: List[int], D2_indices: List[int], D2: NDArray[float64], log: bool = True, sparse: bool = True, check_stability: bool = False, max_iter: int = 30) -> None:
     """Performs second order (P-Delta) analysis. This type of analysis is appropriate for most models using beams, columns and braces. Second order analysis is usually required by material-specific codes. Models with slender members and/or members with combined bending and axial loads will generally have more significant P-Delta effects. P-Delta effects in plates/quads are not considered by Pynite at this time.
+
     :param model: The finite element model to be solved.
     :type: FEModel3D
     :param combo_name: The name of the load combination to evaluate.
@@ -237,307 +160,202 @@ def _PDelta(
     :type check_stability: bool, optional
     :raises ValueError: Occurs when there is a singularity in the stiffness matrix, which indicates an unstable structure.
     :raises Exception: Occurs when a model fails to converge.
-
     """
 
     # Import `scipy` features if the sparse solver is being used
-    if sparse:
+    if sparse == True:
         from scipy.sparse.linalg import spsolve
 
     convergence_TC = False  # Tracks tension/compression-only convergence
-
-    divergence_TC = False  # Tracks tension/compression-only divergence
-
+    divergence_TC = False   # Tracks tension/compression-only divergence
     iter_count_TC = 1
 
     # Iterate until either T/C convergence or divergence occurs. Perform at least 2 iterations for the P-Delta analysis.
-    while not convergence_TC and not divergence_TC:
+    while convergence_TC == False and divergence_TC == False:
+
         # Inform the user which iteration we're on
         if log:
-            print(
-                "- Beginning tension/compression-only iteration #" + str(iter_count_TC)
-            )
+            print('- Beginning tension/compression-only iteration #' + str(iter_count_TC))
 
         # There will be 2 solution steps in the P-Delta analysis:
         # Step 1 - Analyze based on initial stiffness
         # Step 2 - Calculate geometric stiffness and add its effects
         for solution_step in [1, 2]:
+
             # Determine if the user has selected a sparse solution
-            if sparse:
+            if sparse == True:
+
                 if solution_step == 1:
+
                     # Calculate the partitioned initial stiffness matrices. These matrices must be recalculated on each T/C iteration due to tension/compression-only members deactivating or reactivating.
                     if log:
-                        print("- Calculating initial stiffness matrix")
-
-                    K11, K12, K21, K22 = _partition(
-                        model,
-                        model.K(combo_name, log, check_stability, sparse).tolil(),
-                        D1_indices,
-                        D2_indices,
-                    )
+                        print('- Calculating initial stiffness matrix')
+                    K11, K12, K21, K22 = _partition(model, model.K(combo_name, log, check_stability, sparse).tolil(), D1_indices, D2_indices)
 
                     # The initial stiffness matrices are currently `lil` format which is great for memory, but slow for mathematical operations. They will be converted to `csr` format.
                     K11 = K11.tocsr()
-
                     K12 = K12.tocsr()
-
                     K21 = K21.tocsr()
-
                     K22 = K22.tocsr()
 
                 # Check if we are ready to calculate the geometric stiffness
                 if solution_step == 2:
-                    # After the first iteration, the geometric stiffness matrix will be added to the linear elastic stiffness matrix.
-                    if log:
-                        print("- Calculating geometric stiffness matrix")
 
-                    Kg11, Kg12, Kg21, Kg22 = _partition(
-                        model,
-                        model.Kg(combo_name, log, sparse, False),
-                        D1_indices,
-                        D2_indices,
-                    )
+                    # After the first iteration, the geometric stiffness matrix will be added to the linear elastic stiffness matrix.
+                    if log: print('- Calculating geometric stiffness matrix')
+                    Kg11, Kg12, Kg21, Kg22 = _partition(model, model.Kg(combo_name, log, sparse, False), D1_indices, D2_indices)
 
                     # The Kg stiffness matrices are currently `lil` format which is great for memory, but slow for mathematical operations. They will be converted to `csr` format. Note that the `+` operator performs matrix addition on `csr` matrices.
-                    if log:
-                        print("- Summing initial & geometric stiffness matrices")
-
+                    if log: print('- Summing initial & geometric stiffness matrices')
                     K11 = K11 + Kg11.tocsr()
-
                     K12 = K12 + Kg12.tocsr()
-
                     K21 = K21 + Kg21.tocsr()
-
                     K22 = K22 + Kg22.tocsr()
 
             # Determine if the user has selected a dense solution
             else:
+
                 if solution_step == 1:
+
                     # Calculate the partitioned initial stiffness matrices. These matrices must be recalculated on each T/C iteration due to tension/compression-only members deactivating or reactivating.
-                    K11, K12, K21, K22 = _partition(
-                        model,
-                        model.K(combo_name, log, check_stability, sparse),
-                        D1_indices,
-                        D2_indices,
-                    )
+                    K11, K12, K21, K22 = _partition(model, model.K(combo_name, log, check_stability, sparse), D1_indices, D2_indices)
 
                 # Check if we are ready to calculate the geometric stiffness
                 if solution_step == 2:
+
                     # After the first iteration, the geometric stiffness matrix will be added to the linear elastic stiffness matrix.
-                    Kg11, Kg12, Kg21, Kg22 = _partition(
-                        model.Kg(combo_name, log, sparse, False), D1_indices, D2_indices
-                    )
+                    Kg11, Kg12, Kg21, Kg22 = _partition(model.Kg(combo_name, log, sparse, False), D1_indices, D2_indices)
 
                     K11 = K11 + Kg11
-
                     K12 = K12 + Kg12
-
                     K21 = K21 + Kg21
-
                     K22 = K22 + Kg22
 
             # Calculate the global displacement vector
             if log:
-                print("- Calculating the global displacement vector")
-
+                print('- Calculating the global displacement vector')
             if K11.shape == (0, 0):
                 # All displacements are known, so D1 is an empty vector
                 D1 = []
-
             else:
                 try:
                     # Calculate the displacements, `D1`
-                    if sparse:
+                    if sparse == True:
                         # The partitioned stiffness matrix is already in `csr` format. The `@` operator performs matrix multiplication on sparse matrices.
-                        D1 = spsolve(
-                            K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2)
-                        )
-
+                        # The MMD_ATA permutation is used to improve the performance of the sparse solver by minimizing the fill-in of the matrix.
+                        # The MMD_ATA was chosen because it had the best overall performance when running the test suite (by a large margin).
+                        D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2), permc_spec="MMD_ATA")
                         D1 = D1.reshape(len(D1), 1)
-
                     else:
                         # The partitioned stiffness matrix is in `csr` format. It will be converted to a 2D dense array for mathematical operations.
                         D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
 
                 except:
                     # Return out of the method if 'K' is singular and provide an error message
-                    raise ValueError(
-                        "The stiffness matrix is singular, which indicates that the structure is unstable."
-                    )
+                    raise ValueError('The stiffness matrix is singular, which indicates that the structure is unstable.')
 
             # Store the calculated displacements
-            _store_displacements(
-                model, D1, D2, D1_indices, D2_indices, model.load_combos[combo_name]
-            )
+            _store_displacements(model, D1, D2, D1_indices, D2_indices, model.load_combos[combo_name])
 
         # Check whether the tension/compression-only analysis has converged and deactivate any members that are showing forces they can't hold
         convergence_TC = _check_TC_convergence(model, combo_name, log)
 
         # Report on convergence of tension/compression only analysis
-        if not convergence_TC:
+        if convergence_TC == False:
+
             if log:
-                print(
-                    "- Tension/compression-only analysis did not converge on this iteration"
-                )
-
-                print(
-                    "- Tension/compression-only members will be deactivated or reactivated as necessary"
-                )
-
-                print("- P-Delta analysis will be rerun")
+                print('- Tension/compression-only analysis did not converge on this iteration')
+                print('- Tension/compression-only members will be deactivated or reactivated as necessary')
+                print('- P-Delta analysis will be rerun')
 
             # Increment the tension/compression-only iteration count
             iter_count_TC += 1
 
         else:
             if log:
-                print(
-                    "- Tension/compression-only analysis converged after "
-                    + str(iter_count_TC)
-                    + " iteration(s)"
-                )
+                print('- Tension/compression-only analysis converged after ' + str(iter_count_TC) + ' iteration(s)')
 
         # Check for divergence in the tension/compression-only analysis
         if iter_count_TC > max_iter:
             divergence_TC = True
-
-            raise Exception("- Model diverged during tension/compression-only analysis")
+            raise Exception('- Model diverged during tension/compression-only analysis')
 
     # Flag the model as solved
-    model.solution = "P-Delta"
+    model.solution = 'P-Delta'
 
 
-def _pushover_step(
-    model: FEModel3D,
-    combo_name: str,
-    push_combo: str,
-    step_num: int,
-    P1: NDArray[float64],
-    FER1: NDArray[float64],
-    D1_indices: List[int],
-    D2_indices: List[int],
-    D2: NDArray[float64],
-    log: bool = True,
-    sparse: bool = True,
-    check_stability: bool = False,
-) -> None:
+def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num: int, P1: NDArray[float64], FER1: NDArray[float64], D1_indices: List[int], D2_indices: List[int], D2: NDArray[float64], log: bool = True, sparse: bool = True, check_stability: bool = False) -> None:
+
     # Run at least one iteration
     run_step = True
 
     # Run/rerun the load step until convergence occurs
-    while run_step:
+    while run_step == True:
+
         # Calculate the partitioned global stiffness matrices
         # Sparse solver
-        if sparse:
+        if sparse == True:
+
             from scipy.sparse.linalg import spsolve
 
             # Calculate the initial stiffness matrix
-            if log:
-                print("- Calculating elastic stiffness matrix [Ke]")
-
-            K11, K12, K21, K22 = _partition(
-                model,
-                model.K(combo_name, log, check_stability, sparse).tolil(),
-                D1_indices,
-                D2_indices,
-            )
+            if log: print('- Calculating elastic stiffness matrix [Ke]')
+            K11, K12, K21, K22 = _partition(model, model.K(combo_name, log, check_stability, sparse).tolil(), D1_indices, D2_indices)
 
             # Calculate the geometric stiffness matrix
             # The `combo_name` variable in the code below is not the name of the pushover load combination. Rather it is the name of the primary combination that the pushover load will be added to. Axial loads used to develop Kg are calculated from the displacements stored in `combo_name`.
-            if log:
-                print("- Calculating geometric stiffness matrix [Kg]")
-
-            Kg11, Kg12, Kg21, Kg22 = _partition(
-                model,
-                model.Kg(combo_name, log, sparse, False).tolil(),
-                D1_indices,
-                D2_indices,
-            )
+            if log: print('- Calculating geometric stiffness matrix [Kg]')
+            Kg11, Kg12, Kg21, Kg22 = _partition(model, model.Kg(combo_name, log, sparse, False).tolil(), D1_indices, D2_indices)
 
             # Calculate the stiffness reduction matrix
-            if log:
-                print("- Calculating plastic reduction matrix [Km]")
-
-            Km11, Km12, Km21, Km22 = _partition(
-                model,
-                model.Km(combo_name, push_combo, step_num, log, sparse).tolil(),
-                D1_indices,
-                D2_indices,
-            )
+            if log: print('- Calculating plastic reduction matrix [Km]')
+            Km11, Km12, Km21, Km22 = _partition(model, model.Km(combo_name, push_combo, step_num, log, sparse).tolil(), D1_indices, D2_indices)
 
             # The stiffness matrices are currently `lil` format which is great for
             # memory, but slow for mathematical operations. They will be converted to
             # `csr` format. The `+` operator performs matrix addition on `csr`
             # matrices.
             K11 = K11.tocsr() + Kg11.tocsr() + Km11.tocsr()
-
             K12 = K12.tocsr() + Kg12.tocsr() + Km12.tocsr()
-
             K21 = K21.tocsr() + Kg21.tocsr() + Km21.tocsr()
-
             K22 = K22.tocsr() + Kg22.tocsr() + Km22.tocsr()
 
         # Dense solver
         else:
-            # Initial stiffness matrix
-            if log:
-                print("- Calculating elastic stiffness matrix [Ke]")
 
-            K11, K12, K21, K22 = _partition(
-                model,
-                model.K(combo_name, log, check_stability, sparse),
-                D1_indices,
-                D2_indices,
-            )
+            # Initial stiffness matrix
+            if log: print('- Calculating elastic stiffness matrix [Ke]')
+            K11, K12, K21, K22 = _partition(model, model.K(combo_name, log, check_stability, sparse), D1_indices, D2_indices)
 
             # Geometric stiffness matrix
             # The `combo_name` variable in the code below is not the name of the pushover load combination. Rather it is the name of the primary combination that the pushover load will be added to. Axial loads used to develop Kg are calculated from the displacements stored in `combo_name`.
-            if log:
-                print("Calculating geometric stiffness matrix [Kg]")
-
-            Kg11, Kg12, Kg21, Kg22 = _partition(
-                model.Kg(combo_name, log, sparse, False), D1_indices, D2_indices
-            )
+            if log: print('Calculating geometric stiffness matrix [Kg]')
+            Kg11, Kg12, Kg21, Kg22 = _partition(model.Kg(combo_name, log, sparse, False), D1_indices, D2_indices)
 
             # Calculate the stiffness reduction matrix
-            if log:
-                print("Calculating plastic reduction matrix [Km]")
-
-            Km11, Km12, Km21, Km22 = _partition(
-                model,
-                model.Km(combo_name, push_combo, step_num, log, sparse),
-                D1_indices,
-                D2_indices,
-            )
+            if log: print('Calculating plastic reduction matrix [Km]')
+            Km11, Km12, Km21, Km22 = _partition(model, model.Km(combo_name, push_combo, step_num, log, sparse), D1_indices, D2_indices)
 
             K11 = K11 + Kg11 + Km11
-
             K12 = K12 + Kg12 + Km12
-
             K21 = K21 + Kg21 + Km21
-
             K22 = K22 + Kg22 + Km22
 
         # Calculate the changes to the global displacement vector
-        if log:
-            print("- Calculating changes to the global displacement vector")
-
+        if log: print('- Calculating changes to the global displacement vector')
         if K11.shape == (0, 0):
             # All displacements are known, so D1 is an empty vector
             Delta_D1 = []
-
         else:
             try:
                 # Calculate the change in the displacements Delta_D1
-                if sparse:
+                if sparse == True:
                     # The partitioned stiffness matrix is already in `csr` format. The `@`
                     # operator performs matrix multiplication on sparse matrices.
-                    Delta_D1 = spsolve(
-                        K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2)
-                    )
-
+                    # The MMD_ATA permutation is used to improve the performance of the sparse solver by minimizing the fill-in of the matrix.
+                    # The MMD_ATA was chosen because it had the best overall performance when running the test suite (by a large margin).
+                    Delta_D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2), permc_spec="MMD_ATA")
                     Delta_D1 = Delta_D1.reshape(len(Delta_D1), 1)
-
                 else:
                     # The partitioned stiffness matrix is in `csr` format. It will be
                     # converted to a 2D dense array for mathematical operations.
@@ -545,9 +363,7 @@ def _pushover_step(
 
             except:
                 # Return out of the method if 'K' is singular and provide an error message
-                raise ValueError(
-                    "The structure is unstable. Unable to proceed any further with analysis."
-                )
+                raise ValueError('The structure is unstable. Unable to proceed any further with analysis.')
 
         # Unpartition the displacement results from the analysis step
         Delta_D = _unpartition_disp(model, Delta_D1, D2, D1_indices, D2_indices)
@@ -557,64 +373,47 @@ def _pushover_step(
 
         # Step through each member in the model and check for plastic load reversal
         for phys_member in model.members.values():
+
             for sub_member in phys_member.sub_members.values():
+
                 # print(f'Member {sub_member.name} lambda = {sub_member.lamb(Delta_D, combo_name, push_combo, step_num)}')
+
                 # Check for plastic load reversal at the i-node in this load step
                 if sub_member.lamb(Delta_D, combo_name, push_combo, step_num)[0, 0] < 0:
+
                     # Flag the load step for reanalysis
                     sub_member.i_reversal = True
-
                     run_step = True
-
-                    print(
-                        f"-Plastic load reversal encountered at member {sub_member.name} i-node"
-                    )
+                    print(f'-Plastic load reversal encountered at member {sub_member.name} i-node')
 
                 else:
+
                     sub_member.i_reversal = False
 
                 # Check for plastic load reversal at the j-node in this load step
                 if sub_member.lamb(Delta_D, combo_name, push_combo, step_num)[1, 0] < 0:
+
                     # Flag the load step for reanalysis
                     sub_member.j_reversal = True
-
                     run_step = True
-
-                    print(
-                        f"-Plastic load reversal encountered at member {sub_member.name} j-node"
-                    )
+                    print(f'-Plastic load reversal encountered at member {sub_member.name} j-node')
 
                 else:
+
                     sub_member.j_reversal = False
 
         # Undo the last loadstep if plastic load reversal was discovered. We'll rerun it with the corresponding gradients set to zero vectors.
-        if run_step:
-            _sum_displacements(
-                model,
-                -Delta_D1,
-                D2,
-                D1_indices,
-                D2_indices,
-                model.load_combos[combo_name],
-            )
-
-            if log:
-                print("- Restarting load step due to plastic load reversal")
+        if run_step == True:
+            _sum_displacements(model, -Delta_D1, D2, D1_indices, D2_indices, model.load_combos[combo_name])
+            if log: print('- Restarting load step due to plastic load reversal')
 
     # Sum the calculated displacements
-    _sum_displacements(
-        model, Delta_D1, D2, D1_indices, D2_indices, model.load_combos[combo_name]
-    )
+    _sum_displacements(model, Delta_D1, D2, D1_indices, D2_indices, model.load_combos[combo_name])
 
 
-def _unpartition_disp(
-    model: FEModel3D,
-    D1: NDArray[float64],
-    D2: NDArray[float64],
-    D1_indices: List[int],
-    D2_indices: List[int],
-) -> NDArray[float64]:
+def _unpartition_disp(model: FEModel3D, D1: NDArray[float64], D2: NDArray[float64], D1_indices: List[int], D2_indices: List[int]) -> NDArray[float64]:
     """Unpartitions displacements from the solver and returns them as a global displacement vector
+
     :param model: The finite element model being evaluated
     :type model: FEModel3D
     :param D1: An array of calculated displacements
@@ -627,30 +426,22 @@ def _unpartition_disp(
     :type D2_indices: list
     :return: Global displacement matrix
     :rtype: array
-
     """
-
+    
     total_dofs = len(model.nodes) * 6
     D = zeros((total_dofs, 1))
 
     if D1_indices:
-        D[array(D1_indices, dtype=int), 0] = D1.reshape(-1)
+        D[D1_indices, 0] = asarray(D1).reshape(-1)
     if D2_indices:
-        D[array(D2_indices, dtype=int), 0] = D2.reshape(-1)
+        D[D2_indices, 0] = asarray(D2).reshape(-1)
 
-    # Return the displacement vector
     return D
 
 
-def _store_displacements(
-    model: FEModel3D,
-    D1: NDArray[float64],
-    D2: NDArray[float64],
-    D1_indices: List[int],
-    D2_indices: List[int],
-    combo: LoadCombo,
-) -> None:
+def _store_displacements(model: FEModel3D, D1: NDArray[float64], D2: NDArray[float64], D1_indices: List[int], D2_indices: List[int], combo: LoadCombo) -> None:
     """Stores calculated displacements from the solver into the model's displacement vector `_D` and into each node object in the model
+
     :param model: The finite element model being evaluated.
     :type model: FEModel3D
     :param D1: An array of calculated displacements
@@ -663,7 +454,6 @@ def _store_displacements(
     :type D2_indices: list
     :param combo: The load combination to store the displacements for
     :type combo: LoadCombo
-
     """
 
     # The raw results from the solver are partitioned. Unpartition them.
@@ -674,28 +464,18 @@ def _store_displacements(
 
     # Store the calculated global nodal displacements into each node object
     for node in model.nodes.values():
-        node.DX[combo.name] = D[node.ID * 6 + 0, 0]
 
-        node.DY[combo.name] = D[node.ID * 6 + 1, 0]
-
-        node.DZ[combo.name] = D[node.ID * 6 + 2, 0]
-
-        node.RX[combo.name] = D[node.ID * 6 + 3, 0]
-
-        node.RY[combo.name] = D[node.ID * 6 + 4, 0]
-
-        node.RZ[combo.name] = D[node.ID * 6 + 5, 0]
+        node.DX[combo.name] = D[node.ID*6 + 0, 0]
+        node.DY[combo.name] = D[node.ID*6 + 1, 0]
+        node.DZ[combo.name] = D[node.ID*6 + 2, 0]
+        node.RX[combo.name] = D[node.ID*6 + 3, 0]
+        node.RY[combo.name] = D[node.ID*6 + 4, 0]
+        node.RZ[combo.name] = D[node.ID*6 + 5, 0]
 
 
-def _sum_displacements(
-    model: FEModel3D,
-    Delta_D1: NDArray[float64],
-    Delta_D2: NDArray[float64],
-    D1_indices: List[int],
-    D2_indices: List[int],
-    combo: LoadCombo,
-) -> None:
+def _sum_displacements(model: FEModel3D, Delta_D1: NDArray[float64], Delta_D2: NDArray[float64], D1_indices: List[int], D2_indices: List[int], combo: LoadCombo) -> None:
     """Sums calculated displacements for a load step from the solver into the model's displacement vector `_D` and into each node object in the model.
+
     :param model: The finite element model being evaluated.
     :type model: FEModel3D
     :param Delta_D1: An array of calculated displacements for a load step
@@ -708,7 +488,6 @@ def _sum_displacements(
     :type D2_indices: list
     :param combo: The load combination to store the displacements for
     :type combo: LoadCombo
-
     """
 
     # The raw results from the solver are partitioned. Unpartition them.
@@ -719,31 +498,23 @@ def _sum_displacements(
 
     # Sum the load step's calculated global nodal displacements to each node object's global displacement
     for node in model.nodes.values():
-        node.DX[combo.name] += Delta_D[node.ID * 6 + 0, 0]
 
-        node.DY[combo.name] += Delta_D[node.ID * 6 + 1, 0]
-
-        node.DZ[combo.name] += Delta_D[node.ID * 6 + 2, 0]
-
-        node.RX[combo.name] += Delta_D[node.ID * 6 + 3, 0]
-
-        node.RY[combo.name] += Delta_D[node.ID * 6 + 4, 0]
-
-        node.RZ[combo.name] += Delta_D[node.ID * 6 + 5, 0]
+        node.DX[combo.name] += Delta_D[node.ID*6 + 0, 0]
+        node.DY[combo.name] += Delta_D[node.ID*6 + 1, 0]
+        node.DZ[combo.name] += Delta_D[node.ID*6 + 2, 0]
+        node.RX[combo.name] += Delta_D[node.ID*6 + 3, 0]
+        node.RY[combo.name] += Delta_D[node.ID*6 + 4, 0]
+        node.RZ[combo.name] += Delta_D[node.ID*6 + 5, 0]
 
 
-def _check_TC_convergence(
-    model: FEModel3D,
-    combo_name: str = "Combo 1",
-    log: bool = True,
-    spring_tolerance: float = 0,
-    member_tolerance: float = 0,
-) -> bool:
+def _check_TC_convergence(model: FEModel3D, combo_name: str = "Combo 1", log: bool = True, spring_tolerance: float = 0, member_tolerance: float = 0) -> bool:
     """Checks for convergence in tension-only and compression-only analysis.
+
     This function evaluates the status of tension-only and compression-only springs and members
     within the finite element model for a given load combination. Its primary purpose is to
     determine if the non-linear analysis has converged by checking if any adjustments to the
     active status of these elements are required.
+
     The function performs the following checks:
     *   **Nodal Spring Convergence**: It iterates through each nodal spring and assesses whether
         its active state (whether it is resisting force) aligns with the current displacement
@@ -760,6 +531,7 @@ def _check_TC_convergence(
     *   **Sub-member Reset**: After checking, the `_solved_combo` flag for all sub-members is
         reset to `None`. This ensures that they will be resegmented and re-evaluated in subsequent
         iterations of the analysis, allowing for further changes as needed for convergence.
+
     :param model: The finite element model currently being evaluated.
     :type model: FEModel3D
     :param combo_name: The name of the load combination for which the convergence check is
@@ -780,7 +552,6 @@ def _check_TC_convergence(
         changes in active status are needed), **False** otherwise (indicating that further
         iterations of the analysis are required).
     :rtype: bool
-
     """
 
     # Assume the model has converged until we find out otherwise
@@ -792,9 +563,9 @@ def _check_TC_convergence(
 
     # Loop through each node and each directional spring to check and update their active status
     for node in model.nodes.values():
+
         for direction in ["DX", "DY", "DZ", "RX", "RY", "RZ"]:
             spring = getattr(node, f"spring_{direction}")
-
             displacement = getattr(node, direction)[combo_name]
 
             if spring[1] is not None:
@@ -806,54 +577,46 @@ def _check_TC_convergence(
                 # Check if there's a need to switch the active state of the spring
                 if spring[2] != should_be_active:
                     spring[2] = should_be_active
-
                     convergence = False
 
     # TODO: Adjust the code below to allow elements to reactivate on subsequent iterations if deformations at element nodes indicate the member goes back into an active state. This will lead to a less conservative and more realistic analysis. Nodal springs (above) already do this.
+
     # Check tension/compression-only springs
     if log:
-        print("- Checking for tension/compression-only spring convergence")
+        print('- Checking for tension/compression-only spring convergence')
 
     for spring in model.springs.values():
-        if spring.active[combo_name]:
+
+        if spring.active[combo_name] == True:
+
             # Check if tension-only conditions exist
-            if spring.tension_only and (
-                spring.axial(combo_name) > spring_tolerance
-            ):
+            if (spring.tension_only == True) and (spring.axial(combo_name) > spring_tolerance):
                 if log:
-                    print(f"- Deactivating spring {spring.name}")
-
+                    print(f'- Deactivating spring {spring.name}')
                 spring.active[combo_name] = False
-
                 convergence = False
 
             # Check if compression-only conditions exist
-            elif spring.comp_only and (
-                spring.axial(combo_name) < -spring_tolerance
-            ):
+            elif (spring.comp_only == True) and (spring.axial(combo_name) < -spring_tolerance):
                 if log:
-                    print(f"- Deactivating spring {spring.name}")
-
+                    print(f'- Deactivating spring {spring.name}')
                 spring.active[combo_name] = False
-
                 convergence = False
 
     # Check tension/compression only members
     if log:
-        print("- Checking for tension/compression-only member convergence")
-
+        print('- Checking for tension/compression-only member convergence')
     for phys_member in model.members.values():
+
         # Only run the tension/compression only check if the member is still active
-        if phys_member.active[combo_name]:
+        if phys_member.active[combo_name] == True:
+
             # Check if a tension-only conditions exist
-            if (
-                phys_member.tension_only
-                and phys_member.max_axial(combo_name) > member_tolerance
-            ):
+            if phys_member.tension_only == True and phys_member.max_axial(combo_name) > member_tolerance:
+
                 # Deactivate the physical member
                 if log:
-                    print(f"- Deactivating member {phys_member.name}")
-
+                    print(f'- Deactivating member {phys_member.name}')
                 phys_member.active[combo_name] = False
 
                 # Deactivate all the sub-members
@@ -864,14 +627,11 @@ def _check_TC_convergence(
                 convergence = False
 
             # Check if a compression-only conditions exist
-            elif (
-                phys_member.comp_only
-                and phys_member.min_axial(combo_name) < -member_tolerance
-            ):
+            elif phys_member.comp_only == True and phys_member.min_axial(combo_name) < - member_tolerance:
+
                 # Deactivate the physical member
                 if log:
-                    print(f"- Deactivating member {phys_member.name}")
-
+                    print(f'- Deactivating member {phys_member.name}')
                 phys_member.active[combo_name] = False
 
                 # Deactivate all the sub-members
@@ -889,11 +649,10 @@ def _check_TC_convergence(
     return convergence
 
 
-def _calc_reactions(
-    model: FEModel3D, log: bool = False, combo_tags: List[str] | None = None
-) -> None:
+def _calc_reactions(model: FEModel3D, log: bool = False, combo_tags: List[str] | None = None) -> None:
     """
     Calculates reactions internally once the model is solved.
+
     Parameters
     ----------
     model : FEModel3D
@@ -902,406 +661,436 @@ def _calc_reactions(
         Prints updates to the console if set to True. Default == False.
     combo_tags : string, optional
         A list of tags that will be used to identify which load combinations need their reactions calculated. If set to `None` then all load combinations will have their reactions calculated. Default is `None`.
-
     """
 
     # Print a status update to the console
     if log:
-        print("- Calculating reactions")
+        print('- Calculating reactions')
 
     # Identify which load combinations to evaluate
     combo_list = _identify_combos(model, combo_tags)
 
-    nodes = tuple(model.nodes.values())
-    restraint_lookup = {
-        node: (
-            node.support_DX or (node.spring_DX[0] is not None and bool(node.spring_DX[2])),
-            node.support_DY or (node.spring_DY[0] is not None and bool(node.spring_DY[2])),
-            node.support_DZ or (node.spring_DZ[0] is not None and bool(node.spring_DZ[2])),
-            node.support_RX or (node.spring_RX[0] is not None and bool(node.spring_RX[2])),
-            node.support_RY or (node.spring_RY[0] is not None and bool(node.spring_RY[2])),
-            node.support_RZ or (node.spring_RZ[0] is not None and bool(node.spring_RZ[2])),
-        )
-        for node in nodes
-    }
+    # Calculate the reactions node by node
+    for node in model.nodes.values():
 
-    for combo in combo_list:
-        combo_name = combo.name
+        # Step through each load combination
+        for combo in combo_list:
 
-        for node in nodes:
-            node.RxnFX[combo_name] = 0.0
-            node.RxnFY[combo_name] = 0.0
-            node.RxnFZ[combo_name] = 0.0
-            node.RxnMX[combo_name] = 0.0
-            node.RxnMY[combo_name] = 0.0
-            node.RxnMZ[combo_name] = 0.0
+            # Initialize reactions for this node and load combination
+            node.RxnFX[combo.name] = 0.0
+            node.RxnFY[combo.name] = 0.0
+            node.RxnFZ[combo.name] = 0.0
+            node.RxnMX[combo.name] = 0.0
+            node.RxnMY[combo.name] = 0.0
+            node.RxnMZ[combo.name] = 0.0
 
-        def accumulate(node: "Node3D", offset: int, vector: NDArray[float64]) -> None:
-            flags = restraint_lookup[node]
-            if flags[0]:
-                node.RxnFX[combo_name] += vector[offset + 0, 0]
-            if flags[1]:
-                node.RxnFY[combo_name] += vector[offset + 1, 0]
-            if flags[2]:
-                node.RxnFZ[combo_name] += vector[offset + 2, 0]
-            if flags[3]:
-                node.RxnMX[combo_name] += vector[offset + 3, 0]
-            if flags[4]:
-                node.RxnMY[combo_name] += vector[offset + 4, 0]
-            if flags[5]:
-                node.RxnMZ[combo_name] += vector[offset + 5, 0]
+            # Determine if the node has any supports
+            if (node.support_DX or node.support_DY or node.support_DZ 
+            or  node.support_RX or node.support_RY or node.support_RZ):
 
-        # Springs
-        for spring in model.springs.values():
-            if not spring.active.get(combo_name, False):
-                continue
+                # Sum the spring end forces at the node
+                for spring in model.springs.values():
 
-            spring_F = spring.F(combo_name)
-            accumulate(spring.i_node, 0, spring_F)
-            accumulate(spring.j_node, 6, spring_F)
+                    if spring.i_node == node and spring.active[combo.name] == True:
 
-        # Members
-        for phys_member in model.members.values():
-            if not phys_member.active.get(combo_name, False):
-                continue
+                        # Get the spring's global force matrix
+                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed                    
+                        spring_F = spring.F(combo.name)
 
-            for member in phys_member.sub_members.values():
-                flags_i = restraint_lookup[member.i_node]
-                flags_j = restraint_lookup[member.j_node]
-                if not any(flags_i) and not any(flags_j):
-                    continue
+                        if node.support_DX: node.RxnFX[combo.name] += spring_F[0, 0]
+                        if node.support_DY: node.RxnFY[combo.name] += spring_F[1, 0]
+                        if node.support_DZ: node.RxnFZ[combo.name] += spring_F[2, 0]
+                        if node.support_RX: node.RxnMX[combo.name] += spring_F[3, 0]
+                        if node.support_RY: node.RxnMY[combo.name] += spring_F[4, 0]
+                        if node.support_RZ: node.RxnMZ[combo.name] += spring_F[5, 0]
 
-                member_F = member.F(combo_name)
-                accumulate(member.i_node, 0, member_F)
-                accumulate(member.j_node, 6, member_F)
+                    elif spring.j_node == node and spring.active[combo.name] == True:
 
-        # Plates
-        for plate in model.plates.values():
-            nodes_offsets = (
-                (plate.i_node, 0),
-                (plate.j_node, 6),
-                (plate.m_node, 12),
-                (plate.n_node, 18),
-            )
-            if not any(any(restraint_lookup[node]) for node, _ in nodes_offsets):
-                continue
+                        # Get the spring's global force matrix
+                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed                    
+                        spring_F = spring.F(combo.name)
 
-            plate_F = plate.F(combo_name)
-            for node, offset in nodes_offsets:
-                accumulate(node, offset, plate_F)
+                        if node.support_DX: node.RxnFX[combo.name] += spring_F[6, 0]
+                        if node.support_DY: node.RxnFY[combo.name] += spring_F[7, 0]
+                        if node.support_DZ: node.RxnFZ[combo.name] += spring_F[8, 0]
+                        if node.support_RX: node.RxnMX[combo.name] += spring_F[9, 0]
+                        if node.support_RY: node.RxnMY[combo.name] += spring_F[10, 0]
+                        if node.support_RZ: node.RxnMZ[combo.name] += spring_F[11, 0]
 
-        # Quads
-        for quad in model.quads.values():
-            nodes_offsets = (
-                (quad.i_node, 0),
-                (quad.j_node, 6),
-                (quad.m_node, 12),
-                (quad.n_node, 18),
-            )
-            if not any(any(restraint_lookup[node]) for node, _ in nodes_offsets):
-                continue
+                # Step through each physical member in the model
+                for phys_member in model.members.values():
 
-            quad_F = quad.F(combo_name)
-            for node, offset in nodes_offsets:
-                accumulate(node, offset, quad_F)
+                    # Sum the sub-member end forces at the node
+                    for member in phys_member.sub_members.values():
 
-        # Applied nodal loads and nodal springs
-        for node in nodes:
-            for load in node.NodeLoads:
-                for case, factor in combo.factors.items():
-                    if load[2] == case:
-                        if load[0] == "FX" and node.support_DX:
-                            node.RxnFX[combo.name] -= load[1] * factor
-                        elif load[0] == "FY" and node.support_DY:
-                            node.RxnFY[combo.name] -= load[1] * factor
-                        elif load[0] == "FZ" and node.support_DZ:
-                            node.RxnFZ[combo.name] -= load[1] * factor
-                        elif load[0] == "MX" and node.support_RX:
-                            node.RxnMX[combo.name] -= load[1] * factor
-                        elif load[0] == "MY" and node.support_RY:
-                            node.RxnMY[combo.name] -= load[1] * factor
-                        elif load[0] == "MZ" and node.support_RZ:
-                            node.RxnMZ[combo.name] -= load[1] * factor
+                        if member.i_node == node and phys_member.active[combo.name] == True:
 
-            if node.spring_DX[0] is not None and node.spring_DX[2]:
-                node.RxnFX[combo.name] -= float(node.spring_DX[0]) * node.DX[combo.name]
-            if node.spring_DY[0] is not None and node.spring_DY[2]:
-                node.RxnFY[combo.name] -= float(node.spring_DY[0]) * node.DY[combo.name]
-            if node.spring_DZ[0] is not None and node.spring_DZ[2]:
-                node.RxnFZ[combo.name] -= float(node.spring_DZ[0]) * node.DZ[combo.name]
-            if node.spring_RX[0] is not None and node.spring_RX[2]:
-                node.RxnMX[combo.name] -= float(node.spring_RX[0]) * node.RX[combo.name]
-            if node.spring_RY[0] is not None and node.spring_RY[2]:
-                node.RxnMY[combo.name] -= float(node.spring_RY[0]) * node.RY[combo.name]
-            if node.spring_RZ[0] is not None and node.spring_RZ[2]:
-                node.RxnMZ[combo.name] -= float(node.spring_RZ[0]) * node.RZ[combo.name]
+                            # Get the member's global force matrix
+                            # Storing it as a local variable eliminates the need to rebuild it every time a term is needed                    
+                            member_F = member.F(combo.name)
+
+                            if node.support_DX: node.RxnFX[combo.name] += member_F[0, 0]
+                            if node.support_DY: node.RxnFY[combo.name] += member_F[1, 0]
+                            if node.support_DZ: node.RxnFZ[combo.name] += member_F[2, 0]
+                            if node.support_RX: node.RxnMX[combo.name] += member_F[3, 0]
+                            if node.support_RY: node.RxnMY[combo.name] += member_F[4, 0]
+                            if node.support_RZ: node.RxnMZ[combo.name] += member_F[5, 0]
+
+                        elif member.j_node == node and phys_member.active[combo.name] == True:
+
+                            # Get the member's global force matrix
+                            # Storing it as a local variable eliminates the need to rebuild it every time a term is needed                    
+                            member_F = member.F(combo.name)
+
+                            if node.support_DX: node.RxnFX[combo.name] += member_F[6, 0]
+                            if node.support_DY: node.RxnFY[combo.name] += member_F[7, 0]
+                            if node.support_DZ: node.RxnFZ[combo.name] += member_F[8, 0]
+                            if node.support_RX: node.RxnMX[combo.name] += member_F[9, 0]
+                            if node.support_RY: node.RxnMY[combo.name] += member_F[10, 0]
+                            if node.support_RZ: node.RxnMZ[combo.name] += member_F[11, 0]
+
+                # Sum the plate forces at the node
+                for plate in model.plates.values():
+
+                    if plate.i_node == node:
+
+                        # Get the plate's global force matrix
+                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed                    
+                        plate_F = plate.F(combo.name)
+
+                        if node.support_DX: node.RxnFX[combo.name] += plate_F[0, 0]
+                        if node.support_DY: node.RxnFY[combo.name] += plate_F[1, 0]
+                        if node.support_DZ: node.RxnFZ[combo.name] += plate_F[2, 0]
+                        if node.support_RX: node.RxnMX[combo.name] += plate_F[3, 0]
+                        if node.support_RY: node.RxnMY[combo.name] += plate_F[4, 0]
+                        if node.support_RZ: node.RxnMZ[combo.name] += plate_F[5, 0]
+
+                    elif plate.j_node == node:
+
+                        # Get the plate's global force matrix
+                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed                    
+                        plate_F = plate.F(combo.name)
+
+                        if node.support_DX: node.RxnFX[combo.name] += plate_F[6, 0]
+                        if node.support_DY: node.RxnFY[combo.name] += plate_F[7, 0]
+                        if node.support_DZ: node.RxnFZ[combo.name] += plate_F[8, 0]
+                        if node.support_RX: node.RxnMX[combo.name] += plate_F[9, 0]
+                        if node.support_RY: node.RxnMY[combo.name] += plate_F[10, 0]
+                        if node.support_RZ: node.RxnMZ[combo.name] += plate_F[11, 0]
+
+                    elif plate.m_node == node:
+
+                        # Get the plate's global force matrix
+                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed                    
+                        plate_F = plate.F(combo.name)
+
+                        if node.support_DX: node.RxnFX[combo.name] += plate_F[12, 0]
+                        if node.support_DY: node.RxnFY[combo.name] += plate_F[13, 0]
+                        if node.support_DZ: node.RxnFZ[combo.name] += plate_F[14, 0]
+                        if node.support_RX: node.RxnMX[combo.name] += plate_F[15, 0]
+                        if node.support_RY: node.RxnMY[combo.name] += plate_F[16, 0]
+                        if node.support_RZ: node.RxnMZ[combo.name] += plate_F[17, 0]
+
+                    elif plate.n_node == node:
+
+                        # Get the plate's global force matrix
+                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed                    
+                        plate_F = plate.F(combo.name)
+
+                        if node.support_DX: node.RxnFX[combo.name] += plate_F[18, 0]
+                        if node.support_DY: node.RxnFY[combo.name] += plate_F[19, 0]
+                        if node.support_DZ: node.RxnFZ[combo.name] += plate_F[20, 0]
+                        if node.support_RX: node.RxnMX[combo.name] += plate_F[21, 0]
+                        if node.support_RY: node.RxnMY[combo.name] += plate_F[22, 0]
+                        if node.support_RZ: node.RxnMZ[combo.name] += plate_F[23, 0]
+
+                # Sum the quad forces at the node
+                for quad in model.quads.values():
+
+                    if quad.i_node == node:
+
+                        # Get the quad's global force matrix
+                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed                    
+                        quad_F = quad.F(combo.name)
+
+                        if node.support_DX: node.RxnFX[combo.name] += quad_F[0, 0]
+                        if node.support_DY: node.RxnFY[combo.name] += quad_F[1, 0]
+                        if node.support_DZ: node.RxnFZ[combo.name] += quad_F[2, 0]
+                        if node.support_RX: node.RxnMX[combo.name] += quad_F[3, 0]
+                        if node.support_RY: node.RxnMY[combo.name] += quad_F[4, 0]
+                        if node.support_RZ: node.RxnMZ[combo.name] += quad_F[5, 0]
+
+                    elif quad.j_node == node:
+
+                        # Get the quad's global force matrix
+                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed                    
+                        quad_F = quad.F(combo.name)
+
+                        if node.support_DX: node.RxnFX[combo.name] += quad_F[6, 0]
+                        if node.support_DY: node.RxnFY[combo.name] += quad_F[7, 0]
+                        if node.support_DZ: node.RxnFZ[combo.name] += quad_F[8, 0]
+                        if node.support_RX: node.RxnMX[combo.name] += quad_F[9, 0]
+                        if node.support_RY: node.RxnMY[combo.name] += quad_F[10, 0]
+                        if node.support_RZ: node.RxnMZ[combo.name] += quad_F[11, 0]
+
+                    elif quad.m_node == node:
+
+                        # Get the quad's global force matrix
+                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed                    
+                        quad_F = quad.F(combo.name)
+
+                        if node.support_DX: node.RxnFX[combo.name] += quad_F[12, 0]
+                        if node.support_DY: node.RxnFY[combo.name] += quad_F[13, 0]
+                        if node.support_DZ: node.RxnFZ[combo.name] += quad_F[14, 0]
+                        if node.support_RX: node.RxnMX[combo.name] += quad_F[15, 0]
+                        if node.support_RY: node.RxnMY[combo.name] += quad_F[16, 0]
+                        if node.support_RZ: node.RxnMZ[combo.name] += quad_F[17, 0]
+
+                    elif quad.n_node == node:
+
+                        # Get the quad's global force matrix
+                        # Storing it as a local variable eliminates the need to rebuild it every time a term is needed                    
+                        quad_F = quad.F(combo.name)
+
+                        if node.support_DX: node.RxnFX[combo.name] += quad_F[18, 0]
+                        if node.support_DY: node.RxnFY[combo.name] += quad_F[19, 0]
+                        if node.support_DZ: node.RxnFZ[combo.name] += quad_F[20, 0]
+                        if node.support_RX: node.RxnMX[combo.name] += quad_F[21, 0]
+                        if node.support_RY: node.RxnMY[combo.name] += quad_F[22, 0]
+                        if node.support_RZ: node.RxnMZ[combo.name] += quad_F[23, 0]
+
+                # Sum the joint loads applied to the node
+                for load in node.NodeLoads:
+
+                    for case, factor in combo.factors.items():
+
+                        if load[2] == case:
+
+                            if load[0] == 'FX' and node.support_DX:
+                                node.RxnFX[combo.name] -= load[1]*factor
+                            elif load[0] == 'FY' and node.support_DY:
+                                node.RxnFY[combo.name] -= load[1]*factor
+                            elif load[0] == 'FZ' and node.support_DZ:
+                                node.RxnFZ[combo.name] -= load[1]*factor
+                            elif load[0] == 'MX' and node.support_RX:
+                                node.RxnMX[combo.name] -= load[1]*factor
+                            elif load[0] == 'MY' and node.support_RY:
+                                node.RxnMY[combo.name] -= load[1]*factor
+                            elif load[0] == 'MZ' and node.support_RZ:
+                                node.RxnMZ[combo.name] -= load[1]*factor
+
+            # Calculate any reactions due to active spring supports at the node
+            if node.spring_DX[0] is not None and node.spring_DX[2] == True:
+                k = float(node.spring_DX[0])
+                DX = node.DX[combo.name]
+                node.RxnFX[combo.name] -= k*DX
+            if node.spring_DY[0] is not None and node.spring_DY[2] == True:
+                k = float(node.spring_DY[0])
+                DY = node.DY[combo.name]
+                node.RxnFY[combo.name] -= k*DY
+            if node.spring_DZ[0] is not None and node.spring_DZ[2] == True:
+                k = float(node.spring_DZ[0])
+                DZ = node.DZ[combo.name]
+                node.RxnFZ[combo.name] -= k*DZ
+            if node.spring_RX[0] is not None and node.spring_RX[2] == True:
+                k = float(node.spring_RX[0])
+                RX = node.RX[combo.name]
+                node.RxnMX[combo.name] -= k*RX
+            if node.spring_RY[0] is not None and node.spring_RY[2] == True:
+                k = float(node.spring_RY[0])
+                RY = node.RY[combo.name]
+                node.RxnMY[combo.name] -= k*RY
+            if node.spring_RZ[0] is not None and node.spring_RZ[2] == True:
+                k = float(node.spring_RZ[0])
+                RZ = node.RZ[combo.name]
+                node.RxnMZ[combo.name] -= k*RZ
 
 
 def _check_statics(model: FEModel3D, combo_tags: List[str] | None = None) -> None:
-    """
+    '''
     Checks static equilibrium and prints results to the console.
+
     Parameters
     ----------
     precision : number
         The number of decimal places to carry the results to.
+    '''
 
-    """
-
-    print("+----------------+")
-
-    print("| Statics Check: |")
-
-    print("+----------------+")
-
-    print("")
+    print('+----------------+')
+    print('| Statics Check: |')
+    print('+----------------+')
+    print('')
 
     from prettytable import PrettyTable
 
     # Start a blank table and create a header row
     statics_table = PrettyTable()
-
-    statics_table.field_names = [
-        "Load Combination",
-        "Sum FX",
-        "Sum RX",
-        "Sum FY",
-        "Sum RY",
-        "Sum FZ",
-        "Sum RZ",
-        "Sum MX",
-        "Sum RMX",
-        "Sum MY",
-        "Sum RMY",
-        "Sum MZ",
-        "Sum RMZ",
-    ]
+    statics_table.field_names = ['Load Combination', 'Sum FX', 'Sum RX', 'Sum FY', 'Sum RY', 'Sum FZ', 'Sum RZ', 'Sum MX', 'Sum RMX', 'Sum MY', 'Sum RMY', 'Sum MZ', 'Sum RMZ']
 
     # Identify which load combinations to evaluate
     if combo_tags is None:
         combo_list = model.load_combos.values()
-
     else:
         combo_list = []
-
         for combo in model.load_combos.values():
             if any(tag in combo.combo_tags for tag in combo_tags):
                 combo_list.append(combo)
 
     # Step through each load combination
     for combo in combo_list:
+
         # Initialize force and moment summations to zero
         SumFX, SumFY, SumFZ = 0.0, 0.0, 0.0
-
         SumMX, SumMY, SumMZ = 0.0, 0.0, 0.0
-
         SumRFX, SumRFY, SumRFZ = 0.0, 0.0, 0.0
-
         SumRMX, SumRMY, SumRMZ = 0.0, 0.0, 0.0
 
         # Get the global force vector and the global fixed end reaction vector
         P = model.P(combo.name)
-
         FER = model.FER(combo.name)
 
         # Step through each node and sum its forces
         for node in model.nodes.values():
+
             # Get the node's coordinates
             X = node.X
-
             Y = node.Y
-
             Z = node.Z
 
             # Get the nodal forces
-            FX = P[node.ID * 6 + 0][0] - FER[node.ID * 6 + 0][0]
-
-            FY = P[node.ID * 6 + 1][0] - FER[node.ID * 6 + 1][0]
-
-            FZ = P[node.ID * 6 + 2][0] - FER[node.ID * 6 + 2][0]
-
-            MX = P[node.ID * 6 + 3][0] - FER[node.ID * 6 + 3][0]
-
-            MY = P[node.ID * 6 + 4][0] - FER[node.ID * 6 + 4][0]
-
-            MZ = P[node.ID * 6 + 5][0] - FER[node.ID * 6 + 5][0]
+            FX = P[node.ID*6+0][0] - FER[node.ID*6+0][0]
+            FY = P[node.ID*6+1][0] - FER[node.ID*6+1][0]
+            FZ = P[node.ID*6+2][0] - FER[node.ID*6+2][0]
+            MX = P[node.ID*6+3][0] - FER[node.ID*6+3][0]
+            MY = P[node.ID*6+4][0] - FER[node.ID*6+4][0]
+            MZ = P[node.ID*6+5][0] - FER[node.ID*6+5][0]
 
             # Get the nodal reactions
             RFX = node.RxnFX[combo.name]
-
             RFY = node.RxnFY[combo.name]
-
             RFZ = node.RxnFZ[combo.name]
-
             RMX = node.RxnMX[combo.name]
-
             RMY = node.RxnMY[combo.name]
-
             RMZ = node.RxnMZ[combo.name]
 
             # Sum the global forces
             SumFX += FX
-
             SumFY += FY
-
             SumFZ += FZ
-
-            SumMX += MX - FY * Z + FZ * Y
-
-            SumMY += MY + FX * Z - FZ * X
-
-            SumMZ += MZ - FX * Y + FY * X
+            SumMX += MX - FY*Z + FZ*Y
+            SumMY += MY + FX*Z - FZ*X
+            SumMZ += MZ - FX*Y + FY*X
 
             # Sum the global reactions
             SumRFX += RFX
-
             SumRFY += RFY
-
             SumRFZ += RFZ
-
-            SumRMX += RMX - RFY * Z + RFZ * Y
-
-            SumRMY += RMY + RFX * Z - RFZ * X
-
-            SumRMZ += RMZ - RFX * Y + RFY * X
+            SumRMX += RMX - RFY*Z + RFZ*Y
+            SumRMY += RMY + RFX*Z - RFZ*X
+            SumRMZ += RMZ - RFX*Y + RFY*X 
 
         # Add the results to the table
-        statics_table.add_row(
-            [
-                combo.name,
-                "{:.3g}".format(SumFX),
-                "{:.3g}".format(SumRFX),
-                "{:.3g}".format(SumFY),
-                "{:.3g}".format(SumRFY),
-                "{:.3g}".format(SumFZ),
-                "{:.3g}".format(SumRFZ),
-                "{:.3g}".format(SumMX),
-                "{:.3g}".format(SumRMX),
-                "{:.3g}".format(SumMY),
-                "{:.3g}".format(SumRMY),
-                "{:.3g}".format(SumMZ),
-                "{:.3g}".format(SumRMZ),
-            ]
-        )
+        statics_table.add_row([combo.name, '{:.3g}'.format(SumFX), '{:.3g}'.format(SumRFX),
+                                            '{:.3g}'.format(SumFY), '{:.3g}'.format(SumRFY),
+                                            '{:.3g}'.format(SumFZ), '{:.3g}'.format(SumRFZ),
+                                            '{:.3g}'.format(SumMX), '{:.3g}'.format(SumRMX),
+                                            '{:.3g}'.format(SumMY), '{:.3g}'.format(SumRMY),
+                                            '{:.3g}'.format(SumMZ), '{:.3g}'.format(SumRMZ)])
 
     # Print the static check table
     print(statics_table)
-
-    print("")
+    print('')
 
 
 def _partition_D(model: FEModel3D) -> Tuple[List[int], List[int], NDArray[float64]]:
     """Builds a list with known nodal displacements and with the positions in global stiffness matrix of known and unknown nodal displacements
+
     :return: A list of the global matrix indices for the unknown nodal displacements (D1_indices). A list of the global matrix indices for the known nodal displacements (D2_indices). A list of the known nodal displacements (D2).
     :rtype: list, list, list
-
     """
 
     D1_indices = []  # A list of the indices for the unknown nodal displacements
-
     D2_indices = []  # A list of the indices for the known nodal displacements
-
-    D2 = []  # A list of the values of the known nodal displacements
+    D2 = []          # A list of the values of the known nodal displacements
 
     # Create the auxiliary table
     for node in model.nodes.values():
+
         # Unknown displacement DX
-        if not node.support_DX and node.EnforcedDX is None:
-            D1_indices.append(node.ID * 6 + 0)
-
+        if node.support_DX == False and node.EnforcedDX == None:
+            D1_indices.append(node.ID*6 + 0)
         # Known displacement DX
-        elif node.EnforcedDX is not None:
-            D2_indices.append(node.ID * 6 + 0)
-
+        elif node.EnforcedDX != None:
+            D2_indices.append(node.ID*6 + 0)
             D2.append(node.EnforcedDX)
-
         # Support at DX
         else:
-            D2_indices.append(node.ID * 6 + 0)
-
+            D2_indices.append(node.ID*6 + 0)
             D2.append(0.0)
 
         # Unknown displacement DY
-        if not node.support_DY and node.EnforcedDY is None:
-            D1_indices.append(node.ID * 6 + 1)
-
+        if node.support_DY == False and node.EnforcedDY == None:
+            D1_indices.append(node.ID*6 + 1)
         # Known displacement DY
-        elif node.EnforcedDY is not None:
-            D2_indices.append(node.ID * 6 + 1)
-
+        elif node.EnforcedDY != None:
+            D2_indices.append(node.ID*6 + 1)
             D2.append(node.EnforcedDY)
-
         # Support at DY
         else:
-            D2_indices.append(node.ID * 6 + 1)
-
+            D2_indices.append(node.ID*6 + 1)
             D2.append(0.0)
 
         # Unknown displacement DZ
-        if not node.support_DZ and node.EnforcedDZ is None:
-            D1_indices.append(node.ID * 6 + 2)
-
+        if node.support_DZ == False and node.EnforcedDZ == None:
+            D1_indices.append(node.ID*6 + 2)
         # Known displacement DZ
-        elif node.EnforcedDZ is not None:
-            D2_indices.append(node.ID * 6 + 2)
-
+        elif node.EnforcedDZ != None:
+            D2_indices.append(node.ID*6 + 2)
             D2.append(node.EnforcedDZ)
-
         # Support at DZ
         else:
-            D2_indices.append(node.ID * 6 + 2)
-
+            D2_indices.append(node.ID*6 + 2)
             D2.append(0.0)
 
         # Unknown displacement RX
-        if not node.support_RX and node.EnforcedRX is None:
-            D1_indices.append(node.ID * 6 + 3)
-
+        if node.support_RX == False and node.EnforcedRX == None:
+            D1_indices.append(node.ID*6 + 3)
         # Known displacement RX
-        elif node.EnforcedRX is not None:
-            D2_indices.append(node.ID * 6 + 3)
-
+        elif node.EnforcedRX != None:
+            D2_indices.append(node.ID*6 + 3)
             D2.append(node.EnforcedRX)
-
         # Support at RX
         else:
-            D2_indices.append(node.ID * 6 + 3)
-
+            D2_indices.append(node.ID*6 + 3)
             D2.append(0.0)
 
         # Unknown displacement RY
-        if not node.support_RY and node.EnforcedRY is None:
-            D1_indices.append(node.ID * 6 + 4)
-
+        if node.support_RY == False and node.EnforcedRY == None:
+            D1_indices.append(node.ID*6 + 4)
         # Known displacement RY
-        elif node.EnforcedRY is not None:
-            D2_indices.append(node.ID * 6 + 4)
-
+        elif node.EnforcedRY != None:
+            D2_indices.append(node.ID*6 + 4)
             D2.append(node.EnforcedRY)
-
         # Support at RY
         else:
-            D2_indices.append(node.ID * 6 + 4)
-
+            D2_indices.append(node.ID*6 + 4)
             D2.append(0.0)
 
         # Unknown displacement RZ
-        if not node.support_RZ and node.EnforcedRZ is None:
-            D1_indices.append(node.ID * 6 + 5)
-
+        if node.support_RZ == False and node.EnforcedRZ == None:
+            D1_indices.append(node.ID*6 + 5)
         # Known displacement RZ
-        elif node.EnforcedRZ is not None:
-            D2_indices.append(node.ID * 6 + 5)
-
+        elif node.EnforcedRZ != None:
+            D2_indices.append(node.ID*6 + 5)
             D2.append(node.EnforcedRZ)
-
         # Support at RZ
         else:
-            D2_indices.append(node.ID * 6 + 5)
-
+            D2_indices.append(node.ID*6 + 5)
             D2.append(0.0)
-
+    
     # Legacy code on the next line. I will leave it here until the line that follows has been proven over time.
     # D2 = atleast_2d(D2)
+    
     # Convert D2 from a list to a matrix
     D2 = array(D2, ndmin=2).T
 
@@ -1309,99 +1098,125 @@ def _partition_D(model: FEModel3D) -> Tuple[List[int], List[int], NDArray[float6
     return D1_indices, D2_indices, D2
 
 
-def _partition(
-    model: FEModel3D,
-    unp_matrix: NDArray[float64] | lil_matrix,
-    D1_indices: List[int],
-    D2_indices: List[int],
-) -> (
-    Tuple[NDArray[float64], NDArray[float64]]
-    | Tuple[NDArray[float64], NDArray[float64], NDArray[float64], NDArray[float64]]
-):
-    """Partitions a matrix (or vector) into submatrices (or subvectors) based on degree of freedom boundary conditions.
-    :param unp_matrix: The unpartitioned matrix (or vector) to be partitioned.
-    :type unp_matrix: ndarray or lil_matrix
-    :param D1_indices: A list of the indices for degrees of freedom that have unknown displacements.
-    :type D1_indices: list
-    :param D2_indices: A list of the indices for degrees of freedom that have known displacements.
-    :type D2_indices: list
-    :return: Partitioned submatrices (or subvectors) based on degree of freedom boundary conditions.
-    :rtype: array, array, array, array
+def _partition(model: FEModel3D, unp_matrix: Union[NDArray[float64], lil_matrix], D1_indices: List[int], D2_indices: List[int]) -> Union[Tuple[NDArray[float64], NDArray[float64]], Tuple[csr_matrix, csr_matrix, csr_matrix, csr_matrix]]:
+    """
+    Partitions a matrix (or vector) into submatrices (or subvectors) based on boundary condition DOF indices.
 
+    Note: if using lil sparse matrices, this will convert to CSR format. 
+    Lil matrices are typically what you want when building up the matrix, but are not as efficient when slicing and solving
     """
 
-    is_sparse = hasattr(unp_matrix, "tocsr")
-    matrix = unp_matrix.tocsr() if is_sparse else unp_matrix
 
-    # Determine if this is a 1D vector or a 2D matrix
-    # 1D vectors
-    if matrix.shape[1] == 1:
-        # Partition the vector into 2 subvectors
-        m1 = matrix[D1_indices, :]
+    if not D1_indices and not D2_indices:
+        raise ValueError("At least one set of DOF indices must be provided")
 
-        m2 = matrix[D2_indices, :]
+    D1 = sort(array(D1_indices, dtype=int))
+    D2 = sort(array(D2_indices, dtype=int))
 
-        if is_sparse:
-            return m1.toarray(), m2.toarray()
+    # Vector case
+    if unp_matrix.ndim == 2 and unp_matrix.shape[1] == 1:
+        return array(unp_matrix[D1], dtype=float), array(unp_matrix[D2], dtype=float)
 
-        return m1, m2
-
-    # 2D matrices
+    # Matrix case
+    if isinstance(unp_matrix, lil_matrix):
+        matrix_csr = unp_matrix.tocsr()
     else:
-        # Partition the matrix into 4 submatrices
-        m11 = matrix[D1_indices, :][:, D1_indices]
+        matrix_csr = unp_matrix
 
-        m12 = matrix[D1_indices, :][:, D2_indices]
+    m11 = matrix_csr[ix_(D1, D1)]
+    m12 = matrix_csr[ix_(D1, D2)]
+    m21 = matrix_csr[ix_(D2, D1)]
+    m22 = matrix_csr[ix_(D2, D2)]
 
-        m21 = matrix[D2_indices, :][:, D1_indices]
-
-        m22 = matrix[D2_indices, :][:, D2_indices]
-
-        return m11, m12, m21, m22
+    return m11, m12, m21, m22
 
 
 def _renumber(model: FEModel3D) -> None:
     """
     Assigns node and element ID numbers to be used internally by the program. Numbers are
     assigned according to the order in which they occur in each dictionary.
-
     """
-
-    # Number each node in the model and cache coordinate lookups for fast reuse
+    
+    # Number each node in the model and build coordinate caches for fast member discretization
     nodes = list(model.nodes.values())
-    for id, node in enumerate(nodes):
-        node.ID = id
+    node_count = len(nodes)
+    if node_count:
+        coords = zeros((node_count, 3))
+        nodes_by_id = [None] * node_count
+        axis_lookup_x = {}
+        axis_lookup_y = {}
+        axis_lookup_z = {}
+        round_digits = 9
 
-    model._nodes_by_id = nodes
-    if nodes:
-        model._node_coord_array = array(
-            [(node.X, node.Y, node.Z) for node in nodes], dtype=float64
-        )
+        for idx, node in enumerate(nodes):
+            node.ID = idx
+            coords[idx, 0] = node.X
+            coords[idx, 1] = node.Y
+            coords[idx, 2] = node.Z
+            nodes_by_id[idx] = node
+
+            key_x = (round(node.Y, round_digits), round(node.Z, round_digits))
+            axis_lookup_x.setdefault(key_x, []).append(node)
+            key_y = (round(node.X, round_digits), round(node.Z, round_digits))
+            axis_lookup_y.setdefault(key_y, []).append(node)
+            key_z = (round(node.X, round_digits), round(node.Y, round_digits))
+            axis_lookup_z.setdefault(key_z, []).append(node)
+
+        model._node_coord_array = coords
+        model._nodes_by_id = nodes_by_id
+        model._axis_node_lookup = {'x': axis_lookup_x, 'y': axis_lookup_y, 'z': axis_lookup_z}
+        model._coord_round_digits = round_digits
+        model._node_revision = hash(coords.tobytes())
     else:
-        model._node_coord_array = array([], dtype=float64).reshape(0, 3)
-
-    if hasattr(model, "_build_axis_node_lookup"):
-        model._build_axis_node_lookup(model._coord_round_digits)
+        model._node_coord_array = zeros((0, 3))
+        model._nodes_by_id = []
+        model._axis_node_lookup = {'x': {}, 'y': {}, 'z': {}}
+        model._coord_round_digits = 9
+        model._node_revision = 0
 
     # Number each spring in the model
     for id, spring in enumerate(model.springs.values()):
         spring.ID = id
 
-    # Descritize all the physical members and number each member in the model
+    # Discretize all the physical members and number each member in the model
     id = 0
-
     for phys_member in model.members.values():
-        phys_member.descritize()
-
+        phys_member.discretize()
         for member in phys_member.sub_members.values():
             member.ID = id
-
             id += 1
-
+    
     # Number each plate in the model
     for id, plate in enumerate(model.plates.values()):
         plate.ID = id
-
+    
     # Number each quadrilateral in the model
     for id, quad in enumerate(model.quads.values()):
         quad.ID = id
+
+
+def _build_kdtree(model: FEModel3D) -> None:
+    """Builds or rebuilds the KDTree for faster spatial node queries.
+    
+    The KDTree is built from node coordinates and allows for efficient
+    nearest neighbor searches and spatial queries during analysis.
+    """
+    if not model.nodes:
+        model._kd_tree = None
+        model._kd_tree_node_names = []
+        return
+
+    # Get node coordinates and names in a consistent order
+    node_items = list(model.nodes.items())
+    coords = [[node.X, node.Y, node.Z] for name, node in node_items]
+    node_names = [name for name, node in node_items]
+
+    # Only rebuild if the KDTree is None or the number of nodes has changed
+    if model._kd_tree is None or len(model._kd_tree_node_names) != len(coords):
+        try:
+            model._kd_tree = KDTree(coords)
+            model._kd_tree_node_names = node_names
+        except Exception:
+            # If KDTree construction fails, fall back to no spatial indexing
+            model._kd_tree = None
+            model._kd_tree_node_names = []

@@ -2,7 +2,7 @@ from __future__ import annotations  # Allows more recent type hints features
 from typing import TYPE_CHECKING, Literal, Union, List, Tuple, Dict
 from math import isclose
 
-from numpy import array, zeros, add, subtract, matmul, insert, dot, cross, divide, count_nonzero, concatenate, float64
+from numpy import array, zeros, add, subtract, matmul, insert, dot, cross, divide, concatenate, float64
 from numpy import linspace, vstack, hstack, allclose, radians, sin, cos
 from numpy.linalg import inv, pinv, norm
 import numpy as np
@@ -10,8 +10,7 @@ import numpy as np
 import Pynite.FixedEndReactions
 from Pynite.BeamSegZ import BeamSegZ
 from Pynite.BeamSegY import BeamSegY
-from Pynite.numba_kernels import beam_member_stiffness_matrix, evaluate_polynomial
-from Pynite.numba_utils import USE_NUMBA
+from Pynite.cython import beam_member_stiffness_matrix, evaluate_polynomial, evaluate_piecewise_polynomial
 
 # Global caches let repeated members reuse stiffness/FER evaluations instead of recalculating them
 FER_UNCOND_CACHE: Dict[Tuple, object] = {}
@@ -1087,7 +1086,7 @@ class Member3D():
         plt.title('Member ' + self.name + '\n' + combo_name)
         plt.show()    
 
-    def shear_array(self, Direction: Literal['Fy', 'Fz'], n_points: int, combo_name='Combo 1', x_array=None) -> NDArray[float64]:
+    def shear_array(self, Direction: Literal['Fy', 'Fz'], n_points: int, combo_name:str='Combo 1', x_array:Optional[NDArray[float64]]=None) -> NDArray[float64]:
         """
         Returns the array of the shear in the member for the given direction
 
@@ -1622,7 +1621,7 @@ class Member3D():
         plt.title('Member ' + self.name + '\n' + combo_name)
         plt.show()
 
-    def torque_array(self, n_points, combo_name='Combo 1', x_array = None) -> NDArray[float64]:
+    def torque_array(self, n_points: int, combo_name:str='Combo 1', x_array:Optional[NDArray[float64]] = None) -> NDArray[float64]:
         """
         Returns the array of the torque in the member
 
@@ -2741,10 +2740,6 @@ class Member3D():
             If `result_name` is not a supported option.
         """
 
-        # Prepare storage for results
-        segment_results = []  # Stores y-values per segment
-        x_results = []        # Stores x-values that belong to each segment
-
         # Dispatch table maps the result name to the correct evaluation function
         method_map = {
             "moment": lambda s, x: s.moment(x, P_delta),
@@ -2760,51 +2755,74 @@ class Member3D():
         if compute_result is None:
             raise ValueError(f"Unsupported result_name: {result_name}")
 
+        x_array = np.asarray(x_array, dtype='float64', order='C')
+        if x_array.size == 0 or not segments:
+            return vstack((x_array, np.empty(0, dtype='float64')))
+
         polynomial_supported = {"moment", "shear", "axial", "deflection", "axial_deflection", "torque"}
-        use_polynomial_kernel = USE_NUMBA and not P_delta and result_name in polynomial_supported
+        use_polynomial_kernel = (not P_delta) and result_name in polynomial_supported
 
-        idx = 0  # Tracks current position in x_array
-        n = x_array.size
+        if use_polynomial_kernel:
+            starts: List[float] = []
+            ends: List[float] = []
+            degrees: List[int] = []
+            coeff_rows: List[NDArray[float64]] = []
 
-        for i, segment in enumerate(segments):
-
-            # For the last segment, include points up to and including x2
-            if i == len(segments) - 1:
-                segment_mask = (x_array[idx:] >= segment.x1) & (x_array[idx:] <= segment.x2)
-            else:
-                # For intermediate segments, include points up to but not including x2
-                segment_mask = (x_array[idx:] >= segment.x1) & (x_array[idx:] < segment.x2)
-
-            # Count how many x-values fall within this segment
-            count = count_nonzero(segment_mask)
-            if count == 0:
-                continue  # No points to evaluate in this segment
-
-            # Extract the relevant x-values for this segment
-            segment_x = x_array[idx:][segment_mask]
-            local_x = (segment_x - segment.x1).astype('float64', copy=False)  # Convert global x to local segment coordinates
-
-            if use_polynomial_kernel:
+            for segment in segments:
                 coeffs = self._segment_polynomial_coefficients(segment, result_name)
-                if coeffs is not None:
-                    segment_y = evaluate_polynomial(coeffs, local_x)
-                else:
-                    segment_y = compute_result(segment, local_x)
-            else:
-                # Evaluate the selected result at each local x
-                segment_y = compute_result(segment, local_x)
+                if coeffs is None:
+                    coeff_rows = []
+                    break
+                starts.append(segment.x1)
+                ends.append(segment.x2)
+                degrees.append(int(coeffs.size - 1))
+                coeff_rows.append(coeffs)
 
-            # Store for final output
+            if coeff_rows:
+                max_degree = max(degrees)
+                coeff_matrix = np.zeros((len(coeff_rows), max_degree + 1), dtype='float64')
+                for idx, coeffs in enumerate(coeff_rows):
+                    coeff_matrix[idx, :coeffs.size] = coeffs
+
+                values = evaluate_piecewise_polynomial(
+                    np.asarray(starts, dtype='float64'),
+                    np.asarray(ends, dtype='float64'),
+                    coeff_matrix,
+                    np.asarray(degrees, dtype=np.int64),
+                    x_array,
+                )
+                return vstack((x_array, values))
+
+        # Fallback: iterate segments and evaluate results per span
+        segment_results = []
+        x_results = []
+
+        if len(segments) > 1:
+            segment_ends = np.array([segment.x2 for segment in segments[:-1]], dtype='float64')
+            split_indices = np.searchsorted(x_array, segment_ends, side='right')
+        else:
+            split_indices = np.empty(0, dtype=np.int64)
+
+        start_idx = 0
+        for seg_idx, segment in enumerate(segments):
+            end_idx = split_indices[seg_idx] if seg_idx < split_indices.size else x_array.size
+            if end_idx <= start_idx:
+                continue
+
+            segment_x = x_array[start_idx:end_idx]
+            local_x = (segment_x - segment.x1).astype('float64', copy=False)
+            segment_y = compute_result(segment, local_x)
+
             x_results.append(segment_x)
             segment_results.append(segment_y)
+            start_idx = end_idx
 
-            # Advance the index so we don't re-check already-processed x values
-            idx += count
-            if idx >= n:
-                break  # All x-values have been processed
+            if start_idx >= x_array.size:
+                break
 
-        # Assemble full x and y arrays
+        if not segment_results:
+            raise ValueError("Requested x-array does not intersect any member segments.")
+
         all_x = concatenate(x_results)
         all_y = concatenate(segment_results)
-
         return vstack((all_x, all_y))

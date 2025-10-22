@@ -142,7 +142,6 @@ def test_large_beam_grid_performance():
     print(f"\nMax deflection: {max_deflection:.4f} inches")
     assert max_deflection < 0, "Expected negative deflection"
 
-    return model
 
 
 def test_cantilever_forest_performance():
@@ -268,7 +267,6 @@ def test_cantilever_forest_performance():
     print(f"\nSample deflection at {sample_node}: {deflection:.4f} inches")
     assert deflection < 0, "Expected negative deflection"
 
-    return model
 
 
 def test_continuous_multi_span_beams():
@@ -387,7 +385,6 @@ def test_continuous_multi_span_beams():
     print(f"\nMax deflection: {max_deflection:.4f} inches at {critical_location}")
     assert max_deflection < 0, "Expected negative deflection"
 
-    return model
 
 
 def test_space_frame_performance():
@@ -519,7 +516,6 @@ def test_space_frame_performance():
     print(f"\nMax deflection: {max_deflection:.4f} inches")
     assert max_deflection < 0, "Expected negative deflection"
 
-    return model
 
 
 if __name__ == '__main__':

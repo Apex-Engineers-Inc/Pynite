@@ -5,7 +5,7 @@ from math import pi, sin, cos, ceil, isclose
 from Pynite.Node3D import Node3D
 from Pynite.Quad3D import Quad3D
 from Pynite.Plate3D import Plate3D
-from Pynite.numba_kernels import compute_ring_trig
+from Pynite.cython import compute_ring_trig
 
 if TYPE_CHECKING:
     from typing import List, Union, Dict

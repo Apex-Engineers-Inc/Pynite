@@ -3,7 +3,9 @@ numpy
 scipy
 prettytable
 pyvista[all,trame]
-matplotlib
+
+# Optional requirements
+# matplotlib - required for 2D plotting features (Member3D.plot_*, PhysMember.plot_*, ShearWall.draw_*)
 
 # Required for jupyter interaction
 trame_jupyter_extension

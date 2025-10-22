@@ -8,7 +8,7 @@ Created on Fri Nov  3 20:58:03 2017
 from __future__ import annotations # Allows more recent type hints features
 from typing import TYPE_CHECKING
 
-from Pynite.numba_kernels import (
+from Pynite.cython import (
     fer_axial_linear_load,
     fer_axial_point_load,
     fer_linear_transverse_load,
@@ -41,7 +41,7 @@ def FER_PtLoad(P: float, x: float, L: float, Direction: Literal["Fy", "Fz"]) -> 
             "Fy" = Force on the member's local y-axis
             "Fz" = Force on the member's local z-axis
     """
-    # Translate the friendly axis label into the integer that the Numba kernel expects
+    # Translate the friendly axis label into the integer that the kernel expects
     if Direction == "Fy":
         axis = 0
     elif Direction == "Fz":
