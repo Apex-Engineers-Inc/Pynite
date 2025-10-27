@@ -64,7 +64,6 @@ setuptools.setup(
     install_requires=[
         "numpy",
         "PrettyTable",
-        "scipy",
         "pip>=25.0.1",
     ],
     extras_require={
@@ -77,12 +76,15 @@ setuptools.setup(
             "pdfkit",
             "Jinja2",
             "matplotlib",
+            "scipy",
+            "cython",
         ],
         "vtk": ["IPython", "vtk"],
         "pyvista": ["pyvista[all,trame]", "trame_jupyter_extension", "ipywidgets"],
         "reporting": ["pdfkit", "Jinja2"],
         "derivations": ["jupyterlab", "sympy"],
         "plotting": ["matplotlib"],
+        "performance": ["scipy", "cython"],
         "dev": ["pytest>=8.3.5", "pyinstrument", "poethepoet"],
     },
     include_package_data=True,

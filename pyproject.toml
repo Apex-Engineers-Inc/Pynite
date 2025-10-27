@@ -17,12 +17,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
-dependencies = [
-    "numpy",
-    "PrettyTable",
-    "scipy",
-    "pip>=25.0.1",
-]
+dependencies = ["numpy", "PrettyTable", "pip>=25.0.1"]
 
 [project.optional-dependencies]
 all = [
@@ -34,12 +29,15 @@ all = [
     "pdfkit",
     "Jinja2",
     "matplotlib",
+    "scipy",
+    "cython",
 ]
 vtk = ["IPython", "vtk"]
 pyvista = ["pyvista[all,trame]", "trame_jupyter_extension", "ipywidgets"]
 reporting = ["pdfkit", "Jinja2"]
 derivations = ["jupyterlab", "sympy"]
 plotting = ["matplotlib"]
+performance = ["scipy", "cython"]
 dev = ["pytest>=8.3.5", "pyinstrument", "poethepoet"]
 
 [project.urls]
