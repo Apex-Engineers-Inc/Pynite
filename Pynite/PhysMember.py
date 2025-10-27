@@ -29,6 +29,9 @@ class PhysMember(Member3D):
         self.sub_members: Dict[str, Member3D] = {}
         # Track the last discretization inputs so we can skip regeneration unless something changed
         self._discretize_signature: Tuple[int, float, float, float, float, float, float] | None = None
+        self._result_array_cache: dict[Tuple[str, str, str, Tuple], NDArray[float64]] = {}
+        self._x_cache: dict[int, NDArray[float64]] = {}
+        self._load_case_scaling: dict[str, Tuple[str, float]] | None = None
 
     def discretize(self) -> None:
         """
@@ -44,6 +47,8 @@ class PhysMember(Member3D):
 
         # Clear out any old sub_members
         self.sub_members = {}
+        self._result_array_cache.clear()
+        self._x_cache.clear()
 
         # Start a new list of nodes along the member
         int_nodes: List[Tuple[Node3D, float]] = []
@@ -466,31 +471,32 @@ class PhysMember(Member3D):
         if not submembers:
             return np.empty((2, 0), dtype='float64')
 
-        lengths = np.array([member.L() for member in submembers], dtype='float64')
-        if lengths.size == 1:
-            starts = np.array([0.0], dtype='float64')
-        else:
-            starts = np.concatenate(([0.0], np.cumsum(lengths[:-1], dtype='float64')))
+        lengths = np.fromiter((member.L() for member in submembers), dtype='float64')
+        starts = np.zeros_like(lengths)
+        if lengths.size > 1:
+            np.cumsum(lengths[:-1], dtype='float64', out=starts[1:])
         ends = starts + lengths
-        last_index = len(submembers) - 1
 
         load_combo = self.model.load_combos[combo_name]
         segments: List[NDArray[float64]] = []
 
-        for idx, (start, end, submember) in enumerate(zip(starts, ends, submembers)):
-            if idx == last_index:
-                mask = (x_vals >= start) & (x_vals <= end)
-            else:
-                mask = (x_vals >= start) & (x_vals < end)
+        start_indices = np.searchsorted(x_vals, starts, side='left')
+        end_indices = np.searchsorted(x_vals, ends, side='left')
+        if end_indices.size:
+            end_indices[-1] = np.searchsorted(x_vals, ends[-1], side='right')
 
-            if not mask.any():
+        for idx, submember in enumerate(submembers):
+            start_idx = start_indices[idx]
+            end_idx = end_indices[idx]
+            if end_idx <= start_idx:
                 continue
 
             if submember._solved_combo is None or submember._solved_combo.name != combo_name:
                 submember._segment_member(combo_name)
                 submember._solved_combo = load_combo
 
-            local_x = x_vals[mask] - start
+            segment_x = x_vals[start_idx:end_idx]
+            local_x = segment_x - starts[idx]
             if local_x.size == 0:
                 continue
 
@@ -498,13 +504,193 @@ class PhysMember(Member3D):
             if result is None or result.size == 0:
                 continue
 
-            result[0] += start
+            result[0] += starts[idx]
             segments.append(result)
 
         if not segments:
             return np.empty((2, 0), dtype='float64')
 
         return np.concatenate(segments, axis=1)
+
+    def _build_x_signature(self, default_spacing: bool, x_vals: NDArray[float64]) -> Tuple:
+        size = int(x_vals.size)
+        if default_spacing:
+            last = float(x_vals[-1]) if size else 0.0
+            return ('lin', size, last)
+        return ('custom', int(x_vals.size), hash(x_vals.tobytes()))
+
+    def _ensure_load_case_scaling(self) -> None:
+        if self._load_case_scaling is not None:
+            return
+
+        scaling: dict[str, Tuple[str, float]] = {}
+        structure_map: dict[Tuple, Tuple[str, np.ndarray]] = {}
+        tol = 1e-12
+
+        # Organize distributed loads by case for quick lookup
+        dist_by_case: dict[str, List[Tuple[str, float, float, float, float]]] = {}
+        for direction, w1, w2, x1, x2, case in self.DistLoads:
+            dist_by_case.setdefault(case, []).append((direction, float(x1), float(x2), float(w1), float(w2)))
+
+        point_cases = {load[3] for load in self.PtLoads}
+        case_names = sorted(set(dist_by_case.keys()) | point_cases)
+
+        for case in case_names:
+            # Point loads or absence of distributed loads make scaling detection unreliable—treat as unique
+            if case in point_cases:
+                scaling[case] = (case, 1.0)
+                continue
+
+            case_loads = dist_by_case.get(case)
+            if not case_loads:
+                scaling[case] = (case, 1.0)
+                continue
+
+            case_loads.sort(key=lambda item: (item[0], item[1], item[2]))
+            structure_key = tuple((item[0], item[1], item[2]) for item in case_loads)
+
+            magnitudes = np.empty(len(case_loads) * 2, dtype='float64')
+            for idx, (_, _, _, w1, w2) in enumerate(case_loads):
+                magnitudes[2 * idx] = w1
+                magnitudes[2 * idx + 1] = w2
+
+            base_info = structure_map.get(structure_key)
+            if base_info is None:
+                structure_map[structure_key] = (case, magnitudes)
+                scaling[case] = (case, 1.0)
+                continue
+
+            base_case, base_vec = base_info
+            nonzero = np.abs(base_vec) > tol
+
+            if not np.any(nonzero):
+                # Base loads are effectively zero—treat the new case as distinct
+                structure_map[structure_key] = (case, magnitudes)
+                scaling[case] = (case, 1.0)
+                continue
+
+            if np.any(np.abs(magnitudes[~nonzero]) > tol):
+                # New case introduces loads where the base case had none—treat as unique
+                structure_map[structure_key] = (case, magnitudes)
+                scaling[case] = (case, 1.0)
+                continue
+
+            ratios = magnitudes[nonzero] / base_vec[nonzero]
+            ratio_span = float(np.max(ratios) - np.min(ratios))
+
+            if ratio_span <= 1e-9:
+                scaling[case] = (base_case, float(ratios[0]))
+            else:
+                # Different distribution shape—treat as a unique base
+                structure_map[structure_key] = (case, magnitudes)
+                scaling[case] = (case, 1.0)
+
+        self._load_case_scaling = scaling
+
+    def _get_case_array(
+        self,
+        family: str,
+        direction: str,
+        x_vals: NDArray[float64],
+        default_spacing: bool,
+        case_name: str,
+        evaluator: Callable[[Member3D, NDArray[float64]], NDArray[float64]],
+    ) -> NDArray[float64] | None:
+        x_signature = self._build_x_signature(default_spacing, x_vals)
+        case_key = self._result_cache_key(family, direction, case_name, x_signature)
+        cached = self._result_array_cache.get(case_key)
+        if cached is not None:
+            return cached
+
+        self._ensure_load_case_scaling()
+        case_scaling = self._load_case_scaling or {}
+        ref_case, scale_factor = case_scaling.get(case_name, (case_name, 1.0))
+
+        base_combo = self.model._find_single_case_combo(ref_case)
+        if base_combo is None:
+            if case_name in self.model.load_combos:
+                base_array = self._collect_submember_results(x_vals, case_name, evaluator)
+                self._result_array_cache[case_key] = base_array
+                return base_array
+            return None
+
+        base_key = self._result_cache_key(family, direction, base_combo, x_signature)
+        base_array = self._result_array_cache.get(base_key)
+        if base_array is None:
+            base_array = self._collect_submember_results(x_vals, base_combo, evaluator)
+            self._result_array_cache[base_key] = base_array
+
+        if ref_case != case_name or abs(scale_factor - 1.0) > 1e-9:
+            scaled_array = base_array * scale_factor
+            self._result_array_cache[case_key] = scaled_array
+            return scaled_array
+
+        self._result_array_cache[case_key] = base_array
+        return base_array
+    def _result_cache_key(
+        self,
+        family: str,
+        direction: str,
+        combo_name: str,
+        x_signature: Tuple,
+    ) -> Tuple[str, str, str, Tuple]:
+        return (family, direction, combo_name, x_signature)
+
+    def _compute_superposed_result(
+        self,
+        family: str,
+        direction: str,
+        combo_name: str,
+        x_vals: NDArray[float64],
+        default_spacing: bool,
+        evaluator: Callable[[Member3D, NDArray[float64]], NDArray[float64]],
+    ) -> NDArray[float64]:
+        x_signature = self._build_x_signature(default_spacing, x_vals)
+        cache_key = self._result_cache_key(family, direction, combo_name, x_signature)
+        cached = self._result_array_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        combo = self.model.load_combos[combo_name]
+        factors = tuple(combo.factors.items())
+
+        result: NDArray[float64] | None = None
+        if len(factors) == 1 and factors[0][1] == 1.0:
+            requires_superposition = False
+        else:
+            requires_superposition = bool(factors)
+
+        if requires_superposition:
+            accumulator: NDArray[float64] | None = None
+            for case_name, factor in factors:
+                case_array = self._get_case_array(
+                    family, direction, x_vals, default_spacing, case_name, evaluator
+                )
+                if case_array is None:
+                    accumulator = None
+                    break
+                term = case_array * factor
+                if accumulator is None:
+                    accumulator = term
+                else:
+                    accumulator = accumulator + term
+
+            if accumulator is not None:
+                result = accumulator
+
+        if result is None and len(factors) == 1:
+            case_name, factor = factors[0]
+            case_array = self._get_case_array(family, direction, x_vals, default_spacing, case_name, evaluator)
+            if case_array is not None:
+                scaled_array = case_array if abs(factor - 1.0) <= 1e-9 else case_array * factor
+                self._result_array_cache[cache_key] = scaled_array
+                return scaled_array
+
+        if result is None:
+            result = self._collect_submember_results(x_vals, combo_name, evaluator)
+
+        self._result_array_cache[cache_key] = result
+        return result
 
     def shear_array(self, Direction: Literal['Fy', 'Fz'], n_points: int, combo_name='Combo 1', x_array=None) -> NDArray[float64]:
         """
@@ -525,6 +711,7 @@ class PhysMember(Member3D):
         """
 
         x_vals = self._prepare_result_x_points(n_points, x_array)
+        default_spacing = x_array is None
 
         if Direction == 'Fz':
             segment_attr = 'SegmentsY'
@@ -535,9 +722,9 @@ class PhysMember(Member3D):
 
         def evaluator(submember: Member3D, local_x: NDArray[float64]) -> NDArray[float64]:
             segments = getattr(submember, segment_attr)
-            return self._extract_vector_results(segments, local_x, 'shear')
+            return submember._extract_vector_results(segments, local_x, 'shear')
 
-        return self._collect_submember_results(x_vals, combo_name, evaluator)
+        return self._compute_superposed_result('shear', Direction, combo_name, x_vals, default_spacing, evaluator)
 
     def moment(self, Direction: Literal['My', 'Mz'], x: float, combo_name: str = 'Combo 1') -> float:
         """
@@ -660,6 +847,7 @@ class PhysMember(Member3D):
         """
 
         x_vals = self._prepare_result_x_points(n_points, x_array)
+        default_spacing = x_array is None
 
         if Direction == 'My':
             segment_attr = 'SegmentsY'
@@ -672,9 +860,9 @@ class PhysMember(Member3D):
 
         def evaluator(submember: Member3D, local_x: NDArray[float64]) -> NDArray[float64]:
             segments = getattr(submember, segment_attr)
-            return self._extract_vector_results(segments, local_x, 'moment', include_pdelta)
+            return submember._extract_vector_results(segments, local_x, 'moment', include_pdelta)
 
-        return self._collect_submember_results(x_vals, combo_name, evaluator)
+        return self._compute_superposed_result('moment', Direction, combo_name, x_vals, default_spacing, evaluator)
 
     def torque(self, x: float, combo_name: str = 'Combo 1') -> float:
         """
@@ -767,11 +955,12 @@ class PhysMember(Member3D):
         """
 
         x_vals = self._prepare_result_x_points(n_points, x_array)
+        default_spacing = x_array is None
 
         def evaluator(submember: Member3D, local_x: NDArray[float64]) -> NDArray[float64]:
-            return self._extract_vector_results(submember.SegmentsX, local_x, 'torque')
+            return submember._extract_vector_results(submember.SegmentsX, local_x, 'torque')
 
-        return self._collect_submember_results(x_vals, combo_name, evaluator)
+        return self._compute_superposed_result('torque', 'T', combo_name, x_vals, default_spacing, evaluator)
 
     def axial(self, x: float, combo_name: str = 'Combo 1') -> float:
         """
@@ -856,11 +1045,12 @@ class PhysMember(Member3D):
         """
 
         x_vals = self._prepare_result_x_points(n_points, x_array)
+        default_spacing = x_array is None
 
         def evaluator(submember: Member3D, local_x: NDArray[float64]) -> NDArray[float64]:
-            return self._extract_vector_results(submember.SegmentsZ, local_x, 'axial')
+            return submember._extract_vector_results(submember.SegmentsZ, local_x, 'axial')
 
-        return self._collect_submember_results(x_vals, combo_name, evaluator)
+        return self._compute_superposed_result('axial', 'P', combo_name, x_vals, default_spacing, evaluator)
 
     def deflection(self, Direction: Literal['dx', 'dy', 'dz'], x: float, combo_name: str = 'Combo 1') -> float:
         """
@@ -998,6 +1188,7 @@ class PhysMember(Member3D):
         """
 
         x_vals = self._prepare_result_x_points(n_points, x_array)
+        default_spacing = x_array is None
 
         if Direction == 'dx':
             segment_attr = 'SegmentsZ'
@@ -1013,9 +1204,9 @@ class PhysMember(Member3D):
 
         def evaluator(submember: Member3D, local_x: NDArray[float64]) -> NDArray[float64]:
             segments = getattr(submember, segment_attr)
-            return self._extract_vector_results(segments, local_x, result_name)
+            return submember._extract_vector_results(segments, local_x, result_name)
 
-        return self._collect_submember_results(x_vals, combo_name, evaluator)
+        return self._compute_superposed_result('deflection', Direction, combo_name, x_vals, default_spacing, evaluator)
 
     def find_member(self, x: float) -> Tuple[Member3D, float]:
         """

@@ -33,7 +33,15 @@ def build_extensions():
     ]
     return cythonize(
         extensions,
-        compiler_directives={"language_level": "3", "boundscheck": False, "wraparound": False},
+        compiler_directives={
+            "language_level": "3",
+            "boundscheck": False,
+            "wraparound": False,
+            "cdivision": True,
+            "initializedcheck": False,
+            "optimize.use_switch": True,
+            "optimize.unpack_method_calls": True,
+        },
     )
 
 

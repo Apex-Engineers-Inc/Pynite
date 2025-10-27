@@ -1,8 +1,9 @@
 from __future__ import annotations  # Allows more recent type hints features
-from typing import TYPE_CHECKING, Literal, Union, List, Tuple, Dict
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, Union, List, Tuple, Dict, Optional
 from math import isclose
 
-from numpy import array, zeros, add, subtract, matmul, insert, dot, cross, divide, concatenate, float64
+from numpy import array, zeros, add, subtract, matmul, insert, dot, cross, float64
 from numpy import linspace, vstack, hstack, allclose, radians, sin, cos
 from numpy.linalg import inv, pinv, norm
 import numpy as np
@@ -10,7 +11,15 @@ import numpy as np
 import Pynite.FixedEndReactions
 from Pynite.BeamSegZ import BeamSegZ
 from Pynite.BeamSegY import BeamSegY
-from Pynite.cython import beam_member_stiffness_matrix, evaluate_polynomial, evaluate_piecewise_polynomial
+from Pynite.cython import beam_member_stiffness_matrix, evaluate_piecewise_polynomial
+
+# Precomputed polynomial kernels let us reuse segment data across repeated result evaluations
+@dataclass
+class PiecewisePolynomialKernel:
+    starts: np.ndarray
+    ends: np.ndarray
+    coeff_matrix: np.ndarray
+    degrees: np.ndarray
 
 # Global caches let repeated members reuse stiffness/FER evaluations instead of recalculating them
 FER_UNCOND_CACHE: Dict[Tuple, object] = {}
@@ -121,6 +130,7 @@ class Member3D():
 
         # The 'Member3D' object will store results for one load combination at a time. To reduce repetative calculations the '_solved_combo' variable will be used to track whether the member needs to be resegmented before running calculations for any given load combination.
         self._solved_combo: LoadCombo | None = None  # The current solved load combination
+        self._vector_kernel_cache: dict[str, dict[str, dict[str, PiecewisePolynomialKernel | None]]] = {}
 
         # Members need a link to the model they belong to
         self.model: FEModel3D = model
@@ -2342,6 +2352,7 @@ class Member3D():
 
         # Get the load combination to segment the member for
         combo = self.model.load_combos[combo_name]
+        self._vector_kernel_cache[combo_name] = {}
 
         # Create a list of discontinuity locations
         disconts = [0, L]  # Member ends
@@ -2700,6 +2711,68 @@ class Member3D():
 
         return None
 
+    def _get_piecewise_kernel(self, segments: List, result_name: str) -> Optional[PiecewisePolynomialKernel]:
+        """
+        Retrieve or build the cached polynomial kernel for a given segment list/result pair.
+        """
+        combo = self._solved_combo.name if self._solved_combo is not None else None
+        if combo is None:
+            return None
+
+        if segments is self.SegmentsZ:
+            segment_key = 'SegmentsZ'
+        elif segments is self.SegmentsY:
+            segment_key = 'SegmentsY'
+        elif segments is self.SegmentsX:
+            segment_key = 'SegmentsX'
+        else:
+            segment_key = f'custom:{id(segments)}'
+
+        combo_cache = self._vector_kernel_cache.setdefault(combo, {})
+        segment_cache = combo_cache.setdefault(segment_key, {})
+
+        cached = segment_cache.get(result_name)
+        if cached is not None or result_name in segment_cache:
+            return cached
+
+        kernel = self._build_piecewise_kernel(segments, result_name)
+        segment_cache[result_name] = kernel
+        return kernel
+
+    def _build_piecewise_kernel(self, segments: List, result_name: str) -> Optional[PiecewisePolynomialKernel]:
+        """
+        Construct the piecewise polynomial kernel for the supplied segments if possible.
+        """
+        if not segments:
+            return None
+
+        seg_count = len(segments)
+        starts = np.empty(seg_count, dtype='float64')
+        ends = np.empty(seg_count, dtype='float64')
+        degrees = np.empty(seg_count, dtype=np.int64)
+
+        coeff_rows: List[np.ndarray] = []
+        max_degree = 0
+
+        for idx, segment in enumerate(segments):
+            coeffs = self._segment_polynomial_coefficients(segment, result_name)
+            if coeffs is None:
+                return None
+
+            starts[idx] = segment.x1
+            ends[idx] = segment.x2
+            degree = coeffs.size - 1
+            degrees[idx] = degree
+            if degree > max_degree:
+                max_degree = degree
+            coeff_rows.append(coeffs)
+
+        coeff_matrix = np.zeros((seg_count, max_degree + 1), dtype='float64')
+        for idx, coeffs in enumerate(coeff_rows):
+            coeff_matrix[idx, :coeffs.size] = coeffs
+
+        return PiecewisePolynomialKernel(starts, ends, coeff_matrix, degrees)
+
     def _extract_vector_results(self, segments: List, x_array: NDArray[float64], result_name: Literal['moment', 'shear', 'axial', 'torque', 'deflection', 'axial_deflection'], P_delta: bool = False) -> NDArray[float64]:
         """
         Extracts result values at specified locations along a structural member using efficient, 
@@ -2759,43 +2832,27 @@ class Member3D():
         if x_array.size == 0 or not segments:
             return vstack((x_array, np.empty(0, dtype='float64')))
 
-        polynomial_supported = {"moment", "shear", "axial", "deflection", "axial_deflection", "torque"}
+        polynomial_supported = {"moment", "shear", "axial", "torque"}
         use_polynomial_kernel = (not P_delta) and result_name in polynomial_supported
+        if use_polynomial_kernel and len(segments) <= 2:
+            use_polynomial_kernel = False
 
         if use_polynomial_kernel:
-            starts: List[float] = []
-            ends: List[float] = []
-            degrees: List[int] = []
-            coeff_rows: List[NDArray[float64]] = []
-
-            for segment in segments:
-                coeffs = self._segment_polynomial_coefficients(segment, result_name)
-                if coeffs is None:
-                    coeff_rows = []
-                    break
-                starts.append(segment.x1)
-                ends.append(segment.x2)
-                degrees.append(int(coeffs.size - 1))
-                coeff_rows.append(coeffs)
-
-            if coeff_rows:
-                max_degree = max(degrees)
-                coeff_matrix = np.zeros((len(coeff_rows), max_degree + 1), dtype='float64')
-                for idx, coeffs in enumerate(coeff_rows):
-                    coeff_matrix[idx, :coeffs.size] = coeffs
-
+            kernel = self._get_piecewise_kernel(segments, result_name)
+            if kernel is not None:
                 values = evaluate_piecewise_polynomial(
-                    np.asarray(starts, dtype='float64'),
-                    np.asarray(ends, dtype='float64'),
-                    coeff_matrix,
-                    np.asarray(degrees, dtype=np.int64),
+                    kernel.starts,
+                    kernel.ends,
+                    kernel.coeff_matrix,
+                    kernel.degrees,
                     x_array,
                 )
                 return vstack((x_array, values))
 
         # Fallback: iterate segments and evaluate results per span
-        segment_results = []
-        x_results = []
+        # Optimized version - pre-allocate result arrays
+        result_x = np.empty(x_array.size, dtype='float64')
+        result_y = np.empty(x_array.size, dtype='float64')
 
         if len(segments) > 1:
             segment_ends = np.array([segment.x2 for segment in segments[:-1]], dtype='float64')
@@ -2803,6 +2860,7 @@ class Member3D():
         else:
             split_indices = np.empty(0, dtype=np.int64)
 
+        write_idx = 0
         start_idx = 0
         for seg_idx, segment in enumerate(segments):
             end_idx = split_indices[seg_idx] if seg_idx < split_indices.size else x_array.size
@@ -2810,19 +2868,20 @@ class Member3D():
                 continue
 
             segment_x = x_array[start_idx:end_idx]
-            local_x = (segment_x - segment.x1).astype('float64', copy=False)
+            local_x = segment_x - segment.x1
             segment_y = compute_result(segment, local_x)
 
-            x_results.append(segment_x)
-            segment_results.append(segment_y)
+            n_points = segment_x.size
+            result_x[write_idx:write_idx+n_points] = segment_x
+            result_y[write_idx:write_idx+n_points] = segment_y
+            write_idx += n_points
             start_idx = end_idx
 
             if start_idx >= x_array.size:
                 break
 
-        if not segment_results:
+        if write_idx == 0:
             raise ValueError("Requested x-array does not intersect any member segments.")
 
-        all_x = concatenate(x_results)
-        all_y = concatenate(segment_results)
-        return vstack((all_x, all_y))
+        # Return only the filled portion
+        return vstack((result_x[:write_idx], result_y[:write_idx]))

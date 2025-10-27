@@ -1,4 +1,5 @@
-# cython: language_level=3, boundscheck=False, wraparound=False
+# cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True, initializedcheck=False
+# cython: optimize.use_switch=True, optimize.unpack_method_calls=True
 """
 Numerical kernels compiled with Cython for PyNite.
 
@@ -385,6 +386,10 @@ def fer_torque(T: double, x: double, L: double) -> NDArray[FLOAT]:
 def evaluate_polynomial(
     coeffs: NDArray[FLOAT], x_values: NDArray[FLOAT]
 ) -> NDArray[FLOAT]:
+    """
+    Evaluate a polynomial using Horner's method at multiple x values.
+    Optimized with Cython for reduced function call overhead.
+    """
     n = x_values.size
     result = np.empty(n, dtype=FLOAT)
 
@@ -410,6 +415,7 @@ def evaluate_piecewise_polynomial(
 ) -> NDArray[FLOAT]:
     """
     Evaluate a set of Horner polynomials over contiguous piecewise intervals.
+    Optimized with Cython for reduced function call overhead.
     """
 
     if x_values.size == 0 or starts.size == 0:
@@ -718,15 +724,35 @@ def compute_quad_local_coords(
     Y4: double,
     Z4: double,
 ) -> Tuple[double, double, double, double, double, double, double, double]:
-    vector_12 = np.array([X2 - X1, Y2 - Y1, Z2 - Z1], dtype=FLOAT)
-    vector_13 = np.array([X3 - X1, Y3 - Y1, Z3 - Z1], dtype=FLOAT)
-    vector_14 = np.array([X4 - X1, Y4 - Y1, Z4 - Z1], dtype=FLOAT)
+    # Compute vectors
+    v12_x, v12_y, v12_z = X2 - X1, Y2 - Y1, Z2 - Z1
+    v13_x, v13_y, v13_z = X3 - X1, Y3 - Y1, Z3 - Z1
+    v14_x, v14_y, v14_z = X4 - X1, Y4 - Y1, Z4 - Z1
 
-    x_axis = vector_12 / np.linalg.norm(vector_12)
-    z_axis = np.cross(x_axis, vector_13)
-    z_axis /= np.linalg.norm(z_axis)
-    y_axis = np.cross(z_axis, x_axis)
-    y_axis /= np.linalg.norm(y_axis)
+    # Normalize vector_12 to get x_axis
+    norm_12 = sqrt(v12_x*v12_x + v12_y*v12_y + v12_z*v12_z)
+    x_x, x_y, x_z = v12_x/norm_12, v12_y/norm_12, v12_z/norm_12
+
+    # Inline cross product for z_axis = x_axis × vector_13
+    z_x = x_y * v13_z - x_z * v13_y
+    z_y = x_z * v13_x - x_x * v13_z
+    z_z = x_x * v13_y - x_y * v13_x
+    norm_z = sqrt(z_x*z_x + z_y*z_y + z_z*z_z)
+    z_x, z_y, z_z = z_x/norm_z, z_y/norm_z, z_z/norm_z
+
+    # Inline cross product for y_axis = z_axis × x_axis
+    y_x = z_y * x_z - z_z * x_y
+    y_y = z_z * x_x - z_x * x_z
+    y_z = z_x * x_y - z_y * x_x
+    norm_y = sqrt(y_x*y_x + y_y*y_y + y_z*y_z)
+    y_x, y_y, y_z = y_x/norm_y, y_y/norm_y, y_z/norm_y
+
+    # Build vector arrays for projection
+    vector_12 = np.array([v12_x, v12_y, v12_z], dtype=FLOAT)
+    vector_13 = np.array([v13_x, v13_y, v13_z], dtype=FLOAT)
+    vector_14 = np.array([v14_x, v14_y, v14_z], dtype=FLOAT)
+    x_axis = np.array([x_x, x_y, x_z], dtype=FLOAT)
+    y_axis = np.array([y_x, y_y, y_z], dtype=FLOAT)
 
     x1 = 0.0
     y1 = 0.0
@@ -751,14 +777,32 @@ def compute_quad_transformation_matrix(
     yn: double,
     zn: double,
 ) -> NDArray[FLOAT]:
-    x_vec = np.array([xj - xi, yj - yi, zj - zi], dtype=FLOAT)
-    x_axis = x_vec / np.linalg.norm(x_vec)
+    # Compute x vector and normalize
+    vx_x, vx_y, vx_z = xj - xi, yj - yi, zj - zi
+    norm_x = sqrt(vx_x*vx_x + vx_y*vx_y + vx_z*vx_z)
+    x_x, x_y, x_z = vx_x/norm_x, vx_y/norm_x, vx_z/norm_x
 
-    xy_vec = np.array([xn - xi, yn - yi, zn - zi], dtype=FLOAT)
-    z_axis = np.cross(x_axis, xy_vec)
-    z_axis /= np.linalg.norm(z_axis)
-    y_axis = np.cross(z_axis, x_axis)
-    y_axis /= np.linalg.norm(y_axis)
+    # Compute xy vector
+    vxy_x, vxy_y, vxy_z = xn - xi, yn - yi, zn - zi
+
+    # Inline cross product for z_axis = x_axis × xy_vec
+    z_x = x_y * vxy_z - x_z * vxy_y
+    z_y = x_z * vxy_x - x_x * vxy_z
+    z_z = x_x * vxy_y - x_y * vxy_x
+    norm_z = sqrt(z_x*z_x + z_y*z_y + z_z*z_z)
+    z_x, z_y, z_z = z_x/norm_z, z_y/norm_z, z_z/norm_z
+
+    # Inline cross product for y_axis = z_axis × x_axis
+    y_x = z_y * x_z - z_z * x_y
+    y_y = z_z * x_x - z_x * x_z
+    y_z = z_x * x_y - z_y * x_x
+    norm_y = sqrt(y_x*y_x + y_y*y_y + y_z*y_z)
+    y_x, y_y, y_z = y_x/norm_y, y_y/norm_y, y_z/norm_y
+
+    # Build axis arrays
+    x_axis = np.array([x_x, x_y, x_z], dtype=FLOAT)
+    y_axis = np.array([y_x, y_y, y_z], dtype=FLOAT)
+    z_axis = np.array([z_x, z_y, z_z], dtype=FLOAT)
 
     T = np.zeros((24, 24), dtype=FLOAT)
     for block in range(8):

@@ -26,6 +26,7 @@ from Pynite.cython import (
     quad_moment_batch,
     quad_membrane_at,
     quad_membrane_batch,
+    cross_product_3d,
 )
 
 BENDING_SIGN_IDX = np.array([3, 9, 15, 21], dtype=np.int64)
@@ -117,6 +118,7 @@ class Quad3D():
         self._dir_cos_cache: Dict[int, Tuple[float, float]] = {}
         self._local_coords_valid: bool = False
         self._gauss_jacobians_cache: Optional[Tuple] = None
+        self._cached_cache_key: Optional[Tuple[float, ...]] = None
         self.x1: float = 0.0
         self.y1: float = 0.0
         self.x2: float = 0.0
@@ -218,10 +220,14 @@ class Quad3D():
         self._dir_cos_cache.clear()
         self._local_coords_valid = True
         self._gauss_jacobians_cache = None
+        self._cached_cache_key = None
 
     def _cache_key(self) -> Tuple[float, ...]:
+        if self._cached_cache_key is not None:
+            return self._cached_cache_key
+
         self._local_coords()
-        return (
+        key = (
             round(self.x1, 8),
             round(self.y1, 8),
             round(self.x2, 8),
@@ -236,6 +242,8 @@ class Quad3D():
             round(self.kx_mod, 8),
             round(self.ky_mod, 8),
         )
+        self._cached_cache_key = key
+        return key
 
     def L_k(self, k: Literal[5, 6, 7, 8]) -> float:
 
@@ -347,8 +355,12 @@ class Quad3D():
         a_1 = N1_xi*x_1 + N2_xi*x_2 + N3_xi*x_3 + N4_xi*x_4
         a_2 = N1_eta*x_1 + N2_eta*x_2 + N3_eta*x_3 + N4_eta*x_4
 
-        # Normal vector
-        n = np.cross(a_1, a_2)/np.linalg.norm(np.cross(a_1, a_2))
+        # Normal vector - use faster Cython cross product
+        a_1_flat = a_1.flatten()
+        a_2_flat = a_2.flatten()
+        n_vec = cross_product_3d(a_1_flat, a_2_flat)
+        n_norm = np.linalg.norm(n_vec)
+        n = (n_vec / n_norm).reshape(1, 3)
 
         # Global unit vectors
         i = np.array([[1.0, 0.0, 0.0]])
@@ -358,9 +370,11 @@ class Quad3D():
         if np.array_equal(n, k) or np.array_equal(n, -k):
             t_1 = i
         else:
-            t_1 = np.cross(n, k)
+            t_1_vec = cross_product_3d(n.flatten(), k.flatten())
+            t_1 = t_1_vec.reshape(1, 3)
 
-        t_2 = np.cross(n, t_1)
+        t_2_vec = cross_product_3d(n.flatten(), t_1.flatten())
+        t_2 = t_2_vec.reshape(1, 3)
 
         # Equation (7)
         a_11 = np.dot(a_1, a_1.T)[0, 0]
@@ -912,7 +926,9 @@ class Quad3D():
         """
 
         # Calculate and return the global force vector
-        return inv(self.T()) @ self.f(combo_name)
+        # The transformation matrix T is orthogonal, so inv(T) = T.T (transpose)
+        # This avoids expensive matrix inversion
+        return self.T().T @ self.f(combo_name)
 
     def D(self, combo_name:str='Combo 1') -> NDArray[float64]:
         '''

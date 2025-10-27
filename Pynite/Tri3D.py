@@ -399,7 +399,8 @@ class Tri3D():
         """
 
         # Calculate and return the global force vector
-        return matmul(inv(self.T()), self.f(combo_name))
+        # The transformation matrix T is orthogonal, so inv(T) = T.T (transpose)
+        return matmul(self.T().T, self.f(combo_name))
 
     def D(self, combo_name:str ='Combo 1') -> NDArray[float64]:
         """
@@ -498,7 +499,9 @@ class Tri3D():
         """
 
         # Calculate and return the stiffness matrix in global coordinates
-        return matmul(matmul(inv(self.T()), self.k()), self.T())
+        # The transformation matrix T is orthogonal, so inv(T) = T.T (transpose)
+        T = self.T()
+        return matmul(matmul(T.T, self.k()), T)
 
     def FER(self, combo_name='Combo 1') -> NDArray[float64]:
         """
@@ -510,9 +513,10 @@ class Tri3D():
             The name of the load combination to calculate the fixed end
             reaction vector for (not the load combination itself).
         """
-        
+
         # Calculate and return the fixed end reaction vector
-        return matmul(inv(self.T()), self.fer(combo_name))
+        # The transformation matrix T is orthogonal, so inv(T) = T.T (transpose)
+        return matmul(self.T().T, self.fer(combo_name))
 
     def _C(self) -> NDArray[float64]:
         """
