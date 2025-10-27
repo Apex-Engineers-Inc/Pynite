@@ -21,3 +21,8 @@ BytesIO.png
 console.png
 *.pstats
 baseline_profile.html
+
+# Cython generated files
+*.c
+*.pyd
+*.so
