@@ -22,6 +22,9 @@ from Pynite.ShearWall import ShearWall
 from Pynite import Analysis
 from Pynite.Analysis import _build_kdtree
 
+_MEMBER_DOF_OFFSETS = np.array([0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5], dtype=np.int32)
+_MEMBER_NODE_SELECTOR = np.array([0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1], dtype=np.int32)
+
 if TYPE_CHECKING:
     from typing import Dict, List, Union
     from numpy import float64
@@ -1483,17 +1486,22 @@ class FEModel3D():
                 # Vectorized assembly for members
                 from Pynite.cython.sparse import expand_stiffness_blocks
                 n_members = len(active_members)
-                member_dofs = np.empty((n_members, 12), dtype=np.int32)
-                member_stiffness = np.empty((n_members, 12, 12), dtype=np.float64)
+                member_ids = np.array(
+                    [[member.i_node.ID, member.j_node.ID] for member in active_members],
+                    dtype=np.int32,
+                )
+                member_dofs = member_ids[:, _MEMBER_NODE_SELECTOR] * 6 + _MEMBER_DOF_OFFSETS
 
+                # Group members by stiffness signature so identical members share the same matrix build
+                stiffness_groups: dict[tuple, list[int]] = {}
                 for idx, member in enumerate(active_members):
-                    # Build DOF mapping for this member
-                    i_id, j_id = member.i_node.ID, member.j_node.ID
-                    member_dofs[idx] = [
-                        i_id*6, i_id*6+1, i_id*6+2, i_id*6+3, i_id*6+4, i_id*6+5,
-                        j_id*6, j_id*6+1, j_id*6+2, j_id*6+3, j_id*6+4, j_id*6+5,
-                    ]
-                    member_stiffness[idx] = member.K()
+                    signature = member.stiffness_signature()
+                    stiffness_groups.setdefault(signature, []).append(idx)
+
+                member_stiffness = np.empty((n_members, 12, 12), dtype=np.float64)
+                for indices in stiffness_groups.values():
+                    matrix = active_members[indices[0]].K()
+                    member_stiffness[indices] = matrix
 
                 # Expand all members at once
                 m_rows, m_cols, m_data = expand_stiffness_blocks(member_dofs, member_stiffness)
@@ -1826,6 +1834,22 @@ class FEModel3D():
         :rtype: NDArray[float64]
         """        
         
+        # Quickly short-circuit when no elements contribute fixed end reactions
+        member_loads_present = any(
+            phys_member.PtLoads
+            or phys_member.DistLoads
+            or any(
+                sub_member.PtLoads or sub_member.DistLoads
+                for sub_member in phys_member.sub_members.values()
+            )
+            for phys_member in self.members.values()
+        )
+        plate_loads_present = any(getattr(plate, 'pressures', None) for plate in self.plates.values())
+        quad_loads_present = any(getattr(quad, 'pressures', None) for quad in self.quads.values())
+
+        if not (member_loads_present or plate_loads_present or quad_loads_present):
+            return zeros((len(self.nodes) * 6, 1))
+
         # Initialize a zero vector to hold all the terms
         FER = zeros((len(self.nodes) * 6, 1))
         
@@ -2114,10 +2138,6 @@ class FEModel3D():
             print('| Analyzing: Linear |')
             print('+-------------------+')
         
-        # Import `scipy` features if the sparse solver is being used
-        if sparse == True:
-            from scipy.sparse.linalg import spsolve
-
         # Prepare the model for analysis
         Analysis._prepare_model(self)
 
@@ -2128,7 +2148,8 @@ class FEModel3D():
         # Note that for linear analysis the stiffness matrix can be obtained for any load combination, as it's the same for all of them
         combo_name = list(self.load_combos.keys())[0]
         if sparse == True:
-            K11, K12, K21, K22 = Analysis._partition(self, self.K(combo_name, log, check_stability, sparse).tolil(), D1_indices, D2_indices)
+            K_global = self.K(combo_name, log, check_stability, sparse)
+            K11, K12, K21, K22 = Analysis._partition(self, K_global.tocsr(), D1_indices, D2_indices)
         else:
             K11, K12, K21, K22 = Analysis._partition(self, self.K(combo_name, log, check_stability, sparse), D1_indices, D2_indices)
 
@@ -2158,12 +2179,8 @@ class FEModel3D():
                 try:
                     # Calculate the unknown displacements D1
                     if sparse == True:
-                        # The partitioned stiffness matrix is in `lil` format, which is great
-                        # for memory, but slow for mathematical operations. The stiffness
-                        # matrix will be converted to `csr` format for mathematical operations.
-                        # The `@` operator performs matrix multiplication on sparse matrices.
-                        D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2))
-                        D1 = D1.reshape(len(D1), 1)
+                        rhs = subtract(subtract(P1, FER1), K12 @ D2)
+                        D1 = Analysis._solve_sparse(K11, rhs).reshape(rhs.shape[0], 1)
                     else:
                         D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
                 except:
@@ -2235,10 +2252,6 @@ class FEModel3D():
             print('| Analyzing |')
             print('+-----------+')
 
-        # Import `scipy` features if the sparse solver is being used
-        if sparse == True:
-            from scipy.sparse.linalg import spsolve
-
         # Prepare the model for analysis
         Analysis._prepare_model(self)
 
@@ -2293,7 +2306,8 @@ class FEModel3D():
 
                     # Get the partitioned global stiffness matrix K11, K12, K21, K22
                     if sparse == True:
-                        K11, K12, K21, K22 = Analysis._partition(self, self.K(combo.name, log, check_stability, sparse).tolil(), D1_indices, D2_indices)
+                        K_global = self.K(combo.name, log, check_stability, sparse)
+                        K11, K12, K21, K22 = Analysis._partition(self, K_global.tocsr(), D1_indices, D2_indices)
                     else:
                         K11, K12, K21, K22 = Analysis._partition(self, self.K(combo.name, log, check_stability, sparse), D1_indices, D2_indices)
 
@@ -2304,9 +2318,8 @@ class FEModel3D():
                         try:
                             # Calculate the unknown displacements Delta_D1
                             if sparse == True:
-                                # The partitioned stiffness matrix is in `lil` format, which is great for memory, but slow for mathematical operations. The stiffness matrix will be converted to `csr` format for mathematical operations. The `@` operator performs matrix multiplication on sparse matrices.
-                                Delta_D1 = spsolve(K11.tocsr(), subtract(subtract(Delta_P1, Delta_FER1), K12.tocsr() @ Delta_D2))
-                                Delta_D1 = Delta_D1.reshape(len(Delta_D1), 1)
+                                rhs = subtract(subtract(Delta_P1, Delta_FER1), K12 @ Delta_D2)
+                                Delta_D1 = Analysis._solve_sparse(K11, rhs).reshape(rhs.shape[0], 1)
                             else:
                                 Delta_D1 = solve(K11, subtract(subtract(Delta_P1, Delta_FER1), matmul(K12, Delta_D2)))
                         except:
@@ -2372,10 +2385,6 @@ class FEModel3D():
             print('+--------------------+')
             print('| Analyzing: P-Delta |')
             print('+--------------------+')
-
-        # Import `scipy` features if the sparse solver is being used
-        if sparse == True:
-            from scipy.sparse.linalg import spsolve
 
         # Prepare the model for analysis
         Analysis._prepare_model(self)
