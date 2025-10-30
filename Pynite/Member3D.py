@@ -124,6 +124,7 @@ class Member3D():
         self._K_global_matrix = None  # Cached global stiffness matrix
         self._K_signature = None  # Signature for cached global stiffness matrix
         self._FER_global_cache = {}  # Cached global FER vectors keyed by combo/signature
+        self._stiffness_signature_cached = None
 
         # Members need to track whether they are active or not for any given load combination. They may become inactive for a load combination during a tension/compression-only analysis. This dictionary will be used when the model is solved.
         self.active: Dict[str, bool] = {}  # Key = load combo name, Value = True or False
@@ -456,7 +457,11 @@ class Member3D():
         Needed to apply the slope-deflection equation properly.
         """
 
+        if not self.PtLoads and not self.DistLoads:
+            return zeros((12, 1))
+
         # Reuse FERs when the member's loads, orientation, and combo are unchanged.
+
         T_matrix = self.T()
         transform = T_matrix[:3, :3]
         combo = self.model.load_combos[combo_name]
@@ -626,8 +631,18 @@ class Member3D():
         Yj = self.j_node.Y
         Zj = self.j_node.Z
 
-        # The transformation only depends on node coordinates and the roll angle
-        signature = (Xi, Yi, Zi, Xj, Yj, Zj, self.rotation)
+        # Direction cosines uniquely define the transformation orientation for straight members
+        dx = Xj - Xi
+        dy = Yj - Yi
+        dz = Zj - Zi
+        L = self.L()
+        # Normalize with rounding to avoid floating point jitter producing distinct cache keys
+        if isclose(L, 0.0):
+            direction_key = (0.0, 0.0, 0.0)
+        else:
+            direction_key = tuple(np.round((dx / L, dy / L, dz / L), 12))
+        rotation_key = round(self.rotation % 360.0, 12)
+        signature = direction_key + (rotation_key,)
 
         # Check instance cache first
         if self._T_signature == signature and self._T_matrix is not None:
@@ -641,9 +656,6 @@ class Member3D():
             self._T_transpose = cached.T
             self._T_signature = signature
             return cached
-
-        # Calculate the length of the member
-        L = self.L()
 
         # Calculate the direction cosines for the local x-axis
         x = array([(Xj - Xi)/L, (Yj - Yi)/L, (Zj - Zi)/L])
@@ -764,6 +776,38 @@ class Member3D():
         self._K_global_matrix = global_k
         self._K_signature = signature
         return global_k
+
+    def stiffness_signature(self) -> tuple:
+        dx = self.j_node.X - self.i_node.X
+        dy = self.j_node.Y - self.i_node.Y
+        dz = self.j_node.Z - self.i_node.Z
+        length = self.L()
+        if isclose(length, 0.0):
+            direction = (0.0, 0.0, 0.0)
+        else:
+            direction = (
+                round(dx/length, 12),
+                round(dy/length, 12),
+                round(dz/length, 12),
+            )
+
+        signature = (
+            round(self.material.E, 8),
+            round(self.material.G, 8),
+            round(self.section.Iy, 8),
+            round(self.section.Iz, 8),
+            round(self.section.J, 8),
+            round(self.section.A, 8),
+            round(length, 8),
+            round(self.rotation % 360.0, 8),
+            tuple(self.Releases),
+            direction,
+        )
+
+        if self._stiffness_signature_cached != signature:
+            self._stiffness_signature_cached = signature
+
+        return signature
 
     def Kg(self, P: float=0.0):
         """Returns the global geometric stiffness matrix for the member. Used for P-Delta analysis.

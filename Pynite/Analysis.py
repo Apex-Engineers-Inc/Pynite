@@ -4,8 +4,10 @@ from math import isclose
 
 from numpy import array, asarray, atleast_2d, zeros, subtract, matmul, divide, seterr, nanmax, sort, ix_
 from numpy.linalg import solve
+from numpy.typing import NDArray
 from scipy.spatial import KDTree
 from scipy.sparse import lil_matrix, csr_matrix
+from scipy.sparse.linalg import spsolve, spilu, cg, LinearOperator
 
 from Pynite.LoadCombo import LoadCombo
 
@@ -13,7 +15,6 @@ if TYPE_CHECKING:
     from typing import List, Tuple, Union
     from Pynite.FEModel3D import FEModel3D
     from numpy import float64
-    from numpy.typing import NDArray
 
 
 def _prepare_model(model: FEModel3D) -> None:
@@ -93,6 +94,44 @@ def _identify_combos(model: FEModel3D, combo_tags: List[str] | None = None) -> L
     return combo_list
 
 
+def _solve_sparse(A: csr_matrix, b: NDArray[float64], *, rtol: float = 1e-5, drop_tol: float = 1e-2,
+                  fill_factor: float = 4.0, iterative_threshold: int = 3000) -> NDArray[float64]:
+    """Solve a sparse linear system, using an ILU-preconditioned CG solve for large systems."""
+
+    A_csr = A.tocsr()  # Ensure CSR format for efficient arithmetic and factorization
+
+    if A_csr.shape[0] < iterative_threshold:
+        return spsolve(A_csr, b)
+
+    # Try a cheap Jacobi preconditioner first to avoid expensive ILU factorizations
+    diagonal = A_csr.diagonal()
+    if diagonal.size and not (diagonal == 0).any():
+        inv_diag = 1.0 / diagonal
+
+        def jacobi_solve(x: NDArray[float64]) -> NDArray[float64]:
+            return inv_diag * x
+
+        try:
+            jacobi = LinearOperator(A_csr.shape, jacobi_solve)
+            x, info = cg(A_csr, b, rtol=rtol, atol=0.0, M=jacobi, maxiter=A_csr.shape[0])
+            if info == 0:
+                return x
+        except Exception:
+            pass
+
+    try:
+        ilu = spilu(A_csr.tocsc(), drop_tol=drop_tol, fill_factor=fill_factor)
+        preconditioner = LinearOperator(A_csr.shape, ilu.solve)
+        x, info = cg(A_csr, b, rtol=rtol, atol=0.0, M=preconditioner, maxiter=A_csr.shape[0])
+        if info == 0:
+            return x
+    except Exception:
+        # Fall back to the direct solver on failure to build the preconditioner or converge
+        pass
+
+    return spsolve(A_csr, b)
+
+
 def _check_stability(model: FEModel3D, K: NDArray[float64]) -> None:
     """
     Identifies nodal instabilities in a model's stiffness matrix.
@@ -162,10 +201,6 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
     :raises Exception: Occurs when a model fails to converge.
     """
 
-    # Import `scipy` features if the sparse solver is being used
-    if sparse == True:
-        from scipy.sparse.linalg import spsolve
-
     convergence_TC = False  # Tracks tension/compression-only convergence
     divergence_TC = False   # Tracks tension/compression-only divergence
     iter_count_TC = 1
@@ -190,27 +225,23 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
                     # Calculate the partitioned initial stiffness matrices. These matrices must be recalculated on each T/C iteration due to tension/compression-only members deactivating or reactivating.
                     if log:
                         print('- Calculating initial stiffness matrix')
-                    K11, K12, K21, K22 = _partition(model, model.K(combo_name, log, check_stability, sparse).tolil(), D1_indices, D2_indices)
-
-                    # The initial stiffness matrices are currently `lil` format which is great for memory, but slow for mathematical operations. They will be converted to `csr` format.
-                    K11 = K11.tocsr()
-                    K12 = K12.tocsr()
-                    K21 = K21.tocsr()
-                    K22 = K22.tocsr()
+                    K_matrix = model.K(combo_name, log, check_stability, sparse)
+                    K11, K12, K21, K22 = _partition(model, K_matrix.tocsr(), D1_indices, D2_indices)
 
                 # Check if we are ready to calculate the geometric stiffness
                 if solution_step == 2:
 
                     # After the first iteration, the geometric stiffness matrix will be added to the linear elastic stiffness matrix.
                     if log: print('- Calculating geometric stiffness matrix')
-                    Kg11, Kg12, Kg21, Kg22 = _partition(model, model.Kg(combo_name, log, sparse, False), D1_indices, D2_indices)
+                    Kg_matrix = model.Kg(combo_name, log, sparse, False)
+                    Kg11, Kg12, Kg21, Kg22 = _partition(model, Kg_matrix.tocsr(), D1_indices, D2_indices)
 
                     # The Kg stiffness matrices are currently `lil` format which is great for memory, but slow for mathematical operations. They will be converted to `csr` format. Note that the `+` operator performs matrix addition on `csr` matrices.
                     if log: print('- Summing initial & geometric stiffness matrices')
-                    K11 = K11 + Kg11.tocsr()
-                    K12 = K12 + Kg12.tocsr()
-                    K21 = K21 + Kg21.tocsr()
-                    K22 = K22 + Kg22.tocsr()
+                    K11 = K11 + Kg11
+                    K12 = K12 + Kg12
+                    K21 = K21 + Kg21
+                    K22 = K22 + Kg22
 
             # Determine if the user has selected a dense solution
             else:
@@ -241,11 +272,8 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
                 try:
                     # Calculate the displacements, `D1`
                     if sparse == True:
-                        # The partitioned stiffness matrix is already in `csr` format. The `@` operator performs matrix multiplication on sparse matrices.
-                        # The MMD_ATA permutation is used to improve the performance of the sparse solver by minimizing the fill-in of the matrix.
-                        # The MMD_ATA was chosen because it had the best overall performance when running the test suite (by a large margin).
-                        D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2), permc_spec="MMD_ATA")
-                        D1 = D1.reshape(len(D1), 1)
+                        rhs = subtract(subtract(P1, FER1), K12 @ D2)
+                        D1 = _solve_sparse(K11, rhs).reshape(rhs.shape[0], 1)
                     else:
                         # The partitioned stiffness matrix is in `csr` format. It will be converted to a 2D dense array for mathematical operations.
                         D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
@@ -296,29 +324,26 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
         # Sparse solver
         if sparse == True:
 
-            from scipy.sparse.linalg import spsolve
-
             # Calculate the initial stiffness matrix
             if log: print('- Calculating elastic stiffness matrix [Ke]')
-            K11, K12, K21, K22 = _partition(model, model.K(combo_name, log, check_stability, sparse).tolil(), D1_indices, D2_indices)
+            K_matrix = model.K(combo_name, log, check_stability, sparse)
+            K11, K12, K21, K22 = _partition(model, K_matrix.tocsr(), D1_indices, D2_indices)
 
             # Calculate the geometric stiffness matrix
             # The `combo_name` variable in the code below is not the name of the pushover load combination. Rather it is the name of the primary combination that the pushover load will be added to. Axial loads used to develop Kg are calculated from the displacements stored in `combo_name`.
             if log: print('- Calculating geometric stiffness matrix [Kg]')
-            Kg11, Kg12, Kg21, Kg22 = _partition(model, model.Kg(combo_name, log, sparse, False).tolil(), D1_indices, D2_indices)
+            Kg_matrix = model.Kg(combo_name, log, sparse, False)
+            Kg11, Kg12, Kg21, Kg22 = _partition(model, Kg_matrix.tocsr(), D1_indices, D2_indices)
 
             # Calculate the stiffness reduction matrix
             if log: print('- Calculating plastic reduction matrix [Km]')
-            Km11, Km12, Km21, Km22 = _partition(model, model.Km(combo_name, push_combo, step_num, log, sparse).tolil(), D1_indices, D2_indices)
+            Km_matrix = model.Km(combo_name, push_combo, step_num, log, sparse)
+            Km11, Km12, Km21, Km22 = _partition(model, Km_matrix.tocsr(), D1_indices, D2_indices)
 
-            # The stiffness matrices are currently `lil` format which is great for
-            # memory, but slow for mathematical operations. They will be converted to
-            # `csr` format. The `+` operator performs matrix addition on `csr`
-            # matrices.
-            K11 = K11.tocsr() + Kg11.tocsr() + Km11.tocsr()
-            K12 = K12.tocsr() + Kg12.tocsr() + Km12.tocsr()
-            K21 = K21.tocsr() + Kg21.tocsr() + Km21.tocsr()
-            K22 = K22.tocsr() + Kg22.tocsr() + Km22.tocsr()
+            K11 = K11 + Kg11 + Km11
+            K12 = K12 + Kg12 + Km12
+            K21 = K21 + Kg21 + Km21
+            K22 = K22 + Kg22 + Km22
 
         # Dense solver
         else:
@@ -350,12 +375,8 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
             try:
                 # Calculate the change in the displacements Delta_D1
                 if sparse == True:
-                    # The partitioned stiffness matrix is already in `csr` format. The `@`
-                    # operator performs matrix multiplication on sparse matrices.
-                    # The MMD_ATA permutation is used to improve the performance of the sparse solver by minimizing the fill-in of the matrix.
-                    # The MMD_ATA was chosen because it had the best overall performance when running the test suite (by a large margin).
-                    Delta_D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2), permc_spec="MMD_ATA")
-                    Delta_D1 = Delta_D1.reshape(len(Delta_D1), 1)
+                    rhs = subtract(subtract(P1, FER1), K12 @ D2)
+                    Delta_D1 = _solve_sparse(K11, rhs).reshape(rhs.shape[0], 1)
                 else:
                     # The partitioned stiffness matrix is in `csr` format. It will be
                     # converted to a 2D dense array for mathematical operations.
