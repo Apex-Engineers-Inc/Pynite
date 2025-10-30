@@ -21,7 +21,6 @@ try:
 except:
     # Ignore the exception that is produced if we are not running the code via jupyter
     pass
-pv.set_jupyter_backend('trame')
 
 class Renderer:
     """Used to render finite element models.

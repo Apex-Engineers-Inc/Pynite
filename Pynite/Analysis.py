@@ -7,7 +7,6 @@ from numpy.linalg import solve
 from numpy.typing import NDArray
 from scipy.spatial import KDTree
 from scipy.sparse import lil_matrix, csr_matrix
-from scipy.sparse.linalg import spsolve, spilu, cg, LinearOperator
 
 from Pynite.LoadCombo import LoadCombo
 
@@ -96,39 +95,15 @@ def _identify_combos(model: FEModel3D, combo_tags: List[str] | None = None) -> L
 
 def _solve_sparse(A: csr_matrix, b: NDArray[float64], *, rtol: float = 1e-5, drop_tol: float = 1e-2,
                   fill_factor: float = 4.0, iterative_threshold: int = 3000) -> NDArray[float64]:
-    """Solve a sparse linear system, using an ILU-preconditioned CG solve for large systems."""
+    """Solve a sparse linear system using scipy's direct solver for maximum speed.
 
-    A_csr = A.tocsr()  # Ensure CSR format for efficient arithmetic and factorization
+    For typical structural FEA models (< 10,000 DOFs), scipy's direct solver is fastest.
+    Uses UMFPACK which is highly optimized for sparse SPD systems from FEA.
+    """
 
-    if A_csr.shape[0] < iterative_threshold:
-        return spsolve(A_csr, b)
+    from scipy.sparse.linalg import spsolve
 
-    # Try a cheap Jacobi preconditioner first to avoid expensive ILU factorizations
-    diagonal = A_csr.diagonal()
-    if diagonal.size and not (diagonal == 0).any():
-        inv_diag = 1.0 / diagonal
-
-        def jacobi_solve(x: NDArray[float64]) -> NDArray[float64]:
-            return inv_diag * x
-
-        try:
-            jacobi = LinearOperator(A_csr.shape, jacobi_solve)
-            x, info = cg(A_csr, b, rtol=rtol, atol=0.0, M=jacobi, maxiter=A_csr.shape[0])
-            if info == 0:
-                return x
-        except Exception:
-            pass
-
-    try:
-        ilu = spilu(A_csr.tocsc(), drop_tol=drop_tol, fill_factor=fill_factor)
-        preconditioner = LinearOperator(A_csr.shape, ilu.solve)
-        x, info = cg(A_csr, b, rtol=rtol, atol=0.0, M=preconditioner, maxiter=A_csr.shape[0])
-        if info == 0:
-            return x
-    except Exception:
-        # Fall back to the direct solver on failure to build the preconditioner or converge
-        pass
-
+    A_csr = A.tocsr()  # Ensure CSR format for spsolve
     return spsolve(A_csr, b)
 
 
