@@ -98,7 +98,7 @@ class BeamSegZ():
         return self.x2 - self.x1
 
     # Returns the shear force at a location 'x' on the segment
-    def Shear(self, x: float) -> float:
+    def Shear(self, x: float | NDArray[Any]) -> float | NDArray[Any]:
 
         V1 = self.V1
         w1 = self.w1
@@ -108,7 +108,7 @@ class BeamSegZ():
         return V1 + w1*x + x**2*(-w1 + w2)/(2*L)
 
     # Returns the moment at a location on the segment
-    def moment(self, x: float, P_delta: bool = False) -> float:
+    def moment(self, x: float | NDArray[Any], P_delta: bool = False) -> float | NDArray[Any]:
 
         V1 = self.V1
         M1 = self.M1
@@ -122,14 +122,14 @@ class BeamSegZ():
         # # Include the P-Delta moment if a P-Delta analysis was run
         if P_delta == True:
             delta_1 = self.delta1
-            delta_x = self.deflection(x)
+            delta_x = self.deflection(x, P_delta)
             M += P1*(delta_x - delta_1)
 
         # Return the computed moment
         return M
 
     # Returns the axial force at a location on the segment
-    def axial(self, x: float) -> float:
+    def axial(self, x: float | NDArray[Any]) -> float | NDArray[Any]:
 
         P1 = self.P1
         p1 = self.p1
@@ -183,7 +183,7 @@ class BeamSegZ():
         return theta_x
 
     # Returns the deflection at a location on the segment
-    def deflection(self, x: float, P_delta: bool = False) -> float:
+    def deflection(self, x: float | NDArray[Any], P_delta: bool = False) -> float | NDArray[Any]:
 
         V1 = self.V1
         M1 = self.M1
@@ -206,7 +206,7 @@ class BeamSegZ():
             # Return the calcuated deflection
             return delta_1 + theta_1*x + V1*x**3/(6*EI) + w1*x**4/(24*EI) + x**2*(-M1)/(2*EI) + x**5*(-w1 + w2)/(120*EI*L)
 
-    def axial_deflection(self, x: float) -> float:
+    def axial_deflection(self, x: float | NDArray[Any]) -> float | NDArray[Any]:
 
         delta_x1 = self.delta_x1
         P1 = self.P1

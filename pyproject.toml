@@ -33,6 +33,7 @@ all = [
     "cython",
 ]
 vtk = ["IPython", "vtk"]
+
 pyvista = ["pyvista[all,trame]", "trame_jupyter_extension", "ipywidgets"]
 reporting = ["pdfkit", "Jinja2"]
 derivations = ["jupyterlab", "sympy"]

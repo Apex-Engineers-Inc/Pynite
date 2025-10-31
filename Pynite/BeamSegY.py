@@ -1,11 +1,18 @@
+from __future__ import annotations  # Allows more recent type hints features
+from typing import TYPE_CHECKING
+
 from Pynite.BeamSegZ import BeamSegZ
+
+if TYPE_CHECKING:
+    from typing import Any
+    from numpy.typing import NDArray
 
 
 # %%
 class BeamSegY(BeamSegZ):
 
     # Returns the moment at a location on the segment
-    def moment(self, x: float, P_delta: bool = False) -> float:
+    def moment(self, x: float | NDArray[Any], P_delta: bool = False) -> float | NDArray[Any]:
         '''
         Returns the moment at a location on the segment.
 
@@ -27,7 +34,7 @@ class BeamSegY(BeamSegZ):
 
         if P_delta == True:
             delta1 = self.delta1
-            delta = self.deflection(x)
+            delta = self.deflection(x, P_delta)
             M += P1*(delta - delta1)
 
         return M
@@ -61,7 +68,7 @@ class BeamSegY(BeamSegZ):
             return theta_1 + (-V1*x**2/2 - w1*x**3/6 + x*(-M1) + x**4*(w1 - w2)/(24*L))/EI
 
     # Returns the deflection at a location on the segment
-    def deflection(self, x: float, P_delta: bool = False) -> float:
+    def deflection(self, x: float | NDArray[Any], P_delta: bool = False) -> float | NDArray[Any]:
 
         V1 = self.V1
         M1 = self.M1

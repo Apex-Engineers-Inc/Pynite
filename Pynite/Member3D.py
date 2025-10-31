@@ -125,6 +125,7 @@ class Member3D():
         self._K_signature = None  # Signature for cached global stiffness matrix
         self._FER_global_cache = {}  # Cached global FER vectors keyed by combo/signature
         self._stiffness_signature_cached = None
+        self._load_signature_cache = None  # Cached load signature to avoid repeated tuple conversions
 
         # Members need to track whether they are active or not for any given load combination. They may become inactive for a load combination during a tension/compression-only analysis. This dictionary will be used when the model is solved.
         self.active: Dict[str, bool] = {}  # Key = load combo name, Value = True or False
@@ -478,76 +479,95 @@ class Member3D():
             # Work with a copy so downstream code does not accidentally mutate the shared cache entry
             return cached.copy()
 
-        # Initialize the fixed end reaction vector
-        fer = zeros((12, 1))
+        # Initialize the fixed end reaction vector (store as 1D during accumulation)
+        fer = np.zeros(12, dtype='float64')
+
+        # Map loads by case so we only iterate relevant entries for each factor
+        point_by_case: Dict[str, List[Tuple]] = {}
+        if self.PtLoads:
+            for load in self.PtLoads:
+                point_by_case.setdefault(load[3], []).append(load)
+
+        dist_by_case: Dict[str, List[Tuple]] = {}
+        if self.DistLoads:
+            for load in self.DistLoads:
+                dist_by_case.setdefault(load[5], []).append(load)
+
+        fer_axial_pt = Pynite.FixedEndReactions.FER_AxialPtLoad
+        fer_transverse_pt = Pynite.FixedEndReactions.FER_PtLoad
+        fer_torque_pt = Pynite.FixedEndReactions.FER_Torque
+        fer_moment_pt = Pynite.FixedEndReactions.FER_Moment
+        fer_axial_lin = Pynite.FixedEndReactions.FER_AxialLinLoad
+        fer_transverse_lin = Pynite.FixedEndReactions.FER_LinLoad
+
+        global_force_map = {'FX': 0, 'FY': 1, 'FZ': 2}
+        global_moment_map = {'MX': 0, 'MY': 1, 'MZ': 2}
 
         # Loop through each load case and factor in the load combination
         for case, factor in combo.factors.items():
+            factor = float(factor)
+            if abs(factor) <= 1e-12:
+                continue
 
             # Sum the fixed end reactions for the point loads & moments
-            for ptLoad in self.PtLoads:
+            for ptLoad in point_by_case.get(case, ()):
+                direction, magnitude, location, _ = ptLoad
+                mag = factor * float(magnitude)
+                x = float(location)
 
-                # Check if the current point load corresponds to the current load case
-                if ptLoad[3] == case:
-
-                    if ptLoad[0] == 'Fx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*ptLoad[1], ptLoad[2], L))
-                    elif ptLoad[0] == 'Fy':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], L, 'Fy'))
-                    elif ptLoad[0] == 'Fz':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], L, 'Fz'))
-                    elif ptLoad[0] == 'Mx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*ptLoad[1], ptLoad[2], L))
-                    elif ptLoad[0] == 'My':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], L, 'My'))
-                    elif ptLoad[0] == 'Mz':     
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], L, 'Mz'))
-                    elif ptLoad[0] == 'FX' or ptLoad[0] == 'FY' or ptLoad[0] == 'FZ':
-                        FX, FY, FZ = 0, 0, 0
-                        if ptLoad[0] == 'FX': FX = 1
-                        if ptLoad[0] == 'FY': FY = 1
-                        if ptLoad[0] == 'FZ': FZ = 1
-                        f = transform @ array([FX*ptLoad[1], FY*ptLoad[1], FZ*ptLoad[1]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*f[0], ptLoad[2], L))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[1], ptLoad[2], L, 'Fy'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[2], ptLoad[2], L, 'Fz'))
-                    elif ptLoad[0] == 'MX' or ptLoad[0] == 'MY' or ptLoad[0] == 'MZ':
-                        MX, MY, MZ = 0, 0, 0
-                        if ptLoad[0] == 'MX': MX = 1
-                        if ptLoad[0] == 'MY': MY = 1
-                        if ptLoad[0] == 'MZ': MZ = 1
-                        f = transform @ array([MX*ptLoad[1], MY*ptLoad[1], MZ*ptLoad[1]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*f[0], ptLoad[2], L))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[1], ptLoad[2], L, 'My'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[2], ptLoad[2], L, 'Mz'))
-                    else:
-                        raise Exception('Invalid member point load direction specified.')
+                if direction == 'Fx':
+                    fer += fer_axial_pt(mag, x, L).ravel()
+                elif direction == 'Fy':
+                    fer += fer_transverse_pt(mag, x, L, 'Fy').ravel()
+                elif direction == 'Fz':
+                    fer += fer_transverse_pt(mag, x, L, 'Fz').ravel()
+                elif direction == 'Mx':
+                    fer += fer_torque_pt(mag, x, L).ravel()
+                elif direction == 'My':
+                    fer += fer_moment_pt(mag, x, L, 'My').ravel()
+                elif direction == 'Mz':
+                    fer += fer_moment_pt(mag, x, L, 'Mz').ravel()
+                elif direction in global_force_map:
+                    col = transform[:, global_force_map[direction]]
+                    vec = col * mag
+                    fer += fer_axial_pt(vec[0], x, L).ravel()
+                    fer += fer_transverse_pt(vec[1], x, L, 'Fy').ravel()
+                    fer += fer_transverse_pt(vec[2], x, L, 'Fz').ravel()
+                elif direction in global_moment_map:
+                    col = transform[:, global_moment_map[direction]]
+                    vec = col * mag
+                    fer += fer_torque_pt(vec[0], x, L).ravel()
+                    fer += fer_moment_pt(vec[1], x, L, 'My').ravel()
+                    fer += fer_moment_pt(vec[2], x, L, 'Mz').ravel()
+                else:
+                    raise Exception('Invalid member point load direction specified.')
 
             # Sum the fixed end reactions for the distributed loads
-            for distLoad in self.DistLoads:
+            for distLoad in dist_by_case.get(case, ()):
+                direction, w1, w2, x1, x2, _ = distLoad
+                w1 = float(w1)
+                w2 = float(w2)
+                x_start = float(x1)
+                x_end = float(x2)
 
-                # Check if the current distributed load corresponds to the current load case
-                if distLoad[5] == case:
+                if direction == 'Fx':
+                    fer += fer_axial_lin(factor * w1, factor * w2, x_start, x_end, L).ravel()
+                elif direction == 'Fy' or direction == 'Fz':
+                    fer += fer_transverse_lin(factor * w1, factor * w2, x_start, x_end, L, direction).ravel()
+                elif direction in global_force_map:
+                    col = transform[:, global_force_map[direction]]
+                    vec1 = col * (factor * w1)
+                    vec2 = col * (factor * w2)
+                    fer += fer_axial_lin(vec1[0], vec2[0], x_start, x_end, L).ravel()
+                    fer += fer_transverse_lin(vec1[1], vec2[1], x_start, x_end, L, 'Fy').ravel()
+                    fer += fer_transverse_lin(vec1[2], vec2[2], x_start, x_end, L, 'Fz').ravel()
 
-                    if distLoad[0] == 'Fx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], L))
-                    elif distLoad[0] == 'Fy' or distLoad[0] == 'Fz':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], L, distLoad[0]))
-                    elif distLoad[0] == 'FX' or distLoad[0] == 'FY' or distLoad[0] == 'FZ':
-                        FX, FY, FZ = 0, 0, 0
-                        if distLoad[0] == 'FX': FX = 1
-                        if distLoad[0] == 'FY': FY = 1
-                        if distLoad[0] == 'FZ': FZ = 1
-                        w1 = transform @ array([FX*distLoad[1], FY*distLoad[1], FZ*distLoad[1]])
-                        w2 = transform @ array([FX*distLoad[2], FY*distLoad[2], FZ*distLoad[2]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*w1[0], factor*w2[0], distLoad[3], distLoad[4], L))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[1], factor*w2[1], distLoad[3], distLoad[4], L, 'Fy'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[2], factor*w2[2], distLoad[3], distLoad[4], L, 'Fz'))
+        fer_column = fer.reshape(12, 1)
 
         # Memoize the result so repeated load combinations on identical members short-circuit
-        FER_UNCOND_CACHE[cache_key] = fer.copy()
+        FER_UNCOND_CACHE[cache_key] = fer_column.copy()
         # Return the fixed end reaction vector, uncondensed
-        return fer
+        return fer_column
 
     def _partition(self, unp_matrix: NDArray[float64])-> tuple[Any, Any] | tuple[Any, Any, Any, Any]:
         """
@@ -855,19 +875,31 @@ class Member3D():
         """
 
         T_matrix = self.T()
-        load_signature = (
+
+        current_load_signature = (
             tuple(tuple(load) for load in self.PtLoads),
             tuple(tuple(load) for load in self.DistLoads),
         )
-        orientation_signature = _orientation_signature(T_matrix[:3, :3])
-        signature = (combo_name, tuple(self.Releases), orientation_signature, load_signature)
+        if self._load_signature_cache != current_load_signature:
+            self._load_signature_cache = current_load_signature
+            self._FER_global_cache.clear()
 
-        cached = GLOBAL_FER_CACHE.get(signature)
+        combo = self.model.load_combos[combo_name]
+        combo_signature = tuple(sorted(combo.factors.items()))
+        orientation_signature = self._T_signature
+        signature = (combo_signature, tuple(self.Releases), orientation_signature, self._load_signature_cache)
+
+        cached = self._FER_global_cache.get(signature)
         if cached is not None:
-            self._FER_global_cache[signature] = cached
             return cached
 
+        global_cached = GLOBAL_FER_CACHE.get(signature)
+        if global_cached is not None:
+            self._FER_global_cache[signature] = global_cached
+            return global_cached
+
         result = matmul(self._T_transpose, self.fer(combo_name))
+        result.setflags(write=False)
         GLOBAL_FER_CACHE[signature] = result
         self._FER_global_cache[signature] = result
         return result

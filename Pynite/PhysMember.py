@@ -1,5 +1,12 @@
 from __future__ import annotations # Allows more recent type hints features
+
+import hashlib
+from math import isclose, sqrt
 from typing import Callable, Dict, List, Literal, Tuple, TYPE_CHECKING
+
+import numpy as np
+from numpy import array
+
 from Pynite.Member3D import Member3D
 
 if TYPE_CHECKING:
@@ -9,10 +16,6 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     from numpy import float64
     from numpy.typing import NDArray
-
-import numpy as np
-from numpy import array
-from math import isclose, sqrt
 
 class PhysMember(Member3D):
     """
@@ -30,7 +33,10 @@ class PhysMember(Member3D):
         # Track the last discretization inputs so we can skip regeneration unless something changed
         self._discretize_signature: Tuple[int, float, float, float, float, float, float] | None = None
         self._result_array_cache: dict[Tuple[str, str, str, Tuple], NDArray[float64]] = {}
-        self._x_cache: dict[int, NDArray[float64]] = {}
+        self._x_cache: dict[Tuple[int, float], NDArray[float64]] = {}
+        self._submember_result_cache: dict[
+            Tuple[str, str, str], Dict[str, Dict[Tuple, NDArray[float64]]]
+        ] = {}
         self._load_case_scaling: dict[str, Tuple[str, float]] | None = None
 
     def discretize(self) -> None:
@@ -49,6 +55,7 @@ class PhysMember(Member3D):
         self.sub_members = {}
         self._result_array_cache.clear()
         self._x_cache.clear()
+        self._submember_result_cache.clear()
 
         # Start a new list of nodes along the member
         int_nodes: List[Tuple[Node3D, float]] = []
@@ -446,30 +453,47 @@ class PhysMember(Member3D):
         """
         L = self.L()
         if x_array is None:
-            return np.linspace(0.0, L, n_points).astype('float64', copy=False)
+            key = (int(n_points), float(np.round(L, 12)))
+            cached = self._x_cache.get(key)
+            if cached is None:
+                cached = np.linspace(0.0, L, int(n_points), dtype='float64')
+                cached.setflags(write=False)
+                self._x_cache[key] = cached
+            return cached
 
-        x_vals = np.asarray(x_array, dtype='float64')
+        x_vals = np.array(x_array, dtype='float64', copy=False)
         if x_vals.ndim != 1:
             raise ValueError("x_array must be a 1D array of coordinates")
         if x_vals.size and ((x_vals < 0.0).any() or (x_vals > L).any()):
             raise ValueError(f"All x values must be in the range 0 to {L}")
+        x_vals.setflags(write=False)
         return x_vals
 
     def _collect_submember_results(
         self,
-        x_vals: NDArray[float64],
+        family: str,
+        direction: str,
         combo_name: str,
+        x_vals: NDArray[float64],
+        default_spacing: bool,
+        x_signature: Tuple,
         evaluator: Callable[[Member3D, NDArray[float64]], NDArray[float64]],
     ) -> NDArray[float64]:
         """
         Evaluate submember response arrays and stitch them together for the full member.
+        Results are memoized per submember so repeated queries with the same sampling scheme
+        avoid re-evaluating the underlying segment polynomials.
         """
         if x_vals.size == 0:
-            return np.empty((2, 0), dtype='float64')
+            empty = np.empty((2, 0), dtype='float64')
+            empty.setflags(write=False)
+            return empty
 
         submembers = tuple(self.sub_members.values())
         if not submembers:
-            return np.empty((2, 0), dtype='float64')
+            empty = np.empty((2, 0), dtype='float64')
+            empty.setflags(write=False)
+            return empty
 
         lengths = np.fromiter((member.L() for member in submembers), dtype='float64')
         starts = np.zeros_like(lengths)
@@ -478,12 +502,29 @@ class PhysMember(Member3D):
         ends = starts + lengths
 
         load_combo = self.model.load_combos[combo_name]
-        segments: List[NDArray[float64]] = []
+        cache_group_key = (family, direction, combo_name)
+        group_cache = self._submember_result_cache.setdefault(cache_group_key, {})
 
         start_indices = np.searchsorted(x_vals, starts, side='left')
         end_indices = np.searchsorted(x_vals, ends, side='left')
         if end_indices.size:
             end_indices[-1] = np.searchsorted(x_vals, ends[-1], side='right')
+
+        segments: List[NDArray[float64]] = []
+
+        def make_slice_key(
+            start_offset: float,
+            start_idx: int,
+            end_idx: int,
+            segment_x: NDArray[float64],
+        ) -> Tuple:
+            if default_spacing:
+                return ('lin', float(start_offset), start_idx, end_idx, x_signature)
+            if segment_x.size == 0:
+                return ('empty', float(start_offset))
+            contiguous = np.ascontiguousarray(segment_x, dtype='float64')
+            digest = hashlib.blake2b(contiguous.view(np.uint8), digest_size=16).digest()
+            return ('custom', float(start_offset), int(segment_x.size), digest)
 
         for idx, submember in enumerate(submembers):
             start_idx = start_indices[idx]
@@ -494,23 +535,53 @@ class PhysMember(Member3D):
             if submember._solved_combo is None or submember._solved_combo.name != combo_name:
                 submember._segment_member(combo_name)
                 submember._solved_combo = load_combo
+                group_cache.pop(submember.name, None)
 
             segment_x = x_vals[start_idx:end_idx]
+            if segment_x.size == 0:
+                continue
+
             local_x = segment_x - starts[idx]
-            if local_x.size == 0:
+            sub_cache = group_cache.setdefault(submember.name, {})
+            slice_key = make_slice_key(starts[idx], start_idx, end_idx, segment_x)
+
+            cached_result = sub_cache.get(slice_key)
+            if cached_result is not None:
+                segments.append(cached_result)
                 continue
 
             result = evaluator(submember, local_x.astype('float64', copy=False))
             if result is None or result.size == 0:
                 continue
 
+            if result.shape[0] != 2:
+                raise ValueError("Result evaluator must return a 2xN array.")
+
+            result = np.array(result, dtype='float64', copy=False, order='C')
+            if not result.flags.writeable or not result.flags.owndata:
+                result = result.copy(order='C')
             result[0] += starts[idx]
+            result.setflags(write=False)
+            sub_cache[slice_key] = result
             segments.append(result)
 
         if not segments:
-            return np.empty((2, 0), dtype='float64')
+            empty = np.empty((2, 0), dtype='float64')
+            empty.setflags(write=False)
+            return empty
 
-        return np.concatenate(segments, axis=1)
+        if len(segments) == 1:
+            return segments[0]
+
+        total_points = int(sum(segment.shape[1] for segment in segments))
+        merged = np.empty((2, total_points), dtype='float64')
+        cursor = 0
+        for segment in segments:
+            width = segment.shape[1]
+            merged[:, cursor:cursor + width] = segment
+            cursor += width
+        merged.setflags(write=False)
+        return merged
 
     def _build_x_signature(self, default_spacing: bool, x_vals: NDArray[float64]) -> Tuple:
         size = int(x_vals.size)
@@ -593,10 +664,10 @@ class PhysMember(Member3D):
         direction: str,
         x_vals: NDArray[float64],
         default_spacing: bool,
+        x_signature: Tuple,
         case_name: str,
         evaluator: Callable[[Member3D, NDArray[float64]], NDArray[float64]],
     ) -> NDArray[float64] | None:
-        x_signature = self._build_x_signature(default_spacing, x_vals)
         case_key = self._result_cache_key(family, direction, case_name, x_signature)
         cached = self._result_array_cache.get(case_key)
         if cached is not None:
@@ -609,7 +680,15 @@ class PhysMember(Member3D):
         base_combo = self.model._find_single_case_combo(ref_case)
         if base_combo is None:
             if case_name in self.model.load_combos:
-                base_array = self._collect_submember_results(x_vals, case_name, evaluator)
+                base_array = self._collect_submember_results(
+                    family,
+                    direction,
+                    case_name,
+                    x_vals,
+                    default_spacing,
+                    x_signature,
+                    evaluator,
+                )
                 self._result_array_cache[case_key] = base_array
                 return base_array
             return None
@@ -617,11 +696,19 @@ class PhysMember(Member3D):
         base_key = self._result_cache_key(family, direction, base_combo, x_signature)
         base_array = self._result_array_cache.get(base_key)
         if base_array is None:
-            base_array = self._collect_submember_results(x_vals, base_combo, evaluator)
+            base_array = self._collect_submember_results(
+                family,
+                direction,
+                base_combo,
+                x_vals,
+                default_spacing,
+                x_signature,
+                evaluator,
+            )
             self._result_array_cache[base_key] = base_array
 
         if ref_case != case_name or abs(scale_factor - 1.0) > 1e-9:
-            scaled_array = base_array * scale_factor
+            scaled_array = self._scale_result_array(base_array, scale_factor)
             self._result_array_cache[case_key] = scaled_array
             return scaled_array
 
@@ -635,6 +722,19 @@ class PhysMember(Member3D):
         x_signature: Tuple,
     ) -> Tuple[str, str, str, Tuple]:
         return (family, direction, combo_name, x_signature)
+
+    @staticmethod
+    def _scale_result_array(base_array: NDArray[float64], factor: float) -> NDArray[float64]:
+        if abs(factor - 1.0) <= 1e-9:
+            return base_array
+        scaled = np.empty_like(base_array)
+        scaled[0] = base_array[0]
+        if base_array.shape[1]:
+            np.multiply(base_array[1], factor, out=scaled[1])
+        else:
+            scaled[1] = base_array[1]
+        scaled.setflags(write=False)
+        return scaled
 
     def _compute_superposed_result(
         self,
@@ -652,42 +752,72 @@ class PhysMember(Member3D):
             return cached
 
         combo = self.model.load_combos[combo_name]
-        factors = tuple(combo.factors.items())
+        factors = [
+            (case, float(factor))
+            for case, factor in combo.factors.items()
+            if abs(factor) > 1e-12
+        ]
 
-        result: NDArray[float64] | None = None
-        if len(factors) == 1 and factors[0][1] == 1.0:
-            requires_superposition = False
-        else:
-            requires_superposition = bool(factors)
-
-        if requires_superposition:
-            accumulator: NDArray[float64] | None = None
-            for case_name, factor in factors:
-                case_array = self._get_case_array(
-                    family, direction, x_vals, default_spacing, case_name, evaluator
-                )
-                if case_array is None:
-                    accumulator = None
-                    break
-                term = case_array * factor
-                if accumulator is None:
-                    accumulator = term
-                else:
-                    accumulator = accumulator + term
-
-            if accumulator is not None:
-                result = accumulator
-
-        if result is None and len(factors) == 1:
+        if len(factors) == 1:
             case_name, factor = factors[0]
-            case_array = self._get_case_array(family, direction, x_vals, default_spacing, case_name, evaluator)
+            case_array = self._get_case_array(
+                family,
+                direction,
+                x_vals,
+                default_spacing,
+                x_signature,
+                case_name,
+                evaluator,
+            )
             if case_array is not None:
-                scaled_array = case_array if abs(factor - 1.0) <= 1e-9 else case_array * factor
+                scaled_array = self._scale_result_array(case_array, factor)
                 self._result_array_cache[cache_key] = scaled_array
                 return scaled_array
 
-        if result is None:
-            result = self._collect_submember_results(x_vals, combo_name, evaluator)
+        accumulator: NDArray[float64] | None = None
+        x_reference: NDArray[float64] | None = None
+        temp_buffer: NDArray[float64] | None = None
+
+        for case_name, factor in factors:
+            case_array = self._get_case_array(
+                family,
+                direction,
+                x_vals,
+                default_spacing,
+                x_signature,
+                case_name,
+                evaluator,
+            )
+            if case_array is None:
+                accumulator = None
+                break
+
+            if x_reference is None:
+                x_reference = case_array[0]
+                accumulator = np.array(case_array[1], dtype='float64', copy=True)
+                accumulator *= factor
+                temp_buffer = np.empty_like(accumulator)
+            else:
+                if case_array[0].size != x_reference.size or not np.array_equal(case_array[0], x_reference):
+                    raise ValueError("Mismatched x-coordinates when superposing member results.")
+                np.multiply(case_array[1], factor, out=temp_buffer)
+                accumulator += temp_buffer
+
+        if accumulator is not None and x_reference is not None:
+            result = np.empty((2, x_reference.size), dtype='float64')
+            result[0] = x_reference
+            result[1] = accumulator
+            result.setflags(write=False)
+        else:
+            result = self._collect_submember_results(
+                family,
+                direction,
+                combo_name,
+                x_vals,
+                default_spacing,
+                x_signature,
+                evaluator,
+            )
 
         self._result_array_cache[cache_key] = result
         return result
