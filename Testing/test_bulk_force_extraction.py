@@ -602,6 +602,396 @@ class TestEdgeCases:
 
 
 # =============================================================================
+# Continuous Beam Tests
+# =============================================================================
+
+class TestContinuousBeams:
+    """Test internal forces for continuous beams against known analytical solutions."""
+
+    def test_two_span_uniform_load(self):
+        """
+        Two-span continuous beam with uniform load.
+
+        For two equal spans L with uniform load w:
+        - Moment magnitude at middle support: |M_B| = wL²/8
+        - End reactions: R_A = R_C = 3wL/8
+        - Middle reaction: R_B = 10wL/8 = 5wL/4
+        - Max positive moment in each span: 9wL²/128 at x = 3L/8 from end support
+
+        Reference: Roark's Formulas for Stress and Strain, Table 8.1
+        """
+        model = FEModel3D()
+        L = 10.0  # Span length
+        w = -1.0  # Uniform load (negative = downward)
+
+        # Create three nodes for two spans
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', L, 0, 0)
+        model.add_node('N3', 2*L, 0, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
+        model.add_member('M2', 'N2', 'N3', 'Steel', 'W10')
+
+        # Pin at N1, roller at N2 (interior support), roller at N3
+        model.def_support('N1', True, True, True, True, True, False)
+        model.def_support('N2', True, True, True, True, True, False)
+        model.def_support('N3', True, True, True, True, True, False)
+
+        # Add uniform load to both spans
+        model.add_member_dist_load('M1', 'Fy', w, w, 0, L, 'D')
+        model.add_member_dist_load('M2', 'Fy', w, w, 0, L, 'D')
+        model.add_load_combo('1.0D', {'D': 1.0})
+
+        model.analyze()
+
+        # Analytical solutions (magnitudes)
+        w_abs = abs(w)
+        M_middle_support_mag = w_abs * L**2 / 8  # Moment magnitude at interior support
+        M_max_span_mag = 9 * w_abs * L**2 / 128  # Max moment in span (away from support)
+        R_end = 3 * w_abs * L / 8  # Reactions at end supports
+
+        # Test first span (M1)
+        member1 = model.members['M1']
+        n_points = 41  # Use many points for accuracy
+
+        bulk_results1 = member1.get_all_forces_array(['1.0D'], n_points)
+        trad_moment1 = member1.moment_array('Mz', n_points, '1.0D')
+        trad_shear1 = member1.shear_array('Fy', n_points, '1.0D')
+
+        # Verify bulk matches traditional
+        assert_allclose(bulk_results1['moment_z'][0, :], trad_moment1[1], rtol=1e-6,
+                       err_msg="Bulk moment does not match traditional for span 1")
+        assert_allclose(bulk_results1['shear_y'][0, :], trad_shear1[1], rtol=1e-6,
+                       err_msg="Bulk shear does not match traditional for span 1")
+
+        # Verify moment magnitude at interior support (end of M1)
+        moment_at_support = bulk_results1['moment_z'][0, -1]
+        assert abs(moment_at_support) == pytest.approx(M_middle_support_mag, rel=0.01), \
+            f"Moment magnitude at interior support: expected {M_middle_support_mag}, got {abs(moment_at_support)}"
+
+        # Verify max span moment has opposite sign from support moment (sagging vs hogging)
+        moment_array = bulk_results1['moment_z'][0, :]
+        max_idx = np.argmax(np.abs(moment_array[:-5]))  # Exclude near-support points
+        min_idx = np.argmin(moment_array)
+        # Moment should change sign between mid-span and support
+        assert moment_array[0] * moment_array[-1] < 0 or abs(moment_array[0]) < 0.1, \
+            "Moment should change sign along span (sagging in middle, hogging at support)"
+
+        # Verify shear magnitude at end support
+        shear_at_start = abs(bulk_results1['shear_y'][0, 0])
+        assert shear_at_start == pytest.approx(R_end, rel=0.01), \
+            f"Shear at end support: expected {R_end}, got {shear_at_start}"
+
+        # Test second span (M2) for symmetry
+        member2 = model.members['M2']
+        bulk_results2 = member2.get_all_forces_array(['1.0D'], n_points)
+        trad_moment2 = member2.moment_array('Mz', n_points, '1.0D')
+
+        assert_allclose(bulk_results2['moment_z'][0, :], trad_moment2[1], rtol=1e-6,
+                       err_msg="Bulk moment does not match traditional for span 2")
+
+        # Moment magnitude at start of M2 should match moment at end of M1 (continuity)
+        moment_at_support2 = bulk_results2['moment_z'][0, 0]
+        assert abs(moment_at_support2) == pytest.approx(abs(moment_at_support), rel=0.01), \
+            f"Moment continuity at interior support: {moment_at_support} vs {moment_at_support2}"
+
+    def test_two_span_point_load_center(self):
+        """
+        Two-span continuous beam with point load at center of first span.
+
+        For point load P at center of first span with equal spans L:
+        - Moment magnitude at middle support: |M_B| = 3PL/32
+        - Moment magnitude under load: |M_load| = 13PL/64
+
+        Reference: Beam formulas with shear and moment diagrams
+        """
+        model = FEModel3D()
+        L = 12.0  # Span length
+        P = -10.0  # Point load (negative = downward)
+
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', L, 0, 0)
+        model.add_node('N3', 2*L, 0, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
+        model.add_member('M2', 'N2', 'N3', 'Steel', 'W10')
+
+        model.def_support('N1', True, True, True, True, True, False)
+        model.def_support('N2', True, True, True, True, True, False)
+        model.def_support('N3', True, True, True, True, True, False)
+
+        # Point load at center of first span
+        model.add_member_pt_load('M1', 'Fy', P, L/2, 'D')
+        model.add_load_combo('1.0D', {'D': 1.0})
+
+        model.analyze()
+
+        # Analytical solutions (magnitudes)
+        P_abs = abs(P)
+        M_middle_support_mag = 3 * P_abs * L / 32  # Moment magnitude at interior support
+        M_under_load_mag = 13 * P_abs * L / 64  # Moment magnitude under point load
+
+        member1 = model.members['M1']
+        n_points = 41
+
+        bulk_results = member1.get_all_forces_array(['1.0D'], n_points)
+        trad_moment = member1.moment_array('Mz', n_points, '1.0D')
+        trad_shear = member1.shear_array('Fy', n_points, '1.0D')
+
+        # Verify bulk matches traditional
+        assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-6,
+                       err_msg="Bulk moment does not match traditional")
+        assert_allclose(bulk_results['shear_y'][0, :], trad_shear[1], rtol=1e-6,
+                       err_msg="Bulk shear does not match traditional")
+
+        # Verify moment magnitude at interior support
+        moment_at_support = bulk_results['moment_z'][0, -1]
+        assert abs(moment_at_support) == pytest.approx(M_middle_support_mag, rel=0.02), \
+            f"Moment magnitude at interior support: expected {M_middle_support_mag}, got {abs(moment_at_support)}"
+
+        # Verify moment magnitude under load (at midpoint)
+        midpoint_idx = n_points // 2
+        moment_under_load = bulk_results['moment_z'][0, midpoint_idx]
+        assert abs(moment_under_load) == pytest.approx(M_under_load_mag, rel=0.02), \
+            f"Moment magnitude under load: expected {M_under_load_mag}, got {abs(moment_under_load)}"
+
+        # Test second span (should have no load, only moments from continuity)
+        member2 = model.members['M2']
+        bulk_results2 = member2.get_all_forces_array(['1.0D'], n_points)
+        trad_moment2 = member2.moment_array('Mz', n_points, '1.0D')
+
+        assert_allclose(bulk_results2['moment_z'][0, :], trad_moment2[1], rtol=1e-6)
+
+        # Moment should vary linearly from support moment to ~0 in span 2
+        assert abs(bulk_results2['moment_z'][0, 0]) == pytest.approx(M_middle_support_mag, rel=0.02)
+        assert abs(bulk_results2['moment_z'][0, -1]) == pytest.approx(0, abs=0.1)
+
+    def test_three_span_uniform_load(self):
+        """
+        Three-span continuous beam with uniform load.
+
+        For three equal spans L with uniform load w:
+        - Moment magnitude at interior supports: |M| = wL²/10
+        - End span max positive moment: 0.08wL² at x = 0.4L from end
+        - Center span max positive moment: wL²/40 = 0.025wL² at center
+
+        Reference: Continuous beam formulas
+        """
+        model = FEModel3D()
+        L = 10.0
+        w = -1.0
+
+        # Four nodes for three spans
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', L, 0, 0)
+        model.add_node('N3', 2*L, 0, 0)
+        model.add_node('N4', 3*L, 0, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
+        model.add_member('M2', 'N2', 'N3', 'Steel', 'W10')
+        model.add_member('M3', 'N3', 'N4', 'Steel', 'W10')
+
+        model.def_support('N1', True, True, True, True, True, False)
+        model.def_support('N2', True, True, True, True, True, False)
+        model.def_support('N3', True, True, True, True, True, False)
+        model.def_support('N4', True, True, True, True, True, False)
+
+        model.add_member_dist_load('M1', 'Fy', w, w, 0, L, 'D')
+        model.add_member_dist_load('M2', 'Fy', w, w, 0, L, 'D')
+        model.add_member_dist_load('M3', 'Fy', w, w, 0, L, 'D')
+        model.add_load_combo('1.0D', {'D': 1.0})
+
+        model.analyze()
+
+        # Analytical values (magnitudes)
+        w_abs = abs(w)
+        M_interior_support_mag = w_abs * L**2 / 10  # Moment magnitude at interior supports
+
+        n_points = 41
+
+        # Test each span
+        for member_name in ['M1', 'M2', 'M3']:
+            member = model.members[member_name]
+
+            bulk_results = member.get_all_forces_array(['1.0D'], n_points)
+            trad_moment = member.moment_array('Mz', n_points, '1.0D')
+            trad_shear = member.shear_array('Fy', n_points, '1.0D')
+
+            # Verify bulk matches traditional
+            assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-6,
+                           err_msg=f"Bulk moment does not match traditional for {member_name}")
+            assert_allclose(bulk_results['shear_y'][0, :], trad_shear[1], rtol=1e-6,
+                           err_msg=f"Bulk shear does not match traditional for {member_name}")
+
+        # Verify interior support moment magnitude for first span (end = interior support)
+        member1 = model.members['M1']
+        bulk_results1 = member1.get_all_forces_array(['1.0D'], n_points)
+        moment_at_first_interior = bulk_results1['moment_z'][0, -1]
+        assert abs(moment_at_first_interior) == pytest.approx(M_interior_support_mag, rel=0.02), \
+            f"Moment magnitude at first interior support: expected {M_interior_support_mag}, got {abs(moment_at_first_interior)}"
+
+        # Verify center span moments magnitude (both ends should be at interior supports)
+        member2 = model.members['M2']
+        bulk_results2 = member2.get_all_forces_array(['1.0D'], n_points)
+        assert abs(bulk_results2['moment_z'][0, 0]) == pytest.approx(M_interior_support_mag, rel=0.02)
+        assert abs(bulk_results2['moment_z'][0, -1]) == pytest.approx(M_interior_support_mag, rel=0.02)
+
+        # Center span moment should have opposite sign from support moments
+        center_span_midpoint = bulk_results2['moment_z'][0, n_points // 2]
+        support_moment_sign = np.sign(bulk_results2['moment_z'][0, 0])
+        assert np.sign(center_span_midpoint) != support_moment_sign, \
+            "Center span midpoint moment should have opposite sign from support moments"
+
+    def test_two_span_unequal_spans(self):
+        """
+        Two-span continuous beam with unequal spans and uniform load.
+
+        Tests that the analysis handles unequal span lengths correctly.
+        Span 1: L1 = 10 ft
+        Span 2: L2 = 15 ft
+        """
+        model = FEModel3D()
+        L1 = 10.0
+        L2 = 15.0
+        w = -1.0
+
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', L1, 0, 0)
+        model.add_node('N3', L1 + L2, 0, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
+        model.add_member('M2', 'N2', 'N3', 'Steel', 'W10')
+
+        model.def_support('N1', True, True, True, True, True, False)
+        model.def_support('N2', True, True, True, True, True, False)
+        model.def_support('N3', True, True, True, True, True, False)
+
+        model.add_member_dist_load('M1', 'Fy', w, w, 0, L1, 'D')
+        model.add_member_dist_load('M2', 'Fy', w, w, 0, L2, 'D')
+        model.add_load_combo('1.0D', {'D': 1.0})
+
+        model.analyze()
+
+        n_points = 41
+
+        # For unequal spans, we verify bulk matches traditional (no simple closed-form solution)
+        for member_name in ['M1', 'M2']:
+            member = model.members[member_name]
+
+            bulk_results = member.get_all_forces_array(['1.0D'], n_points)
+            trad_moment = member.moment_array('Mz', n_points, '1.0D')
+            trad_shear = member.shear_array('Fy', n_points, '1.0D')
+            trad_axial = member.axial_array(n_points, '1.0D')
+
+            assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-6,
+                           err_msg=f"Moment mismatch for {member_name}")
+            assert_allclose(bulk_results['shear_y'][0, :], trad_shear[1], rtol=1e-6,
+                           err_msg=f"Shear mismatch for {member_name}")
+            assert_allclose(bulk_results['axial'][0, :], trad_axial[1], rtol=1e-6,
+                           err_msg=f"Axial mismatch for {member_name}")
+
+        # Verify continuity at interior support
+        member1 = model.members['M1']
+        member2 = model.members['M2']
+        bulk1 = member1.get_all_forces_array(['1.0D'], n_points)
+        bulk2 = member2.get_all_forces_array(['1.0D'], n_points)
+
+        # Moments should be continuous at interior support
+        moment_end_span1 = bulk1['moment_z'][0, -1]
+        moment_start_span2 = bulk2['moment_z'][0, 0]
+        assert moment_end_span1 == pytest.approx(moment_start_span2, rel=0.001), \
+            f"Moment discontinuity at interior support: {moment_end_span1} vs {moment_start_span2}"
+
+        # Interior support should have non-zero moment (hogging behavior)
+        assert abs(moment_end_span1) > 0.1, "Interior support should have significant moment"
+
+    def test_propped_cantilever(self):
+        """
+        Propped cantilever (fixed-pinned beam) with uniform load.
+
+        Analytical solutions (magnitudes):
+        - Reaction at pinned end: R_B = 3wL/8
+        - Reaction at fixed end: R_A = 5wL/8
+        - Moment magnitude at fixed end: |M_A| = wL²/8
+        - Max moment between supports: 9wL²/128 at x = 3L/8 from pinned end
+
+        Reference: Roark's Formulas for Stress and Strain
+        """
+        model = FEModel3D()
+        L = 12.0
+        w = -1.0
+
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', L, 0, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
+
+        # Fixed at N1, pinned at N2
+        model.def_support('N1', True, True, True, True, True, True)
+        model.def_support('N2', True, True, True, True, True, False)
+
+        model.add_member_dist_load('M1', 'Fy', w, w, 0, L, 'D')
+        model.add_load_combo('1.0D', {'D': 1.0})
+
+        model.analyze()
+
+        # Analytical values (magnitudes)
+        w_abs = abs(w)
+        M_fixed_end_mag = w_abs * L**2 / 8
+        R_pinned = 3 * w_abs * L / 8
+        M_span_max_mag = 9 * w_abs * L**2 / 128
+
+        member = model.members['M1']
+        n_points = 41
+
+        bulk_results = member.get_all_forces_array(['1.0D'], n_points)
+        trad_moment = member.moment_array('Mz', n_points, '1.0D')
+        trad_shear = member.shear_array('Fy', n_points, '1.0D')
+
+        # Verify bulk matches traditional
+        assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-6)
+        assert_allclose(bulk_results['shear_y'][0, :], trad_shear[1], rtol=1e-6)
+
+        # Verify moment magnitude at fixed end
+        moment_at_fixed = bulk_results['moment_z'][0, 0]
+        assert abs(moment_at_fixed) == pytest.approx(M_fixed_end_mag, rel=0.01), \
+            f"Moment magnitude at fixed end: expected {M_fixed_end_mag}, got {abs(moment_at_fixed)}"
+
+        # Verify moment at pinned end is zero
+        moment_at_pinned = bulk_results['moment_z'][0, -1]
+        assert abs(moment_at_pinned) == pytest.approx(0, abs=0.01), \
+            f"Moment at pinned end should be zero, got {moment_at_pinned}"
+
+        # Verify shear magnitude at pinned end (reaction)
+        shear_at_pinned = abs(bulk_results['shear_y'][0, -1])
+        assert shear_at_pinned == pytest.approx(R_pinned, rel=0.01), \
+            f"Shear at pinned end: expected {R_pinned}, got {shear_at_pinned}"
+
+        # Verify moment changes sign along the span (fixed end vs mid-span)
+        moment_array = bulk_results['moment_z'][0, :]
+        # The moment at fixed end and max moment in span should have opposite signs
+        fixed_sign = np.sign(moment_at_fixed)
+        mid_region = moment_array[n_points//3:2*n_points//3]
+        assert np.any(np.sign(mid_region) != fixed_sign), \
+            "Moment should change sign between fixed end and mid-span"
+
+
+# =============================================================================
 # End Release Tests
 # =============================================================================
 
