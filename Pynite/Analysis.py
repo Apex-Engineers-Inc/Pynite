@@ -51,10 +51,17 @@ def _prepare_model(model: FEModel3D) -> None:
         for combo_name in model.load_combos.keys():
             spring.active[combo_name] = True
 
-    # Activate all physical members for all load combinations
+    # Activate all physical members for all load combinations and clear result caches
     for phys_member in model.members.values():
         for combo_name in model.load_combos.keys():
             phys_member.active[combo_name] = True
+        # Clear result caches but keep geometry caches (T, k, L)
+        if hasattr(phys_member, '_clear_results_cache'):
+            phys_member._clear_results_cache()
+        # Clear caches for sub-members too
+        for sub_member in phys_member.sub_members.values():
+            if hasattr(sub_member, '_clear_results_cache'):
+                sub_member._clear_results_cache()
 
     # Assign an internal ID to all nodes and elements in the model. This number is different from the name used by the user to identify nodes and elements.
     _renumber(model)
@@ -658,9 +665,14 @@ def _check_TC_convergence(model: FEModel3D, combo_name: str = "Combo 1", log: bo
                 # Flag the analysis as not converged
                 convergence = False
 
-        # Reset the sub-member's flag to unsolved. This will allow it to resolve for the same load combination after subsequent iterations have made further changes.
+        # Reset the sub-member's flag to unsolved and clear result caches.
+        # This will allow it to resolve for the same load combination after subsequent
+        # iterations have made further changes, with fresh displacement/force values.
         for sub_member in phys_member.sub_members.values():
             sub_member._solved_combo = None
+            # Clear result caches (d, f, fer) but keep geometry caches (T, k, L)
+            if hasattr(sub_member, '_clear_results_cache'):
+                sub_member._clear_results_cache()
 
     # Return whether the TC analysis has converged
     return convergence
