@@ -8,13 +8,17 @@ results that match:
 3. Results across various loading conditions
 """
 
-import unittest
+import pytest
 import numpy as np
 from numpy.testing import assert_allclose
 from Pynite import FEModel3D
 
 
-class TestSimplySuportedBeamAnalytical(unittest.TestCase):
+# =============================================================================
+# Analytical Solution Tests
+# =============================================================================
+
+class TestSimplySuportedBeamAnalytical:
     """Test internal forces against known analytical solutions for simply supported beams."""
 
     def test_uniform_load_simply_supported(self):
@@ -27,7 +31,6 @@ class TestSimplySuportedBeamAnalytical(unittest.TestCase):
         - Shear at midspan: V = 0
         - Moment at supports: M = 0
         """
-        # Create model
         model = FEModel3D()
         L = 10.0  # Length in feet
         w = -1.0  # Uniform load (negative = downward in local y)
@@ -60,7 +63,6 @@ class TestSimplySuportedBeamAnalytical(unittest.TestCase):
         # Get bulk results
         bulk_results = member.get_all_forces_array(combo_names, n_points)
 
-        x = bulk_results['x']
         shear = bulk_results['shear_y'][0, :]
         moment = bulk_results['moment_z'][0, :]
 
@@ -77,14 +79,12 @@ class TestSimplySuportedBeamAnalytical(unittest.TestCase):
         M_max_analytical = abs(w) * L**2 / 8
         M_max_computed = np.max(np.abs(moment))
 
-        self.assertAlmostEqual(M_max_computed, M_max_analytical, places=5,
-                              msg="Max moment does not match wL^2/8")
+        assert M_max_computed == pytest.approx(M_max_analytical, rel=1e-5), \
+            "Max moment does not match wL^2/8"
 
         # Verify shear at supports and midspan
-        # At x=0: |V| = |w|*L/2 = 5
-        # At midspan: V ≈ 0
-        self.assertAlmostEqual(np.abs(shear[0]), abs(w) * L / 2, places=5)
-        self.assertAlmostEqual(shear[n_points // 2], 0, places=5)
+        assert np.abs(shear[0]) == pytest.approx(abs(w) * L / 2, rel=1e-5)
+        assert shear[n_points // 2] == pytest.approx(0, abs=1e-5)
 
     def test_point_load_at_midspan(self):
         """
@@ -133,7 +133,7 @@ class TestSimplySuportedBeamAnalytical(unittest.TestCase):
         # Verify max moment magnitude = |P|*L/4
         M_max_analytical = abs(P) * L / 4
         M_max_computed = np.max(np.abs(bulk_results['moment_z'][0, :]))
-        self.assertAlmostEqual(M_max_computed, M_max_analytical, places=3)
+        assert M_max_computed == pytest.approx(M_max_analytical, rel=1e-3)
 
     def test_cantilever_with_end_load(self):
         """
@@ -168,13 +168,9 @@ class TestSimplySuportedBeamAnalytical(unittest.TestCase):
         member = model.members['M1']
         bulk_results = member.get_all_forces_array(['1.0D'], 21)
 
-        x = bulk_results['x']
         shear = bulk_results['shear_y'][0, :]
         moment = bulk_results['moment_z'][0, :]
 
-        # Analytical: Shear is constant = -P (reaction)
-        # Moment varies linearly: M(x) = -P*(L-x) at fixed end to 0 at free end
-        # Note: Convention may differ, check against traditional
         trad_shear = member.shear_array('Fy', 21, '1.0D')
         trad_moment = member.moment_array('Mz', 21, '1.0D')
 
@@ -182,7 +178,11 @@ class TestSimplySuportedBeamAnalytical(unittest.TestCase):
         assert_allclose(moment, trad_moment[1], rtol=1e-6)
 
 
-class TestBulkVsTraditionalExtraction(unittest.TestCase):
+# =============================================================================
+# Bulk vs Traditional Extraction Tests
+# =============================================================================
+
+class TestBulkVsTraditionalExtraction:
     """Test that bulk extraction matches traditional segment-based extraction."""
 
     def test_multiple_load_combinations(self):
@@ -338,7 +338,11 @@ class TestBulkVsTraditionalExtraction(unittest.TestCase):
                        err_msg="Torque mismatch")
 
 
-class TestWallDesignScenario(unittest.TestCase):
+# =============================================================================
+# Wall Design Scenario Tests
+# =============================================================================
+
+class TestWallDesignScenario:
     """Test the specific wood wall design scenario."""
 
     def test_wall_stud_forces(self):
@@ -473,7 +477,11 @@ class TestWallDesignScenario(unittest.TestCase):
                                err_msg=f"Torque mismatch for {member_name} - {combo_name}")
 
 
-class TestEdgeCases(unittest.TestCase):
+# =============================================================================
+# Edge Case Tests
+# =============================================================================
+
+class TestEdgeCases:
     """Test edge cases and boundary conditions."""
 
     def test_no_loads(self):
@@ -528,8 +536,8 @@ class TestEdgeCases(unittest.TestCase):
         bulk_results = member.get_all_forces_array(['1.0D'], 1)
 
         # Should have exactly 1 point
-        self.assertEqual(bulk_results['shear_y'].shape, (1, 1))
-        self.assertEqual(bulk_results['moment_z'].shape, (1, 1))
+        assert bulk_results['shear_y'].shape == (1, 1)
+        assert bulk_results['moment_z'].shape == (1, 1)
 
     def test_many_points(self):
         """Test extraction with many points."""
@@ -593,7 +601,11 @@ class TestEdgeCases(unittest.TestCase):
         assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-4)
 
 
-class TestEndReleases(unittest.TestCase):
+# =============================================================================
+# End Release Tests
+# =============================================================================
+
+class TestEndReleases:
     """Test members with end releases."""
 
     def test_pinned_end(self):
@@ -636,7 +648,3 @@ class TestEndReleases(unittest.TestCase):
                            err_msg=f"Shear mismatch for {member_name}")
             assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-4,
                            err_msg=f"Moment mismatch for {member_name}")
-
-
-if __name__ == '__main__':
-    unittest.main()
