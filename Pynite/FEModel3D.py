@@ -2119,7 +2119,7 @@ class FEModel3D():
         
         # Import `scipy` features if the sparse solver is being used
         if sparse == True:
-            from scipy.sparse.linalg import spsolve
+            from scipy.sparse.linalg import splu
 
         # Prepare the model for analysis
         Analysis._prepare_model(self)
@@ -2138,6 +2138,24 @@ class FEModel3D():
         # Identify which load combinations have the tags the user has given
         combo_list = Analysis._identify_combos(self, combo_tags)
 
+        # Factorize K11 once for all load combinations (major optimization)
+        # LU factorization is O(n³), back-substitution is O(n²)
+        # By factorizing once, we avoid repeating the expensive O(n³) operation
+        K11_factored = None
+        K12_csr = None
+        if K11.shape != (0, 0):
+            try:
+                if sparse == True:
+                    # Sparse LU factorization - factorize once, solve many times
+                    K11_factored = splu(K11.tocsc())
+                    K12_csr = K12.tocsr()
+                else:
+                    # Dense LU factorization
+                    from scipy.linalg import lu_factor
+                    K11_factored = lu_factor(K11)
+            except:
+                raise Exception('The stiffness matrix is singular, which implies rigid body motion. The structure is unstable. Aborting analysis.')
+
         # Step through each load combination
         for combo in combo_list:
 
@@ -2148,8 +2166,8 @@ class FEModel3D():
             # Get the partitioned global fixed end reaction vector
             FER1, FER2 = Analysis._partition(self, self.FER(combo.name), D1_indices, D2_indices)
 
-            # Get the partitioned global nodal force vector       
-            P1, P2 = Analysis._partition(self, self.P(combo.name), D1_indices, D2_indices)          
+            # Get the partitioned global nodal force vector
+            P1, P2 = Analysis._partition(self, self.P(combo.name), D1_indices, D2_indices)
 
             # Calculate the global displacement vector
             if log:
@@ -2158,20 +2176,19 @@ class FEModel3D():
                 # All displacements are known, so D1 is an empty vector
                 D1 = []
             else:
-                try:
-                    # Calculate the unknown displacements D1
-                    if sparse == True:
-                        # The partitioned stiffness matrix is in `lil` format, which is great
-                        # for memory, but slow for mathematical operations. The stiffness
-                        # matrix will be converted to `csr` format for mathematical operations.
-                        # The `@` operator performs matrix multiplication on sparse matrices.
-                        D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2))
-                        D1 = D1.reshape(len(D1), 1)
-                    else:
-                        D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
-                except:
-                    # Return out of the method if 'K' is singular and provide an error message
-                    raise Exception('The stiffness matrix is singular, which implies rigid body motion. The structure is unstable. Aborting analysis.')
+                # Build the right-hand side vector
+                if sparse == True:
+                    RHS = subtract(subtract(P1, FER1), K12_csr @ D2)
+                else:
+                    RHS = subtract(subtract(P1, FER1), matmul(K12, D2))
+
+                # Solve using pre-factored matrix (O(n²) back-substitution only)
+                if sparse == True:
+                    D1 = K11_factored.solve(RHS.flatten())
+                    D1 = D1.reshape(len(D1), 1)
+                else:
+                    from scipy.linalg import lu_solve
+                    D1 = lu_solve(K11_factored, RHS)
 
             # Store the calculated displacements to the model and the nodes in the model
             Analysis._store_displacements(self, D1, D2, D1_indices, D2_indices, combo)
