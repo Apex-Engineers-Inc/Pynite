@@ -2677,11 +2677,15 @@ class FEModel3D():
             # Result f_batch: (12, n_members, n_combos)
             f_batch = einsum('ij,jmc->imc', k, d_batch)
 
-            # Add fixed end reactions for each member
+            # Pre-compute all fer values and add as batched array
+            # Build fer_batch: (12, n_members, n_combos)
+            fer_batch = empty((12, n_members, n_combos))
             for m_idx, member in enumerate(group_members):
                 for c_idx, combo_name in enumerate(combo_names):
-                    fer = member.fer(combo_name)
-                    f_batch[:, m_idx, c_idx] += fer.flatten()
+                    fer_batch[:, m_idx, c_idx] = member.fer(combo_name).flatten()
+
+            # Single array addition instead of nested loop updates
+            f_batch += fer_batch
 
             # Now compute forces along each member using analytical formulas
             x = linspace(0, L, n_points)
