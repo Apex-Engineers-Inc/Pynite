@@ -1038,3 +1038,327 @@ class TestEndReleases:
                            err_msg=f"Shear mismatch for {member_name}")
             assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-4,
                            err_msg=f"Moment mismatch for {member_name}")
+
+
+# =============================================================================
+# Model-Level Batch Extraction Tests
+# =============================================================================
+
+class TestModelLevelExtraction:
+    """Test model-level batch extraction methods."""
+
+    def test_get_all_member_forces_basic(self):
+        """Test basic model-level extraction returns correct structure."""
+        model = FEModel3D()
+
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 10, 0, 0)
+        model.add_node('N3', 20, 0, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
+        model.add_member('M2', 'N2', 'N3', 'Steel', 'W10')
+
+        model.def_support('N1', True, True, True, True, True, True)
+        model.def_support('N3', True, True, True, True, True, True)
+
+        model.add_member_dist_load('M1', 'Fy', -1, -1, 0, 10, 'D')
+        model.add_member_dist_load('M2', 'Fy', -1, -1, 0, 10, 'D')
+        model.add_load_combo('1.0D', {'D': 1.0})
+
+        model.analyze()
+
+        # Test model-level extraction
+        all_forces = model.get_all_member_forces(['1.0D'], n_points=21)
+
+        # Check structure
+        assert 'M1' in all_forces
+        assert 'M2' in all_forces
+        assert 'x' in all_forces['M1']
+        assert 'shear_y' in all_forces['M1']
+        assert 'moment_z' in all_forces['M1']
+        assert 'axial' in all_forces['M1']
+        assert 'torque' in all_forces['M1']
+
+        # Check shapes
+        assert all_forces['M1']['x'].shape == (21,)
+        assert all_forces['M1']['shear_y'].shape == (1, 21)
+        assert all_forces['M1']['moment_z'].shape == (1, 21)
+
+    def test_get_all_member_forces_matches_individual(self):
+        """Test that model-level extraction matches individual member extraction."""
+        model = FEModel3D()
+
+        # Create a simple wall-like structure
+        wall_height = 96  # 8 ft in inches
+        stud_spacing = 16
+
+        model.add_material('Wood', 1400, 100, 35/12**3, 35/12**3)
+        model.add_section('2x4', 5.25, 5.36, 0.98, 0.5)
+
+        n_studs = 5
+        for i in range(n_studs):
+            x = i * stud_spacing
+            model.add_node(f'B{i}', x, 0, 0)
+            model.add_node(f'T{i}', x, wall_height, 0)
+            model.add_member(f'Stud_{i}', f'B{i}', f'T{i}', 'Wood', '2x4')
+            model.def_support(f'B{i}', True, True, True, True, True, True)
+
+        # Add loads
+        for i in range(n_studs):
+            model.add_node_load(f'T{i}', 'FY', -200, 'D')
+            model.add_member_dist_load(f'Stud_{i}', 'Fz', 0.05, 0.05, 0, wall_height, 'W')
+
+        model.add_load_combo('1.2D+W', {'D': 1.2, 'W': 1.0})
+        model.add_load_combo('1.4D', {'D': 1.4})
+
+        model.analyze()
+
+        combo_names = ['1.2D+W', '1.4D']
+        n_points = 20
+
+        # Get model-level results
+        all_forces = model.get_all_member_forces(combo_names, n_points=n_points)
+
+        # Compare with individual extraction
+        for i in range(n_studs):
+            member_name = f'Stud_{i}'
+            member = model.members[member_name]
+
+            individual = member.get_all_forces_array(combo_names, n_points)
+
+            assert_allclose(all_forces[member_name]['x'], individual['x'], rtol=1e-10,
+                           err_msg=f"x mismatch for {member_name}")
+            assert_allclose(all_forces[member_name]['shear_y'], individual['shear_y'], rtol=1e-10,
+                           err_msg=f"shear_y mismatch for {member_name}")
+            assert_allclose(all_forces[member_name]['moment_z'], individual['moment_z'], rtol=1e-10,
+                           err_msg=f"moment_z mismatch for {member_name}")
+            assert_allclose(all_forces[member_name]['axial'], individual['axial'], rtol=1e-10,
+                           err_msg=f"axial mismatch for {member_name}")
+            assert_allclose(all_forces[member_name]['torque'], individual['torque'], rtol=1e-10,
+                           err_msg=f"torque mismatch for {member_name}")
+
+    def test_get_all_member_forces_array_structure(self):
+        """Test that array-based extraction returns correct 3D array structure."""
+        model = FEModel3D()
+
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 10, 0, 0)
+        model.add_node('N3', 20, 0, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
+        model.add_member('M2', 'N2', 'N3', 'Steel', 'W10')
+
+        model.def_support('N1', True, True, True, True, True, True)
+        model.def_support('N3', True, True, True, True, True, True)
+
+        model.add_member_dist_load('M1', 'Fy', -1, -1, 0, 10, 'D')
+        model.add_member_dist_load('M2', 'Fy', -1, -1, 0, 10, 'D')
+        model.add_load_combo('Combo1', {'D': 1.0})
+        model.add_load_combo('Combo2', {'D': 1.4})
+
+        model.analyze()
+
+        n_points = 15
+        combo_names = ['Combo1', 'Combo2']
+        member_names = ['M1', 'M2']
+
+        forces = model.get_all_member_forces_array(combo_names, member_names, n_points)
+
+        # Check metadata
+        assert forces['member_names'] == member_names
+        assert forces['combo_names'] == combo_names
+
+        # Check array shapes: (n_members, n_combos, n_points)
+        assert forces['x'].shape == (2, 15)  # x is (n_members, n_points)
+        assert forces['shear_y'].shape == (2, 2, 15)
+        assert forces['moment_z'].shape == (2, 2, 15)
+        assert forces['axial'].shape == (2, 2, 15)
+        assert forces['torque'].shape == (2, 2, 15)
+
+    def test_get_all_member_forces_array_values(self):
+        """Test that array-based extraction values match individual extraction."""
+        model = FEModel3D()
+
+        # Create 3 members
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 10, 0, 0)
+        model.add_node('N3', 20, 0, 0)
+        model.add_node('N4', 30, 0, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
+        model.add_member('M2', 'N2', 'N3', 'Steel', 'W10')
+        model.add_member('M3', 'N3', 'N4', 'Steel', 'W10')
+
+        model.def_support('N1', True, True, True, True, True, True)
+        model.def_support('N4', True, True, True, True, True, True)
+
+        model.add_member_dist_load('M1', 'Fy', -1, -1, 0, 10, 'D')
+        model.add_member_dist_load('M2', 'Fy', -2, -2, 0, 10, 'L')
+        model.add_member_pt_load('M3', 'Fy', -5, 5, 'D')
+
+        model.add_load_combo('1.4D', {'D': 1.4})
+        model.add_load_combo('1.2D+1.6L', {'D': 1.2, 'L': 1.6})
+
+        model.analyze()
+
+        combo_names = ['1.4D', '1.2D+1.6L']
+        member_names = ['M1', 'M2', 'M3']
+        n_points = 21
+
+        # Get array-based results
+        forces = model.get_all_member_forces_array(combo_names, member_names, n_points)
+
+        # Compare with individual extraction
+        for i, member_name in enumerate(member_names):
+            member = model.members[member_name]
+            individual = member.get_all_forces_array(combo_names, n_points)
+
+            assert_allclose(forces['x'][i, :], individual['x'], rtol=1e-10,
+                           err_msg=f"x mismatch for {member_name}")
+            assert_allclose(forces['shear_y'][i, :, :], individual['shear_y'], rtol=1e-10,
+                           err_msg=f"shear_y mismatch for {member_name}")
+            assert_allclose(forces['moment_z'][i, :, :], individual['moment_z'], rtol=1e-10,
+                           err_msg=f"moment_z mismatch for {member_name}")
+            assert_allclose(forces['axial'][i, :, :], individual['axial'], rtol=1e-10,
+                           err_msg=f"axial mismatch for {member_name}")
+            assert_allclose(forces['torque'][i, :, :], individual['torque'], rtol=1e-10,
+                           err_msg=f"torque mismatch for {member_name}")
+
+    def test_default_parameters(self):
+        """Test that default parameters work correctly (all combos, all members)."""
+        model = FEModel3D()
+
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 10, 0, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
+
+        model.def_support('N1', True, True, True, True, True, True)
+        model.def_support('N2', True, True, True, False, False, False)
+
+        model.add_member_dist_load('M1', 'Fy', -1, -1, 0, 10, 'D')
+        model.add_load_combo('Combo1', {'D': 1.0})
+        model.add_load_combo('Combo2', {'D': 1.4})
+
+        model.analyze()
+
+        # Test with defaults (no arguments)
+        forces_dict = model.get_all_member_forces()
+        forces_array = model.get_all_member_forces_array()
+
+        # Should have all members
+        assert 'M1' in forces_dict
+        assert len(forces_dict) == 1
+
+        # Should have all combos
+        assert forces_dict['M1']['shear_y'].shape[0] == 2
+        assert forces_array['shear_y'].shape[1] == 2
+
+    def test_subset_of_members(self):
+        """Test extraction for a subset of members."""
+        model = FEModel3D()
+
+        # Create 5 members
+        for i in range(6):
+            model.add_node(f'N{i}', i * 10, 0, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+
+        for i in range(5):
+            model.add_member(f'M{i}', f'N{i}', f'N{i+1}', 'Steel', 'W10')
+
+        model.def_support('N0', True, True, True, True, True, True)
+        model.def_support('N5', True, True, True, True, True, True)
+
+        model.add_load_combo('Combo1', {'D': 1.0})
+        model.analyze()
+
+        # Extract only 2 members
+        subset = ['M1', 'M3']
+        forces = model.get_all_member_forces(member_names=subset)
+        forces_arr = model.get_all_member_forces_array(member_names=subset)
+
+        assert len(forces) == 2
+        assert 'M1' in forces
+        assert 'M3' in forces
+        assert 'M0' not in forces
+
+        assert forces_arr['member_names'] == subset
+        assert forces_arr['shear_y'].shape[0] == 2
+
+    def test_wall_design_scenario(self):
+        """Test model-level extraction on a realistic wall design scenario."""
+        model = FEModel3D()
+
+        # Wall parameters
+        wall_height = 8 * 12  # 8 ft in inches
+        stud_spacing = 16     # 16" OC
+        wall_length = 8 * 12  # 8 ft
+
+        model.add_material('Wood', 1400, 100, 35/12**3, 35/12**3)
+        model.add_section('2x4', 5.25, 5.36, 0.98, 0.5)
+        model.add_section('2x6', 8.25, 20.8, 1.55, 0.8)
+
+        n_studs = int(wall_length / stud_spacing) + 1
+
+        # Create studs
+        for i in range(n_studs):
+            x = i * stud_spacing
+            model.add_node(f'B{i}', x, 0, 0)
+            model.add_node(f'T{i}', x, wall_height, 0)
+            model.add_member(f'Stud_{i}', f'B{i}', f'T{i}', 'Wood', '2x4')
+            model.def_support(f'B{i}', True, True, True, True, True, True)
+
+        # Create plates
+        for i in range(n_studs - 1):
+            model.add_member(f'Bot_{i}', f'B{i}', f'B{i+1}', 'Wood', '2x6')
+            model.add_member(f'Top_{i}', f'T{i}', f'T{i+1}', 'Wood', '2x6')
+
+        # Add loads
+        for i in range(n_studs):
+            model.add_node_load(f'T{i}', 'FY', -200, 'D')
+            model.add_node_load(f'T{i}', 'FY', -100, 'L')
+            model.add_member_dist_load(f'Stud_{i}', 'Fz', 0.05, 0.05, 0, wall_height, 'W')
+
+        # Load combinations
+        model.add_load_combo('1.4D', {'D': 1.4})
+        model.add_load_combo('1.2D+1.6L', {'D': 1.2, 'L': 1.6})
+        model.add_load_combo('1.2D+L+W', {'D': 1.2, 'L': 1.0, 'W': 1.0})
+
+        model.analyze()
+
+        # Test model-level extraction
+        combo_names = list(model.load_combos.keys())
+        n_points = 20
+
+        all_forces = model.get_all_member_forces(combo_names, n_points=n_points)
+        all_forces_arr = model.get_all_member_forces_array(combo_names, n_points=n_points)
+
+        # Verify all members are present
+        assert len(all_forces) == len(model.members)
+
+        # Verify array shapes
+        n_members = len(model.members)
+        n_combos = len(combo_names)
+        assert all_forces_arr['shear_y'].shape == (n_members, n_combos, n_points)
+
+        # Verify studs have expected properties (axial loading)
+        for i in range(n_studs):
+            stud_name = f'Stud_{i}'
+            # Studs should have significant axial force from gravity loads
+            # Sign convention may vary based on member orientation
+            axial = all_forces[stud_name]['axial']
+            assert np.any(np.abs(axial) > 100), f"{stud_name} should have significant axial force"
