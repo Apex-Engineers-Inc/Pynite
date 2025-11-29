@@ -2545,12 +2545,10 @@ class FEModel3D():
         n_points: int = 20
     ) -> Dict[str, Dict[str, NDArray[float64]]]:
         """
-        Extract internal forces for multiple members in a single optimized call.
+        Extract internal forces for multiple members in a single call.
 
-        This method is optimized for bulk extraction by:
-        1. Grouping members by section for batched matrix operations
-        2. Pre-allocating output arrays for all members
-        3. Minimizing Python loop overhead
+        This provides a convenient API for extracting forces from all members
+        at once, returning results in a nested dictionary structure.
 
         Parameters
         ----------
@@ -2576,43 +2574,19 @@ class FEModel3D():
 
         Notes
         -----
-        For best performance on wall-type structures with many identical members,
-        this method groups members by section and uses vectorized operations.
+        This method uses the optimized per-member extraction which includes
+        caching and vectorized operations. Performance scales linearly with
+        the number of members.
         """
-        from collections import defaultdict
-        from numpy import empty, linspace, einsum, zeros
-
         # Default to all combos and all members
         if combo_names is None:
             combo_names = list(self.load_combos.keys())
         if member_names is None:
             member_names = list(self.members.keys())
 
-        n_combos = len(combo_names)
-        members_to_process = [self.members[name] for name in member_names]
-
-        # Group members by (material, section, length) for batched processing
-        # Members with same section AND length can share more computation
-        section_groups: Dict[tuple, List] = defaultdict(list)
-        for member in members_to_process:
-            # Key by material, section - members with same section have same k matrix
-            key = (member.material.name, member.section.name)
-            section_groups[key].append(member)
-
-        # Results dictionary
         results: Dict[str, Dict[str, NDArray[float64]]] = {}
-
-        # Process each section group
-        for (mat_name, sec_name), group_members in section_groups.items():
-            # Get shared stiffness matrix for this section group
-            # Note: k depends on E, I, A, J, L - so only members with same L can truly share
-            # For now, we still call per-member but benefit from reduced Python overhead
-
-            for member in group_members:
-                # Use the optimized per-member extraction
-                # This already uses fast path for simple members
-                member_results = member.get_all_forces_array(combo_names, n_points)
-                results[member.name] = member_results
+        for name in member_names:
+            results[name] = self.members[name].get_all_forces_array(combo_names, n_points)
 
         return results
 
@@ -2625,8 +2599,8 @@ class FEModel3D():
         """
         Extract internal forces for all members as stacked 3D arrays.
 
-        This is the most efficient method for processing many members, returning
-        contiguous arrays suitable for vectorized downstream operations.
+        Returns contiguous arrays suitable for vectorized downstream operations
+        like finding max forces across all members.
 
         Parameters
         ----------
@@ -2661,10 +2635,10 @@ class FEModel3D():
 
         Notes
         -----
-        This method pre-allocates all output arrays and fills them in a single pass,
-        providing better memory locality and enabling vectorized downstream processing.
+        This method uses the optimized per-member extraction and stacks results
+        into contiguous arrays for efficient downstream processing.
         """
-        from numpy import empty, zeros
+        from numpy import empty
 
         # Default to all combos and all members
         if combo_names is None:
@@ -2675,6 +2649,9 @@ class FEModel3D():
         n_members = len(member_names)
         n_combos = len(combo_names)
 
+        # Get per-member results
+        forces_dict = self.get_all_member_forces(combo_names, member_names, n_points)
+
         # Pre-allocate output arrays
         x_all = empty((n_members, n_points))
         shear_y_all = empty((n_members, n_combos, n_points))
@@ -2682,11 +2659,9 @@ class FEModel3D():
         axial_all = empty((n_members, n_combos, n_points))
         torque_all = empty((n_members, n_combos, n_points))
 
-        # Extract forces for each member
+        # Stack results into contiguous arrays
         for i, member_name in enumerate(member_names):
-            member = self.members[member_name]
-            forces = member.get_all_forces_array(combo_names, n_points)
-
+            forces = forces_dict[member_name]
             x_all[i, :] = forces['x']
             shear_y_all[i, :, :] = forces['shear_y']
             moment_z_all[i, :, :] = forces['moment_z']
