@@ -2625,7 +2625,14 @@ class FEModel3D():
             else:
                 dir_key = (0, 0, 0, 0)
 
-            key = (mat_name, sec_name, L_rounded, dir_key)
+            # Include end releases - they affect the condensed stiffness matrix
+            # Releases is a list of bools for each DOF
+            releases_key = tuple(member.Releases)
+
+            # Include tension/compression flags - they affect active state per combo
+            tc_key = (member.tension_only, member.comp_only)
+
+            key = (mat_name, sec_name, L_rounded, dir_key, releases_key, tc_key)
             section_groups[key].append(member)
 
         # Process each group with batched operations
@@ -2777,6 +2784,15 @@ class FEModel3D():
                 # Torque is constant
                 torque_arr = empty((n_combos, n_points))
                 torque_arr[:] = T1_all[:, None]
+
+                # Zero out forces for inactive members (tension/compression-only)
+                is_active = member.active
+                for c_idx, combo_name in enumerate(combo_names):
+                    if not is_active.get(combo_name, True):
+                        shear_y[c_idx, :] = 0.0
+                        moment_z[c_idx, :] = 0.0
+                        axial_arr[c_idx, :] = 0.0
+                        torque_arr[c_idx, :] = 0.0
 
                 results[member.name] = {
                     'x': x.copy(),

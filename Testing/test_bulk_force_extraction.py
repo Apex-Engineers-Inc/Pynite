@@ -1362,3 +1362,333 @@ class TestModelLevelExtraction:
             # Sign convention may vary based on member orientation
             axial = all_forces[stud_name]['axial']
             assert np.any(np.abs(axial) > 100), f"{stud_name} should have significant axial force"
+
+
+# =============================================================================
+# Edge Case Tests for Model-Level Extraction Bugs
+# =============================================================================
+
+class TestEndReleaseGrouping:
+    """Test that members with different end releases are NOT grouped together."""
+
+    def test_different_end_releases_separate_groups(self):
+        """
+        Members with different end releases should produce different results.
+
+        The condensed stiffness matrix k depends on end releases. If two members
+        have different end releases, they MUST NOT share the same k matrix.
+        """
+        model = FEModel3D()
+        L = 10.0
+
+        # Create nodes for two separate beams
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', L, 0, 0)
+        model.add_node('N3', 0, 0, 10)  # Second beam offset in Z
+        model.add_node('N4', L, 0, 10)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+
+        # Two beams with same material, section, length, orientation
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
+        model.add_member('M2', 'N3', 'N4', 'Steel', 'W10')
+
+        # Release M2's i-end moment about z-axis (pinned connection)
+        # This changes the condensed stiffness matrix
+        model.def_releases('M2', Rzi=True)
+
+        # Fixed supports
+        model.def_support('N1', True, True, True, True, True, True)
+        model.def_support('N2', True, True, True, True, True, True)
+        model.def_support('N3', True, True, True, True, True, True)
+        model.def_support('N4', True, True, True, True, True, True)
+
+        # Apply same load to both members
+        model.add_member_dist_load('M1', 'Fy', -1.0, -1.0, 0, L, 'D')
+        model.add_member_dist_load('M2', 'Fy', -1.0, -1.0, 0, L, 'D')
+        model.add_load_combo('1.0D', {'D': 1.0})
+
+        model.analyze()
+
+        # Get results via model-level extraction
+        all_forces = model.get_all_member_forces(['1.0D'], n_points=21)
+
+        # Get results via individual member extraction (ground truth)
+        m1_individual = model.members['M1'].get_all_forces_array(['1.0D'], 21)
+        m2_individual = model.members['M2'].get_all_forces_array(['1.0D'], 21)
+
+        # Model-level should match individual for both members
+        assert_allclose(all_forces['M1']['moment_z'], m1_individual['moment_z'], rtol=1e-6,
+                       err_msg="M1 model-level does not match individual")
+        assert_allclose(all_forces['M2']['moment_z'], m2_individual['moment_z'], rtol=1e-6,
+                       err_msg="M2 model-level does not match individual")
+
+        # The two members should have DIFFERENT moment diagrams because of the end release
+        # M1: fixed-fixed with moment at both ends
+        # M2: pinned-fixed with zero moment at i-end
+        m1_moment_at_i = all_forces['M1']['moment_z'][0, 0]
+        m2_moment_at_i = all_forces['M2']['moment_z'][0, 0]
+
+        # M1 should have significant moment at i-end (fixed-fixed: wL²/12)
+        assert abs(m1_moment_at_i) > 0.5, f"M1 should have moment at i-end, got {m1_moment_at_i}"
+
+        # M2 should have ~zero moment at i-end (released)
+        assert abs(m2_moment_at_i) < 0.1, f"M2 should have ~zero moment at i-end, got {m2_moment_at_i}"
+
+    def test_partial_end_releases(self):
+        """Test members with partial end releases (e.g., only rotation release)."""
+        model = FEModel3D()
+        L = 10.0
+
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', L, 0, 0)
+        model.add_node('N3', 0, 0, 10)
+        model.add_node('N4', L, 0, 10)
+        model.add_node('N5', 0, 0, 20)
+        model.add_node('N6', L, 0, 20)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')  # No releases
+        model.add_member('M2', 'N3', 'N4', 'Steel', 'W10')  # i-end Rz release
+        model.add_member('M3', 'N5', 'N6', 'Steel', 'W10')  # Both ends Rz release
+
+        model.def_releases('M2', Rzi=True)
+        model.def_releases('M3', Rzi=True, Rzj=True)
+
+        for node in ['N1', 'N2', 'N3', 'N4', 'N5', 'N6']:
+            model.def_support(node, True, True, True, True, True, True)
+
+        for member in ['M1', 'M2', 'M3']:
+            model.add_member_dist_load(member, 'Fy', -1.0, -1.0, 0, L, 'D')
+
+        model.add_load_combo('1.0D', {'D': 1.0})
+        model.analyze()
+
+        all_forces = model.get_all_member_forces(['1.0D'], n_points=21)
+
+        # Each member should match its individual extraction
+        for member_name in ['M1', 'M2', 'M3']:
+            individual = model.members[member_name].get_all_forces_array(['1.0D'], 21)
+            assert_allclose(all_forces[member_name]['moment_z'], individual['moment_z'], rtol=1e-6,
+                           err_msg=f"{member_name} model-level does not match individual")
+            assert_allclose(all_forces[member_name]['shear_y'], individual['shear_y'], rtol=1e-6)
+
+        # M3 (both ends pinned) should have zero moments at both ends
+        # but max moment at midspan (wL²/8 for simply supported)
+        m3_moment = all_forces['M3']['moment_z'][0, :]
+        assert abs(m3_moment[0]) < 0.1, "M3 should have ~zero moment at i-end"
+        assert abs(m3_moment[-1]) < 0.1, "M3 should have ~zero moment at j-end"
+        assert abs(m3_moment[10]) > 1.0, "M3 should have max moment at midspan"
+
+
+class TestTensionCompressionOnlyMembers:
+    """Test that tension/compression-only members report zero forces when inactive."""
+
+    def test_tension_only_inactive(self):
+        """
+        Tension-only member in compression should report zero forces.
+
+        When a tension-only member goes into compression, it becomes inactive
+        and all internal forces should be zeroed out.
+
+        Uses a redundant truss so model remains stable when member deactivates.
+        """
+        model = FEModel3D()
+
+        # Simple truss with two parallel members:
+        # - Top member is tension-only
+        # - Bottom member is regular (provides stability when top deactivates)
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 10, 0, 0)
+        model.add_node('N3', 0, 1, 0)  # Offset in Y for second member
+        model.add_node('N4', 10, 1, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('Rod', 1.0, 1.0, 1.0, 1.0)
+
+        # Top member is tension-only
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'Rod', tension_only=True)
+        # Bottom member is normal (provides redundancy)
+        model.add_member('M2', 'N3', 'N4', 'Steel', 'Rod')
+        # Rigid links connecting the two
+        model.add_node('N5', 0, 0.5, 0)
+        model.add_node('N6', 10, 0.5, 0)
+        model.add_member('Link1', 'N1', 'N3', 'Steel', 'Rod')
+        model.add_member('Link2', 'N2', 'N4', 'Steel', 'Rod')
+
+        model.def_support('N1', True, True, True, True, True, True)
+        model.def_support('N3', True, True, True, True, True, True)
+        model.def_support('N2', False, True, True, True, True, True)
+        model.def_support('N4', False, True, True, True, True, True)
+
+        # Apply compression load (pushes nodes toward left)
+        model.add_node_load('N2', 'FX', -10.0, 'D')
+        model.add_node_load('N4', 'FX', -10.0, 'D')
+        model.add_load_combo('1.0D', {'D': 1.0})
+
+        model.analyze()
+
+        # The tension-only member M1 should be inactive (in compression)
+        assert not model.members['M1'].active.get('1.0D', True), \
+            "Tension-only member should be inactive under compression"
+
+        # Model-level extraction should show zero forces for M1
+        all_forces = model.get_all_member_forces(['1.0D'], n_points=10)
+
+        axial = all_forces['M1']['axial'][0, :]
+        shear = all_forces['M1']['shear_y'][0, :]
+        moment = all_forces['M1']['moment_z'][0, :]
+        torque = all_forces['M1']['torque'][0, :]
+
+        assert_allclose(axial, 0.0, atol=1e-10, err_msg="Inactive member should have zero axial")
+        assert_allclose(shear, 0.0, atol=1e-10, err_msg="Inactive member should have zero shear")
+        assert_allclose(moment, 0.0, atol=1e-10, err_msg="Inactive member should have zero moment")
+        assert_allclose(torque, 0.0, atol=1e-10, err_msg="Inactive member should have zero torque")
+
+        # M2 should be active and carrying load
+        m2_axial = all_forces['M2']['axial'][0, :]
+        assert np.any(np.abs(m2_axial) > 0.1), "Regular member should carry load"
+
+    def test_compression_only_inactive(self):
+        """
+        Compression-only member in tension should report zero forces.
+        """
+        model = FEModel3D()
+
+        # Simple truss with two parallel members
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 10, 0, 0)
+        model.add_node('N3', 0, 1, 0)
+        model.add_node('N4', 10, 1, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('Rod', 1.0, 1.0, 1.0, 1.0)
+
+        # Top member is compression-only
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'Rod', comp_only=True)
+        # Bottom member is normal
+        model.add_member('M2', 'N3', 'N4', 'Steel', 'Rod')
+        # Rigid links
+        model.add_member('Link1', 'N1', 'N3', 'Steel', 'Rod')
+        model.add_member('Link2', 'N2', 'N4', 'Steel', 'Rod')
+
+        model.def_support('N1', True, True, True, True, True, True)
+        model.def_support('N3', True, True, True, True, True, True)
+        model.def_support('N2', False, True, True, True, True, True)
+        model.def_support('N4', False, True, True, True, True, True)
+
+        # Apply tension load (pulls nodes away from left)
+        model.add_node_load('N2', 'FX', 10.0, 'D')
+        model.add_node_load('N4', 'FX', 10.0, 'D')
+        model.add_load_combo('1.0D', {'D': 1.0})
+
+        model.analyze()
+
+        # The compression-only member M1 should be inactive (in tension)
+        assert not model.members['M1'].active.get('1.0D', True), \
+            "Compression-only member should be inactive under tension"
+
+        # Model-level extraction should show zero forces for M1
+        all_forces = model.get_all_member_forces(['1.0D'], n_points=10)
+
+        axial = all_forces['M1']['axial'][0, :]
+        assert_allclose(axial, 0.0, atol=1e-10, err_msg="Inactive member should have zero axial")
+
+    def test_tension_only_active(self):
+        """
+        Tension-only member in tension SHOULD report correct forces.
+        """
+        model = FEModel3D()
+        L = 10.0
+
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', L, 0, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('Rod', 1.0, 1.0, 1.0, 1.0)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'Rod', tension_only=True)
+
+        model.def_support('N1', True, True, True, True, True, True)
+        model.def_support('N2', False, True, True, True, True, True)
+
+        # Apply tension load (pulls N2 away from N1)
+        model.add_node_load('N2', 'FX', 10.0, 'D')
+        model.add_load_combo('1.0D', {'D': 1.0})
+
+        model.analyze()
+
+        # The member should be active (in tension)
+        assert model.members['M1'].active.get('1.0D', True), \
+            "Tension-only member should be active under tension"
+
+        # Model-level extraction should show non-zero axial force
+        all_forces = model.get_all_member_forces(['1.0D'], n_points=10)
+        individual = model.members['M1'].get_all_forces_array(['1.0D'], 10)
+
+        # Should match individual extraction
+        assert_allclose(all_forces['M1']['axial'], individual['axial'], rtol=1e-6)
+
+        # Should have non-zero axial
+        axial = all_forces['M1']['axial'][0, :]
+        assert np.all(np.abs(axial) > 1.0), "Active tension member should have axial force"
+
+    def test_mixed_active_inactive_per_combo(self):
+        """
+        Test member that is active in some combos but inactive in others.
+
+        Uses a redundant structure so model remains stable for all combos.
+        """
+        model = FEModel3D()
+
+        # Simple truss with two parallel members
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 10, 0, 0)
+        model.add_node('N3', 0, 1, 0)
+        model.add_node('N4', 10, 1, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('Rod', 1.0, 1.0, 1.0, 1.0)
+
+        # Top member is tension-only
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'Rod', tension_only=True)
+        # Bottom member is normal
+        model.add_member('M2', 'N3', 'N4', 'Steel', 'Rod')
+        # Rigid links
+        model.add_member('Link1', 'N1', 'N3', 'Steel', 'Rod')
+        model.add_member('Link2', 'N2', 'N4', 'Steel', 'Rod')
+
+        model.def_support('N1', True, True, True, True, True, True)
+        model.def_support('N3', True, True, True, True, True, True)
+        model.def_support('N2', False, True, True, True, True, True)
+        model.def_support('N4', False, True, True, True, True, True)
+
+        # Load case that causes tension in horizontal members
+        model.add_node_load('N2', 'FX', 10.0, 'Tension')
+        model.add_node_load('N4', 'FX', 10.0, 'Tension')
+        # Load case that causes compression in horizontal members
+        model.add_node_load('N2', 'FX', -10.0, 'Compression')
+        model.add_node_load('N4', 'FX', -10.0, 'Compression')
+
+        model.add_load_combo('TensionCombo', {'Tension': 1.0})
+        model.add_load_combo('CompressionCombo', {'Compression': 1.0})
+
+        model.analyze()
+
+        all_forces = model.get_all_member_forces(['TensionCombo', 'CompressionCombo'], n_points=10)
+
+        # Tension combo: M1 should be active
+        assert model.members['M1'].active.get('TensionCombo', True), \
+            "Tension-only member should be active under tension"
+        tension_axial = all_forces['M1']['axial'][0, :]  # First combo
+        assert np.any(np.abs(tension_axial) > 0.1), "Tension combo should have axial force in M1"
+
+        # Compression combo: M1 should be inactive
+        assert not model.members['M1'].active.get('CompressionCombo', True), \
+            "Tension-only member should be inactive under compression"
+        compression_axial = all_forces['M1']['axial'][1, :]  # Second combo
+        assert_allclose(compression_axial, 0.0, atol=1e-10,
+                       err_msg="Compression combo should have zero axial for tension-only member")
