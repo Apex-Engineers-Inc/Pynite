@@ -2729,15 +2729,11 @@ class FEModel3D():
             # Result f_batch: (12, n_members, n_combos)
             f_batch = einsum('ij,jmc->imc', k, d_batch)
 
-            # Pre-compute all fer values and add as batched array
-            # Build fer_batch: (12, n_members, n_combos)
-            fer_batch = empty((12, n_members, n_combos))
+            # Add fer values directly to f_batch (avoids allocating separate fer_batch array)
+            # member.fer() is already cached, so this is efficient
             for m_idx, member in enumerate(group_members):
                 for c_idx, combo_name in enumerate(combo_names):
-                    fer_batch[:, m_idx, c_idx] = member.fer(combo_name).flatten()
-
-            # Single array addition instead of nested loop updates
-            f_batch += fer_batch
+                    f_batch[:, m_idx, c_idx] += member.fer(combo_name).flatten()
 
             # Pre-compute T_rot for global direction loads (shared across group)
             T_rot = T[:3, :3]
@@ -2757,7 +2753,8 @@ class FEModel3D():
                 has_dist_loads = len(dist_loads) > 0
 
                 # Initialize result dict with x-coordinates
-                member_results = {'x': x}  # Share x array (immutable usage pattern)
+                # Use x.copy() to prevent aliasing bugs if downstream code mutates the array
+                member_results = {'x': x.copy()}
 
                 if has_dist_loads:
                     # Compute load factors per load case (member-specific)

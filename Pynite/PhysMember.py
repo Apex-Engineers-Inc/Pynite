@@ -1043,14 +1043,31 @@ class PhysMember(Member3D):
         axial_arr = empty((n_combos, n_points))
         torque_arr = empty((n_combos, n_points))
 
-        # Pre-compute submember boundaries (these don't change with combo)
-        sub_starts = []
-        sub_ends = []
+        # Pre-compute submember boundaries and slice indices (geometry-only, combo-independent)
+        # This avoids recomputing boolean masks for every combo
+        sub_slices = []  # List of (submember, x_local, output_slice) tuples
         x_o = 0.0
-        for subm in sub_members_list:
-            sub_starts.append(x_o)
+        for i, subm in enumerate(sub_members_list):
+            x_start = x_o
             x_o += subm.L()
-            sub_ends.append(x_o)
+            x_end = x_o
+
+            # Compute mask once (depends only on geometry)
+            if i == n_sub - 1:
+                mask = (x_array >= x_start) & (x_array <= x_end)
+            else:
+                mask = (x_array >= x_start) & (x_array < x_end)
+
+            # Find the contiguous slice indices for this submember's points
+            indices = mask.nonzero()[0]
+            if len(indices) == 0:
+                continue
+
+            # Convert to slice for efficient array indexing
+            i_start, i_end = indices[0], indices[-1] + 1
+            x_local = x_array[i_start:i_end] - x_start
+
+            sub_slices.append((subm, x_local, slice(i_start, i_end)))
 
         for combo_idx, combo_name in enumerate(combo_names):
             if not self.active.get(combo_name, True):
@@ -1060,31 +1077,11 @@ class PhysMember(Member3D):
                 torque_arr[combo_idx, :] = 0.0
                 continue
 
-            # Collect results from submembers
-            shear_parts = []
-            moment_parts = []
-            axial_parts = []
-            torque_parts = []
-
-            for i, submember in enumerate(sub_members_list):
+            for submember, x_local, out_slice in sub_slices:
                 # Segment submember if needed
                 if submember._solved_combo is None or combo_name != submember._solved_combo.name:
                     submember._segment_member(combo_name)
                     submember._solved_combo = self.model.load_combos[combo_name]
-
-                x_start = sub_starts[i]
-                x_end = sub_ends[i]
-
-                # Filter points for this submember
-                if i == n_sub - 1:
-                    mask = (x_array >= x_start) & (x_array <= x_end)
-                else:
-                    mask = (x_array >= x_start) & (x_array < x_end)
-
-                x_local = x_array[mask] - x_start
-
-                if len(x_local) == 0:
-                    continue
 
                 # Extract all forces in one pass using vectorized segment methods
                 shear_res = submember._extract_vector_results(submember.SegmentsZ, x_local, 'shear')
@@ -1092,22 +1089,11 @@ class PhysMember(Member3D):
                 axial_res = submember._extract_vector_results(submember.SegmentsZ, x_local, 'axial')
                 torque_res = submember._extract_vector_results(submember.SegmentsX, x_local, 'torque')
 
-                shear_parts.append(shear_res[1])
-                moment_parts.append(moment_res[1])
-                axial_parts.append(axial_res[1])
-                torque_parts.append(torque_res[1])
-
-            # Concatenate all parts
-            if shear_parts:
-                shear_y[combo_idx, :] = concatenate(shear_parts)
-                moment_z[combo_idx, :] = concatenate(moment_parts)
-                axial_arr[combo_idx, :] = concatenate(axial_parts)
-                torque_arr[combo_idx, :] = concatenate(torque_parts)
-            else:
-                shear_y[combo_idx, :] = 0.0
-                moment_z[combo_idx, :] = 0.0
-                axial_arr[combo_idx, :] = 0.0
-                torque_arr[combo_idx, :] = 0.0
+                # Write directly to output arrays using precomputed slice
+                shear_y[combo_idx, out_slice] = shear_res[1]
+                moment_z[combo_idx, out_slice] = moment_res[1]
+                axial_arr[combo_idx, out_slice] = axial_res[1]
+                torque_arr[combo_idx, out_slice] = torque_res[1]
 
         return {
             'x': x_array,

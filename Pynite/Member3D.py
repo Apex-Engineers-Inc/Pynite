@@ -143,14 +143,20 @@ class Member3D():
         """Check if this member can use the fast path (no intermediate loads)."""
         # Fast path only works for members with distributed loads along the full length
         # and no point loads (or point loads only at ends)
+        from math import isclose
+        L = self.L()
+        # Use tolerance relative to member length to handle floating-point rounding
+        # (e.g., 95.999999 from unit conversions)
+        tol = L * 1e-9 if L > 0 else 1e-9
+
         for pt_load in self.PtLoads:
             x = pt_load[2]
-            if not (x == 0 or x == self.L()):
+            if not (isclose(x, 0, abs_tol=tol) or isclose(x, L, abs_tol=tol)):
                 return False
         for dist_load in self.DistLoads:
             x1, x2 = dist_load[3], dist_load[4]
             # Allow full-length or no loads
-            if not (x1 == 0 and x2 == self.L()):
+            if not (isclose(x1, 0, abs_tol=tol) and isclose(x2, L, abs_tol=tol)):
                 return False
         return True
 
