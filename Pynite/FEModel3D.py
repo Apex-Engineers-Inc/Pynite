@@ -19,9 +19,10 @@ from Pynite.ShearWall import ShearWall
 from Pynite import Analysis
 
 if TYPE_CHECKING:
-    from typing import Dict, List
+    from typing import Dict, List, Tuple, Union, Any
     from numpy import float64
     from numpy.typing import NDArray
+    from Pynite.Member3D import Member3D as Member3DType
 
 
 # %%
@@ -2610,7 +2611,7 @@ class FEModel3D():
 
         # Group members by (material, section, length, i_node, j_node direction)
         # Members in same group share k matrix and can batch T @ D
-        section_groups: Dict[tuple, List] = defaultdict(list)
+        section_groups: Dict[Tuple[Any, ...], List[Any]] = defaultdict(list)
 
         for name in member_names:
             member = self.members[name]
@@ -2765,7 +2766,14 @@ class FEModel3D():
 
                 # Initialize result dict with x-coordinates
                 # Use x.copy() to prevent aliasing bugs if downstream code mutates the array
-                member_results = {'x': x.copy()}
+                member_results: Dict[str, NDArray[float64]] = {'x': x.copy()}
+
+                # Pre-allocate force arrays based on include_* flags
+                # These will be overwritten in the branches below
+                shear_y: NDArray[float64] = empty((n_combos, n_points)) if include_shear else empty((0, 0))
+                moment_z: NDArray[float64] = empty((n_combos, n_points)) if include_moment else empty((0, 0))
+                axial_arr: NDArray[float64] = empty((n_combos, n_points)) if include_axial else empty((0, 0))
+                torque_arr: NDArray[float64] = empty((n_combos, n_points)) if include_torque else empty((0, 0))
 
                 if has_dist_loads:
                     # Build load vectors for vectorized combo factor multiplication
@@ -2867,7 +2875,7 @@ class FEModel3D():
         combo_names: List[str] | None = None,
         member_names: List[str] | None = None,
         n_points: int = 20
-    ) -> Dict[str, NDArray[float64]]:
+    ) -> Dict[str, Union[List[str], NDArray[float64]]]:
         """
         Extract internal forces for all members as stacked 3D arrays.
 
@@ -2885,7 +2893,7 @@ class FEModel3D():
 
         Returns
         -------
-        Dict[str, NDArray[float64]]
+        Dict[str, Union[List[str], NDArray[float64]]]
             Dictionary with keys:
             - 'member_names': List[str] of member names (for indexing)
             - 'combo_names': List[str] of combo names (for indexing)
