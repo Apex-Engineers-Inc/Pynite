@@ -2649,12 +2649,23 @@ class FEModel3D():
             key = (mat_name, sec_name, L_rounded, dir_key, releases_key, tc_key)
             section_groups[key].append(member)
 
-        # Pre-build combo factor lookup for efficient load accumulation
-        # combo_factors[combo_idx] = {case_name: factor}
-        combo_factors = []
+        # Pre-build combo factor matrix for vectorized load accumulation
+        # This eliminates nested Python loops when computing load totals
+        # First, collect all unique load case names used in any combo
+        all_cases = set()
         for combo_name in combo_names:
-            combo = self.load_combos[combo_name]
-            combo_factors.append(combo.factors)
+            all_cases.update(self.load_combos[combo_name].factors.keys())
+        case_list = sorted(all_cases)  # Consistent ordering
+        case_to_idx = {case: i for i, case in enumerate(case_list)}
+        n_cases = len(case_list)
+
+        # Build combo_matrix: shape (n_cases, n_combos)
+        # combo_matrix[case_idx, combo_idx] = factor for that load case in that combo
+        combo_matrix = zeros((n_cases, n_combos))
+        for c_idx, combo_name in enumerate(combo_names):
+            factors = self.load_combos[combo_name].factors
+            for case, factor in factors.items():
+                combo_matrix[case_to_idx[case], c_idx] = factor
 
         # Cache for x-coordinates per (L, n_points) to avoid repeated linspace calls
         x_cache: Dict[tuple, tuple] = {}
@@ -2757,11 +2768,12 @@ class FEModel3D():
                 member_results = {'x': x.copy()}
 
                 if has_dist_loads:
-                    # Compute load factors per load case (member-specific)
-                    load_case_w1 = {}
-                    load_case_w2 = {}
-                    load_case_p1 = {}
-                    load_case_p2 = {}
+                    # Build load vectors for vectorized combo factor multiplication
+                    # Each vector has shape (n_cases,) and we multiply by combo_matrix
+                    w1_vec = zeros(n_cases)
+                    w2_vec = zeros(n_cases)
+                    p1_vec = zeros(n_cases)
+                    p2_vec = zeros(n_cases)
 
                     for dist_load in dist_loads:
                         case = dist_load[5]
@@ -2769,12 +2781,16 @@ class FEModel3D():
                         w1_raw = dist_load[1]
                         w2_raw = dist_load[2]
 
+                        if case not in case_to_idx:
+                            continue  # Load case not used in any requested combo
+
+                        case_idx = case_to_idx[case]
                         if direction == 'Fy':
-                            load_case_w1[case] = load_case_w1.get(case, 0.0) + w1_raw
-                            load_case_w2[case] = load_case_w2.get(case, 0.0) + w2_raw
+                            w1_vec[case_idx] += w1_raw
+                            w2_vec[case_idx] += w2_raw
                         elif direction == 'Fx':
-                            load_case_p1[case] = load_case_p1.get(case, 0.0) + w1_raw
-                            load_case_p2[case] = load_case_p2.get(case, 0.0) + w2_raw
+                            p1_vec[case_idx] += w1_raw
+                            p2_vec[case_idx] += w2_raw
                         elif direction in ('FX', 'FY', 'FZ'):
                             from numpy import array
                             FX = 1 if direction == 'FX' else 0
@@ -2782,25 +2798,17 @@ class FEModel3D():
                             FZ = 1 if direction == 'FZ' else 0
                             f1_local = T_rot @ array([FX * w1_raw, FY * w1_raw, FZ * w1_raw])
                             f2_local = T_rot @ array([FX * w2_raw, FY * w2_raw, FZ * w2_raw])
-                            load_case_p1[case] = load_case_p1.get(case, 0.0) + f1_local[0]
-                            load_case_p2[case] = load_case_p2.get(case, 0.0) + f2_local[0]
-                            load_case_w1[case] = load_case_w1.get(case, 0.0) + f1_local[1]
-                            load_case_w2[case] = load_case_w2.get(case, 0.0) + f2_local[1]
+                            p1_vec[case_idx] += f1_local[0]
+                            p2_vec[case_idx] += f2_local[0]
+                            w1_vec[case_idx] += f1_local[1]
+                            w2_vec[case_idx] += f2_local[1]
 
-                    # Use pre-built combo_factors for efficient accumulation
-                    w1_totals = zeros(n_combos)
-                    w2_totals = zeros(n_combos)
-                    p1_totals = zeros(n_combos)
-                    p2_totals = zeros(n_combos)
-
-                    for c_idx, factors in enumerate(combo_factors):
-                        for case, factor in factors.items():
-                            if case in load_case_w1:
-                                w1_totals[c_idx] += factor * load_case_w1[case]
-                                w2_totals[c_idx] += factor * load_case_w2[case]
-                            if case in load_case_p1:
-                                p1_totals[c_idx] += factor * load_case_p1[case]
-                                p2_totals[c_idx] += factor * load_case_p2[case]
+                    # Vectorized combo factor multiplication: totals = load_vec @ combo_matrix
+                    # Result shape: (n_combos,) - one total per combo
+                    w1_totals = w1_vec @ combo_matrix
+                    w2_totals = w2_vec @ combo_matrix
+                    p1_totals = p1_vec @ combo_matrix
+                    p2_totals = p2_vec @ combo_matrix
 
                     dw = w2_totals - w1_totals
                     dp = p2_totals - p1_totals

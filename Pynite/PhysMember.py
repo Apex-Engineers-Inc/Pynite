@@ -1078,6 +1078,16 @@ class PhysMember(Member3D):
                 continue
 
             for submember, x_local, out_slice in sub_slices:
+                # Check if this sub-member is active for this combo
+                # (sub-members are Member3D instances with their own active flags for T/C behavior)
+                if not submember.active.get(combo_name, True):
+                    # Inactive sub-member contributes zero forces
+                    shear_y[combo_idx, out_slice] = 0.0
+                    moment_z[combo_idx, out_slice] = 0.0
+                    axial_arr[combo_idx, out_slice] = 0.0
+                    torque_arr[combo_idx, out_slice] = 0.0
+                    continue
+
                 # Segment submember if needed
                 if submember._solved_combo is None or combo_name != submember._solved_combo.name:
                     submember._segment_member(combo_name)
