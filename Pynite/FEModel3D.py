@@ -2542,7 +2542,11 @@ class FEModel3D():
         self,
         combo_names: List[str] | None = None,
         member_names: List[str] | None = None,
-        n_points: int = 20
+        n_points: int = 20,
+        include_shear: bool = True,
+        include_moment: bool = True,
+        include_axial: bool = True,
+        include_torque: bool = True
     ) -> Dict[str, Dict[str, NDArray[float64]]]:
         """
         Extract internal forces for multiple members using batched matrix operations.
@@ -2559,12 +2563,20 @@ class FEModel3D():
             List of member names to extract. If None, uses all members.
         n_points : int, optional
             Number of points along each member (default: 20).
+        include_shear : bool, optional
+            Include shear forces in output (default: True).
+        include_moment : bool, optional
+            Include bending moments in output (default: True).
+        include_axial : bool, optional
+            Include axial forces in output (default: True).
+        include_torque : bool, optional
+            Include torsion in output (default: True).
 
         Returns
         -------
         Dict[str, Dict[str, NDArray[float64]]]
             Nested dictionary: {member_name: {'x': array, 'shear_y': array, ...}}
-            Each inner dict has keys: 'x', 'shear_y', 'moment_z', 'axial', 'torque'
+            Each inner dict has keys: 'x' plus requested force types.
             Arrays have shape (n_combos, n_points) except 'x' which is (n_points,)
 
         Examples
@@ -2572,6 +2584,8 @@ class FEModel3D():
         >>> model.analyze()
         >>> forces = model.get_all_member_forces(['1.2D+1.6L'], n_points=20)
         >>> stud_moment = forces['Stud_1']['moment_z']  # shape: (1, 20)
+        >>> # Extract only shear and moment for memory efficiency:
+        >>> forces = model.get_all_member_forces(include_axial=False, include_torque=False)
 
         Notes
         -----
@@ -2635,14 +2649,34 @@ class FEModel3D():
             key = (mat_name, sec_name, L_rounded, dir_key, releases_key, tc_key)
             section_groups[key].append(member)
 
+        # Pre-build combo factor lookup for efficient load accumulation
+        # combo_factors[combo_idx] = {case_name: factor}
+        combo_factors = []
+        for combo_name in combo_names:
+            combo = self.load_combos[combo_name]
+            combo_factors.append(combo.factors)
+
+        # Cache for x-coordinates per (L, n_points) to avoid repeated linspace calls
+        x_cache: Dict[tuple, tuple] = {}
+
         # Process each group with batched operations
         for group_key, group_members in section_groups.items():
             n_members = len(group_members)
 
             if n_members == 1:
-                # Single member - use standard extraction
+                # Single member - use standard extraction and filter
                 member = group_members[0]
-                results[member.name] = member.get_all_forces_array(combo_names, n_points)
+                full_results = member.get_all_forces_array(combo_names, n_points)
+                filtered = {'x': full_results['x']}
+                if include_shear:
+                    filtered['shear_y'] = full_results['shear_y']
+                if include_moment:
+                    filtered['moment_z'] = full_results['moment_z']
+                if include_axial:
+                    filtered['axial'] = full_results['axial']
+                if include_torque:
+                    filtered['torque'] = full_results['torque']
+                results[member.name] = filtered
                 continue
 
             # Get shared matrices from first member (all members in group have same k, T)
@@ -2650,6 +2684,17 @@ class FEModel3D():
             k = ref_member.k()  # 12x12 stiffness matrix
             T = ref_member.T()  # 12x12 transformation matrix
             L = ref_member.L()
+
+            # Get or create cached x-coordinates for this (L, n_points)
+            x_key = (round(L, 6), n_points)
+            if x_key not in x_cache:
+                x = linspace(0, L, n_points)
+                x2 = x * x
+                x3 = x2 * x
+                x_cache[x_key] = (x, x2, x3)
+            x, x2, x3 = x_cache[x_key]
+            inv_2L = 1.0 / (2.0 * L)
+            inv_6L = 1.0 / (6.0 * L)
 
             # Build batched global displacement array: (12, n_members, n_combos)
             D_batch = empty((12, n_members, n_combos))
@@ -2694,12 +2739,8 @@ class FEModel3D():
             # Single array addition instead of nested loop updates
             f_batch += fer_batch
 
-            # Now compute forces along each member using analytical formulas
-            x = linspace(0, L, n_points)
-            x2 = x * x
-            x3 = x2 * x
-            inv_2L = 1.0 / (2.0 * L)
-            inv_6L = 1.0 / (6.0 * L)
+            # Pre-compute T_rot for global direction loads (shared across group)
+            T_rot = T[:3, :3]
 
             for m_idx, member in enumerate(group_members):
                 # Extract end forces for this member: shape (12, n_combos)
@@ -2715,18 +2756,15 @@ class FEModel3D():
                 dist_loads = member.DistLoads
                 has_dist_loads = len(dist_loads) > 0
 
+                # Initialize result dict with x-coordinates
+                member_results = {'x': x}  # Share x array (immutable usage pattern)
+
                 if has_dist_loads:
-                    # Compute load factors per combo
+                    # Compute load factors per load case (member-specific)
                     load_case_w1 = {}
                     load_case_w2 = {}
                     load_case_p1 = {}
                     load_case_p2 = {}
-
-                    T_rot = None
-                    for dist_load in dist_loads:
-                        if dist_load[0] in ('FX', 'FY', 'FZ'):
-                            T_rot = T[:3, :3]
-                            break
 
                     for dist_load in dist_loads:
                         case = dist_load[5]
@@ -2752,14 +2790,14 @@ class FEModel3D():
                             load_case_w1[case] = load_case_w1.get(case, 0.0) + f1_local[1]
                             load_case_w2[case] = load_case_w2.get(case, 0.0) + f2_local[1]
 
+                    # Use pre-built combo_factors for efficient accumulation
                     w1_totals = zeros(n_combos)
                     w2_totals = zeros(n_combos)
                     p1_totals = zeros(n_combos)
                     p2_totals = zeros(n_combos)
 
-                    for c_idx, combo_name in enumerate(combo_names):
-                        combo = self.load_combos[combo_name]
-                        for case, factor in combo.factors.items():
+                    for c_idx, factors in enumerate(combo_factors):
+                        for case, factor in factors.items():
                             if case in load_case_w1:
                                 w1_totals[c_idx] += factor * load_case_w1[case]
                                 w2_totals[c_idx] += factor * load_case_w2[case]
@@ -2770,37 +2808,52 @@ class FEModel3D():
                     dw = w2_totals - w1_totals
                     dp = p2_totals - p1_totals
 
-                    shear_y = V1_all[:, None] + w1_totals[:, None] * x + dw[:, None] * x2 * inv_2L
-                    moment_z = M1_all[:, None] - V1_all[:, None] * x - w1_totals[:, None] * x2 * 0.5 - dw[:, None] * x3 * inv_6L
-                    axial_arr = P1_all[:, None] + p1_totals[:, None] * x + dp[:, None] * inv_2L * x2
+                    if include_shear:
+                        shear_y = V1_all[:, None] + w1_totals[:, None] * x + dw[:, None] * x2 * inv_2L
+                    if include_moment:
+                        moment_z = M1_all[:, None] - V1_all[:, None] * x - w1_totals[:, None] * x2 * 0.5 - dw[:, None] * x3 * inv_6L
+                    if include_axial:
+                        axial_arr = P1_all[:, None] + p1_totals[:, None] * x + dp[:, None] * inv_2L * x2
                 else:
                     # No distributed loads
-                    shear_y = empty((n_combos, n_points))
-                    shear_y[:] = V1_all[:, None]
-                    moment_z = M1_all[:, None] - V1_all[:, None] * x
-                    axial_arr = empty((n_combos, n_points))
-                    axial_arr[:] = P1_all[:, None]
+                    if include_shear:
+                        shear_y = empty((n_combos, n_points))
+                        shear_y[:] = V1_all[:, None]
+                    if include_moment:
+                        moment_z = M1_all[:, None] - V1_all[:, None] * x
+                    if include_axial:
+                        axial_arr = empty((n_combos, n_points))
+                        axial_arr[:] = P1_all[:, None]
 
-                # Torque is constant
-                torque_arr = empty((n_combos, n_points))
-                torque_arr[:] = T1_all[:, None]
+                # Torque is constant (only compute if requested)
+                if include_torque:
+                    torque_arr = empty((n_combos, n_points))
+                    torque_arr[:] = T1_all[:, None]
 
                 # Zero out forces for inactive members (tension/compression-only)
                 is_active = member.active
                 for c_idx, combo_name in enumerate(combo_names):
                     if not is_active.get(combo_name, True):
-                        shear_y[c_idx, :] = 0.0
-                        moment_z[c_idx, :] = 0.0
-                        axial_arr[c_idx, :] = 0.0
-                        torque_arr[c_idx, :] = 0.0
+                        if include_shear:
+                            shear_y[c_idx, :] = 0.0
+                        if include_moment:
+                            moment_z[c_idx, :] = 0.0
+                        if include_axial:
+                            axial_arr[c_idx, :] = 0.0
+                        if include_torque:
+                            torque_arr[c_idx, :] = 0.0
 
-                results[member.name] = {
-                    'x': x.copy(),
-                    'shear_y': shear_y,
-                    'moment_z': moment_z,
-                    'axial': axial_arr,
-                    'torque': torque_arr
-                }
+                # Build result dict with only requested force types
+                if include_shear:
+                    member_results['shear_y'] = shear_y
+                if include_moment:
+                    member_results['moment_z'] = moment_z
+                if include_axial:
+                    member_results['axial'] = axial_arr
+                if include_torque:
+                    member_results['torque'] = torque_arr
+
+                results[member.name] = member_results
 
         return results
 

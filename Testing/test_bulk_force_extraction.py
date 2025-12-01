@@ -1692,3 +1692,134 @@ class TestTensionCompressionOnlyMembers:
         compression_axial = all_forces['M1']['axial'][1, :]  # Second combo
         assert_allclose(compression_axial, 0.0, atol=1e-10,
                        err_msg="Compression combo should have zero axial for tension-only member")
+
+
+class TestIncludeSwitches:
+    """Test the include_* switches for selective force extraction."""
+
+    def test_include_only_moment(self):
+        """Test extracting only moment data."""
+        model = FEModel3D()
+        L = 10.0
+
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', L, 0, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
+
+        model.def_support('N1', True, True, True, True, True, False)
+        model.def_support('N2', True, True, True, True, True, False)
+
+        model.add_member_dist_load('M1', 'Fy', -1.0, -1.0, 0, L, 'D')
+        model.add_load_combo('1.0D', {'D': 1.0})
+        model.analyze()
+
+        # Extract only moment
+        forces = model.get_all_member_forces(
+            ['1.0D'], n_points=20,
+            include_shear=False, include_moment=True,
+            include_axial=False, include_torque=False
+        )
+
+        # Should have x and moment_z but not others
+        assert 'x' in forces['M1']
+        assert 'moment_z' in forces['M1']
+        assert 'shear_y' not in forces['M1']
+        assert 'axial' not in forces['M1']
+        assert 'torque' not in forces['M1']
+
+    def test_include_shear_and_moment(self):
+        """Test extracting shear and moment together."""
+        model = FEModel3D()
+        L = 10.0
+
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', L, 0, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
+
+        model.def_support('N1', True, True, True, True, True, False)
+        model.def_support('N2', True, True, True, True, True, False)
+
+        model.add_member_dist_load('M1', 'Fy', -1.0, -1.0, 0, L, 'D')
+        model.add_load_combo('1.0D', {'D': 1.0})
+        model.analyze()
+
+        forces = model.get_all_member_forces(
+            ['1.0D'], n_points=20,
+            include_shear=True, include_moment=True,
+            include_axial=False, include_torque=False
+        )
+
+        assert 'shear_y' in forces['M1']
+        assert 'moment_z' in forces['M1']
+        assert 'axial' not in forces['M1']
+        assert 'torque' not in forces['M1']
+
+    def test_include_all_default(self):
+        """Test that all forces are included by default."""
+        model = FEModel3D()
+        L = 10.0
+
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', L, 0, 0)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
+
+        model.def_support('N1', True, True, True, True, True, False)
+        model.def_support('N2', True, True, True, True, True, False)
+
+        model.add_member_dist_load('M1', 'Fy', -1.0, -1.0, 0, L, 'D')
+        model.add_load_combo('1.0D', {'D': 1.0})
+        model.analyze()
+
+        # Default should include all
+        forces = model.get_all_member_forces(['1.0D'], n_points=20)
+
+        assert 'x' in forces['M1']
+        assert 'shear_y' in forces['M1']
+        assert 'moment_z' in forces['M1']
+        assert 'axial' in forces['M1']
+        assert 'torque' in forces['M1']
+
+    def test_include_switches_batched_path(self):
+        """Test include switches with batched extraction (multiple similar members)."""
+        model = FEModel3D()
+        L = 10.0
+
+        # Create multiple similar members to trigger batched path
+        for i in range(3):
+            model.add_node(f'N{i*2}', 0, 0, i*5)
+            model.add_node(f'N{i*2+1}', L, 0, i*5)
+
+        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
+        model.add_section('W10', 10, 100, 100, 200)
+
+        for i in range(3):
+            model.add_member(f'M{i}', f'N{i*2}', f'N{i*2+1}', 'Steel', 'W10')
+            model.def_support(f'N{i*2}', True, True, True, True, True, False)
+            model.def_support(f'N{i*2+1}', True, True, True, True, True, False)
+            model.add_member_dist_load(f'M{i}', 'Fy', -1.0, -1.0, 0, L, 'D')
+
+        model.add_load_combo('1.0D', {'D': 1.0})
+        model.analyze()
+
+        # Extract only axial
+        forces = model.get_all_member_forces(
+            ['1.0D'], n_points=20,
+            include_shear=False, include_moment=False,
+            include_axial=True, include_torque=False
+        )
+
+        for i in range(3):
+            assert 'x' in forces[f'M{i}']
+            assert 'axial' in forces[f'M{i}']
+            assert 'shear_y' not in forces[f'M{i}']
+            assert 'moment_z' not in forces[f'M{i}']
+            assert 'torque' not in forces[f'M{i}']
