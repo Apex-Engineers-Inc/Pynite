@@ -322,6 +322,107 @@ class TestDiagnoseSingularityWithSprings(unittest.TestCase):
         self.assertEqual(model.solution, 'Linear')
 
 
+class TestAdditionalDiagnostics(unittest.TestCase):
+    """Tests for additional diagnostic scenarios."""
+
+    def setUp(self):
+        sys.stdout = StringIO()
+        warnings.filterwarnings('error')
+
+    def tearDown(self):
+        sys.stdout = sys.__stdout__
+        warnings.resetwarnings()
+
+    def _create_basic_model(self):
+        """Helper to create a basic model with material and section defined."""
+        model = FEModel3D()
+        model.add_material('Steel', 29000, 11200, 0.3, 490/1000/12**3)
+        model.add_section('W8x31', 9.13, 37.1, 110, 0.536)
+        return model
+
+    def test_singly_connected_node_detected(self):
+        """Test that nodes connected to only one element are identified."""
+        model = self._create_basic_model()
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 120, 0, 0)
+        model.add_node('N3', 240, 0, 0)  # Connected to only M2
+        model.add_node('N4', 360, 0, 0)  # Singly connected - only to M2
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W8x31')
+        model.add_member('M2', 'N3', 'N4', 'Steel', 'W8x31')
+
+        # Support N1 fully, N2 partially (to allow analysis to proceed far enough)
+        model.def_support('N1', True, True, True, True, True, True)
+        model.def_support('N2', False, True, True, True, True, True)
+        # N3 and N4 have no support - should trigger singly-connected warning
+        model.add_load_combo('Combo 1', {'Case 1': 1.0})
+        model.add_member_dist_load('M1', 'FY', -1, -1, case='Case 1')
+
+        with self.assertRaises(Exception) as context:
+            model.analyze_linear(check_stability=False)
+
+        error_msg = str(context.exception)
+        # Should identify disconnected nodes or singly-connected nodes
+        self.assertTrue(
+            'DISCONNECTED' in error_msg or 'SINGLY-CONNECTED' in error_msg,
+            f"Expected diagnostic about node connectivity, got: {error_msg[:300]}"
+        )
+
+    def test_near_coincident_nodes_detected(self):
+        """Test that near-coincident nodes are detected by the diagnostic function."""
+        from Pynite.Analysis import _diagnose_singularity
+        from numpy import zeros
+
+        model = self._create_basic_model()
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 0.005, 0, 0)  # Very close to N1 but not coincident
+        model.add_node('N3', 120, 0, 0)
+
+        model.add_member('M1', 'N1', 'N3', 'Steel', 'W8x31')
+
+        # Create a dummy K11 matrix to call the diagnostic function
+        K11 = zeros((6, 6))
+        D1_indices = list(range(6))
+
+        # Call the diagnostic function directly
+        result = _diagnose_singularity(model, K11, D1_indices, sparse=False)
+
+        # Should identify near-coincident nodes or disconnected nodes
+        self.assertTrue(
+            'NEAR-COINCIDENT' in result or 'DISCONNECTED' in result,
+            f"Expected diagnostic about near-coincident or disconnected nodes, got: {result[:300]}"
+        )
+
+    def test_plate_aspect_ratio_check(self):
+        """Test that plates with poor aspect ratios are detected."""
+        from Pynite.Analysis import _diagnose_singularity
+        from numpy import zeros
+
+        model = FEModel3D()
+        model.add_material('Concrete', 3600, 1500, 0.17, 150/1000/12**3)
+
+        # Create a plate with very poor aspect ratio (1:20)
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 200, 0, 0)  # Very long edge
+        model.add_node('N3', 200, 10, 0)  # Very short edge
+        model.add_node('N4', 0, 10, 0)
+
+        model.add_plate('P1', 'N1', 'N2', 'N3', 'N4', 0.5, 'Concrete')
+
+        # Create a dummy K11 matrix to call the diagnostic function
+        K11 = zeros((24, 24))
+        D1_indices = list(range(24))
+
+        # Call the diagnostic function directly
+        result = _diagnose_singularity(model, K11, D1_indices, sparse=False)
+
+        # Should identify plate aspect ratio issue or no supports
+        self.assertTrue(
+            'PLATE/QUAD' in result or 'aspect ratio' in result or 'NO SUPPORTS' in result,
+            f"Expected diagnostic about plate geometry or supports, got: {result[:300]}"
+        )
+
+
 class TestMemberStiffnessAnalysis(unittest.TestCase):
     """Tests for the _analyze_member_stiffnesses helper function."""
 

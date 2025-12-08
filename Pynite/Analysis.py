@@ -374,7 +374,149 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
             warn_list += f', ... and {len(mechanism_warnings) - 5} more'
         issues.append(f"POTENTIAL MECHANISM: Release combinations may create mechanisms: {warn_list}.")
 
-    # 8. Check numerical conditioning and identify problematic members
+    # 8. Check for singly-connected nodes (nodes connected to only one element without support)
+    node_connections = {}  # node_name -> list of connected element names
+    for member_name, member in model.members.items():
+        if hasattr(member, 'sub_members') and member.sub_members:
+            for sub_member in member.sub_members.values():
+                for node in [sub_member.i_node, sub_member.j_node]:
+                    if node.name not in node_connections:
+                        node_connections[node.name] = []
+                    node_connections[node.name].append(f"member:{member_name}")
+                break  # Only need to check connectivity once per physical member
+        elif hasattr(member, 'i_node'):
+            for node in [member.i_node, member.j_node]:
+                if node.name not in node_connections:
+                    node_connections[node.name] = []
+                node_connections[node.name].append(f"member:{member_name}")
+
+    for spring_name, spring in model.springs.items():
+        for node in [spring.i_node, spring.j_node]:
+            if node.name not in node_connections:
+                node_connections[node.name] = []
+            node_connections[node.name].append(f"spring:{spring_name}")
+
+    for plate_name, plate in model.plates.items():
+        for node in [plate.i_node, plate.j_node, plate.m_node, plate.n_node]:
+            if node.name not in node_connections:
+                node_connections[node.name] = []
+            node_connections[node.name].append(f"plate:{plate_name}")
+
+    for quad_name, quad in model.quads.items():
+        for node in [quad.i_node, quad.j_node, quad.m_node, quad.n_node]:
+            if node.name not in node_connections:
+                node_connections[node.name] = []
+            node_connections[node.name].append(f"quad:{quad_name}")
+
+    singly_connected = []
+    for node_name, connections in node_connections.items():
+        if len(connections) == 1:
+            node = model.nodes.get(node_name)
+            if node:
+                # Check if node is fully supported
+                is_fully_supported = (node.support_DX and node.support_DY and node.support_DZ and
+                                     node.support_RX and node.support_RY and node.support_RZ)
+                if not is_fully_supported:
+                    singly_connected.append(f"{node_name} (connected only to {connections[0]})")
+
+    if singly_connected:
+        node_list = ', '.join(singly_connected[:5])
+        if len(singly_connected) > 5:
+            node_list += f', ... and {len(singly_connected) - 5} more'
+        issues.append(f"SINGLY-CONNECTED NODES: The following nodes are connected to only one element and may lack adequate support: {node_list}. "
+                     "These nodes may need additional supports or connections.")
+
+    # 9. Check for near-coincident nodes (close but not exactly at same location - potential modeling errors)
+    near_coincident = []
+    near_tolerance = 0.01  # Nodes within this distance but not coincident
+    node_list_items = list(model.nodes.items())
+    for i, (name1, node1) in enumerate(node_list_items):
+        for name2, node2 in node_list_items[i+1:]:
+            dist = ((node1.X - node2.X)**2 + (node1.Y - node2.Y)**2 + (node1.Z - node2.Z)**2)**0.5
+            if 1e-6 < dist < near_tolerance:
+                near_coincident.append(f"({name1}, {name2}): distance={dist:.6g}")
+
+    if near_coincident:
+        pair_list = ', '.join(near_coincident[:5])
+        if len(near_coincident) > 5:
+            pair_list += f', ... and {len(near_coincident) - 5} more pairs'
+        issues.append(f"NEAR-COINCIDENT NODES: The following node pairs are very close but not coincident: {pair_list}. "
+                     "This may indicate a modeling error. Consider merging these nodes if they should be connected.")
+
+    # 10. Check for plate/quad issues
+    plate_issues = []
+    for plate_name, plate in list(model.plates.items()) + [(q.name if hasattr(q, 'name') else k, q) for k, q in model.quads.items()]:
+        try:
+            # Check thickness
+            if hasattr(plate, 't') and plate.t <= 0:
+                plate_issues.append(f"{plate_name}: zero or negative thickness (t={plate.t})")
+                continue
+
+            # Check aspect ratio (approximate using node distances)
+            nodes = [plate.i_node, plate.j_node, plate.m_node, plate.n_node]
+            edges = []
+            for idx in range(4):
+                n1, n2 = nodes[idx], nodes[(idx + 1) % 4]
+                dist = ((n1.X - n2.X)**2 + (n1.Y - n2.Y)**2 + (n1.Z - n2.Z)**2)**0.5
+                edges.append(dist)
+
+            if min(edges) > 0:
+                aspect_ratio = max(edges) / min(edges)
+                if aspect_ratio > 10:
+                    plate_issues.append(f"{plate_name}: poor aspect ratio ({aspect_ratio:.1f}:1)")
+
+            # Check for very small edges
+            if min(edges) < 1e-6:
+                plate_issues.append(f"{plate_name}: near-zero edge length ({min(edges):.2e})")
+
+        except Exception:
+            continue
+
+    if plate_issues:
+        issue_list = ', '.join(plate_issues[:5])
+        if len(plate_issues) > 5:
+            issue_list += f', ... and {len(plate_issues) - 5} more'
+        issues.append(f"PLATE/QUAD ISSUES: {issue_list}. "
+                     "Poor element geometry can cause numerical instability.")
+
+    # 11. Check for spring issues
+    spring_issues = []
+    spring_stiffnesses = []
+    for spring_name, spring in model.springs.items():
+        try:
+            # Collect stiffness values
+            k_values = []
+            for attr in ['ks']:  # Main stiffness attribute
+                if hasattr(spring, attr):
+                    k = getattr(spring, attr)
+                    if k is not None and k != 0:
+                        k_values.append(k)
+                        spring_stiffnesses.append((spring_name, k))
+
+            # Check for zero stiffness springs (that aren't intentionally zero)
+            if hasattr(spring, 'ks') and spring.ks == 0:
+                spring_issues.append(f"{spring_name}: zero stiffness")
+
+        except Exception:
+            continue
+
+    # Check for extreme spring stiffness ratios
+    if len(spring_stiffnesses) > 1:
+        k_values = [k for _, k in spring_stiffnesses]
+        max_k = max(k_values)
+        min_k = min(k for k in k_values if k > 0)
+        if min_k > 0 and max_k / min_k > 1e6:
+            stiffest = max(spring_stiffnesses, key=lambda x: x[1])
+            weakest = min(spring_stiffnesses, key=lambda x: x[1] if x[1] > 0 else float('inf'))
+            spring_issues.append(f"extreme stiffness ratio ({max_k/min_k:.2e}): stiffest={stiffest[0]} (k={stiffest[1]:.2e}), weakest={weakest[0]} (k={weakest[1]:.2e})")
+
+    if spring_issues:
+        issue_list = '; '.join(spring_issues[:5])
+        if len(spring_issues) > 5:
+            issue_list += f'; ... and {len(spring_issues) - 5} more'
+        issues.append(f"SPRING ISSUES: {issue_list}.")
+
+    # 12. Check numerical conditioning and identify problematic members
     try:
         from numpy.linalg import cond
         condition_number = cond(K11_dense)
