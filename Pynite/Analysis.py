@@ -156,6 +156,134 @@ def _check_stability(model: FEModel3D, K: NDArray[float64]) -> None:
     return
 
 
+def _identify_unstable_nodes(model: FEModel3D, K11: NDArray[float64], D1_indices: List[int]) -> List[str]:
+    """
+    Identifies nodes with unstable (zero or near-zero) diagonal stiffness terms.
+
+    This function is called when the stiffness matrix factorization fails to help
+    users identify which nodes are causing the instability.
+
+    Parameters
+    ----------
+    model : FEModel3D
+        The finite element model being analyzed.
+    K11 : NDArray[float64]
+        The partitioned stiffness matrix for unknown DOFs.
+    D1_indices : List[int]
+        Indices mapping K11 rows/cols back to global DOF numbers.
+
+    Returns
+    -------
+    List[str]
+        List of node names with unstable degrees of freedom, with direction info.
+    """
+    unstable_nodes = []
+    directions = ['DX', 'DY', 'DZ', 'RX', 'RY', 'RZ']
+
+    # Convert to array if sparse
+    if hasattr(K11, 'toarray'):
+        K_diag = K11.diagonal()
+    else:
+        from numpy import diag
+        K_diag = diag(K11)
+
+    # Check each diagonal element for zero or near-zero values
+    for i, diag_val in enumerate(K_diag):
+        if isclose(diag_val, 0, abs_tol=1e-10):
+            # Map back to global DOF index
+            global_dof = D1_indices[i]
+            node_id = global_dof // 6
+            dof_type = global_dof % 6
+
+            # Find the node with this ID
+            for node in model.nodes.values():
+                if node.ID == node_id:
+                    node_info = f"{node.name} ({directions[dof_type]})"
+                    if node_info not in unstable_nodes:
+                        unstable_nodes.append(node_info)
+                    break
+
+    # If no zero diagonals found, try to identify potentially floating nodes
+    # (nodes that might not be properly connected to the structure)
+    if not unstable_nodes:
+        floating_nodes = _identify_floating_nodes(model)
+        if floating_nodes:
+            unstable_nodes = [f"{name} (possibly disconnected)" for name in floating_nodes]
+
+    return unstable_nodes
+
+
+def _identify_floating_nodes(model: FEModel3D) -> List[str]:
+    """
+    Identifies nodes that may be 'floating' (not properly connected to the structure).
+
+    A node is considered potentially floating if it cannot reach a supported node
+    through element connections. This uses a graph traversal approach.
+
+    Returns
+    -------
+    List[str]
+        List of node names that might be floating (not connected to supports).
+    """
+    # Build adjacency list for node connectivity
+    adjacency = {name: set() for name in model.nodes.keys()}
+
+    # Add connections from members
+    for phys_member in model.members.values():
+        for sub_member in phys_member.sub_members.values():
+            i_name = sub_member.i_node.name
+            j_name = sub_member.j_node.name
+            adjacency[i_name].add(j_name)
+            adjacency[j_name].add(i_name)
+
+    # Add connections from springs
+    for spring in model.springs.values():
+        i_name = spring.i_node.name
+        j_name = spring.j_node.name
+        adjacency[i_name].add(j_name)
+        adjacency[j_name].add(i_name)
+
+    # Add connections from plates
+    for plate in model.plates.values():
+        plate_nodes = [plate.i_node.name, plate.j_node.name,
+                       plate.m_node.name, plate.n_node.name]
+        for i, n1 in enumerate(plate_nodes):
+            for n2 in plate_nodes[i+1:]:
+                adjacency[n1].add(n2)
+                adjacency[n2].add(n1)
+
+    # Add connections from quads
+    for quad in model.quads.values():
+        quad_nodes = [quad.i_node.name, quad.j_node.name,
+                      quad.m_node.name, quad.n_node.name]
+        for i, n1 in enumerate(quad_nodes):
+            for n2 in quad_nodes[i+1:]:
+                adjacency[n1].add(n2)
+                adjacency[n2].add(n1)
+
+    # Find all supported nodes
+    supported = set()
+    for name, node in model.nodes.items():
+        if (node.support_DX or node.support_DY or node.support_DZ or
+            node.support_RX or node.support_RY or node.support_RZ):
+            supported.add(name)
+
+    # BFS from all supported nodes to find all reachable nodes
+    reachable = set(supported)
+    queue = list(supported)
+    while queue:
+        current = queue.pop(0)
+        for neighbor in adjacency[current]:
+            if neighbor not in reachable:
+                reachable.add(neighbor)
+                queue.append(neighbor)
+
+    # Nodes not reachable from any support are floating
+    floating = [name for name in model.nodes.keys() if name not in reachable]
+
+    return floating
+
+
 def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArray[float64], D1_indices: List[int], D2_indices: List[int], D2: NDArray[float64], log: bool = True, sparse: bool = True, check_stability: bool = False, max_iter: int = 30) -> None:
     """Performs second order (P-Delta) analysis. This type of analysis is appropriate for most models using beams, columns and braces. Second order analysis is usually required by material-specific codes. Models with slender members and/or members with combined bending and axial loads will generally have more significant P-Delta effects. P-Delta effects in plates/quads are not considered by Pynite at this time.
 
@@ -268,8 +396,19 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
                         D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
 
                 except:
-                    # Return out of the method if 'K' is singular and provide an error message
-                    raise ValueError('The stiffness matrix is singular, which indicates that the structure is unstable.')
+                    # Identify unstable nodes to help the user debug the issue
+                    unstable_nodes = _identify_unstable_nodes(model, K11, D1_indices)
+                    if unstable_nodes:
+                        node_list = ', '.join(unstable_nodes[:10])
+                        if len(unstable_nodes) > 10:
+                            node_list += f', ... and {len(unstable_nodes) - 10} more'
+                        raise ValueError(
+                            f'The stiffness matrix is singular, which indicates the structure is unstable. '
+                            f'Unstable nodes: {node_list}. '
+                            f'Check that all members are properly connected and all nodes are supported or connected to the structure.'
+                        )
+                    else:
+                        raise ValueError('The stiffness matrix is singular, which indicates that the structure is unstable.')
 
             # Store the calculated displacements
             _store_displacements(model, D1, D2, D1_indices, D2_indices, model.load_combos[combo_name])
@@ -377,8 +516,18 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
                     Delta_D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
 
             except:
-                # Return out of the method if 'K' is singular and provide an error message
-                raise ValueError('The structure is unstable. Unable to proceed any further with analysis.')
+                # Identify unstable nodes to help the user debug the issue
+                unstable_nodes = _identify_unstable_nodes(model, K11, D1_indices)
+                if unstable_nodes:
+                    node_list = ', '.join(unstable_nodes[:10])
+                    if len(unstable_nodes) > 10:
+                        node_list += f', ... and {len(unstable_nodes) - 10} more'
+                    raise ValueError(
+                        f'The structure is unstable. Unstable nodes: {node_list}. '
+                        f'Check that all members are properly connected and all nodes are supported or connected to the structure.'
+                    )
+                else:
+                    raise ValueError('The structure is unstable. Unable to proceed any further with analysis.')
 
         # Unpartition the displacement results from the analysis step
         Delta_D = _unpartition_disp(model, Delta_D1, D2, D1_indices, D2_indices)
