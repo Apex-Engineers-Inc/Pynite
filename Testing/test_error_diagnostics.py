@@ -573,7 +573,7 @@ class TestCoplanarStructureDetection(unittest.TestCase):
         return model
 
     def test_coplanar_xz_wall_detected(self):
-        """Test that a framed wall in XZ plane is detected and appropriate warning given."""
+        """Test that a framed wall in XZ plane with single pin support triggers coplanar warning."""
         from Pynite.Analysis import _diagnose_singularity, _prepare_model
         from scipy.sparse import lil_matrix
 
@@ -596,9 +596,9 @@ class TestCoplanarStructureDetection(unittest.TestCase):
         model.add_member('S1', 'N1', 'N3', 'Steel', 'W8x31')
         model.add_member('S2', 'N2', 'N4', 'Steel', 'W8x31')
 
-        # Add typical supports (pin at bottom corners, but no RY support)
+        # Single pin support - RY is NOT geometrically restrained
+        # (only one DZ support, can't prevent rotation about Y)
         model.def_support('N1', True, True, True, False, False, False)
-        model.def_support('N2', True, True, True, False, False, False)
 
         # Prepare model to assign node IDs
         _prepare_model(model)
@@ -650,6 +650,92 @@ class TestCoplanarStructureDetection(unittest.TestCase):
 
         # Should NOT detect coplanar warning
         self.assertNotIn('COPLANAR', result)
+
+
+class TestGeometricRotationRestraint(unittest.TestCase):
+    """Tests for geometric rotation restraint detection (pin supports in triangle pattern)."""
+
+    def setUp(self):
+        sys.stdout = StringIO()
+        warnings.filterwarnings('error')
+
+    def tearDown(self):
+        sys.stdout = sys.__stdout__
+        warnings.resetwarnings()
+
+    def _create_basic_model(self):
+        """Helper to create a basic model with material and section defined."""
+        model = FEModel3D()
+        model.add_material('Steel', 29000, 11200, 0.3, 490/1000/12**3)
+        model.add_section('W8x31', 9.13, 37.1, 110, 0.536)
+        return model
+
+    def test_triangle_pins_no_rotation_warning(self):
+        """Test that 3 pin supports in a triangle don't trigger rotation warnings."""
+        from Pynite.Analysis import _diagnose_singularity, _prepare_model
+        from scipy.sparse import lil_matrix
+
+        model = self._create_basic_model()
+
+        # Create a simple triangular frame with 3 pin supports
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 120, 0, 0)
+        model.add_node('N3', 60, 100, 0)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W8x31')
+        model.add_member('M2', 'N2', 'N3', 'Steel', 'W8x31')
+        model.add_member('M3', 'N3', 'N1', 'Steel', 'W8x31')
+
+        # 3 pin supports (DX, DY, DZ only - no rotational supports)
+        model.def_support('N1', True, True, True, False, False, False)
+        model.def_support('N2', True, True, True, False, False, False)
+        model.def_support('N3', True, True, True, False, False, False)
+
+        _prepare_model(model)
+
+        n = 6 * len(model.nodes)
+        K = lil_matrix((n, n))
+        for i in range(n):
+            K[i, i] = 1.0
+        D1_indices = list(range(n))
+
+        result = _diagnose_singularity(model, K, D1_indices, sparse=True)
+
+        # Should NOT warn about missing RX, RY, RZ because geometry prevents rotation
+        self.assertNotIn('MISSING GLOBAL CONSTRAINTS', result)
+        self.assertNotIn('RX', result)
+        self.assertNotIn('RY', result)
+        self.assertNotIn('RZ', result)
+
+    def test_collinear_pins_warns_rotation(self):
+        """Test that 2 collinear pin supports DO trigger rotation warning."""
+        from Pynite.Analysis import _diagnose_singularity, _prepare_model
+        from scipy.sparse import lil_matrix
+
+        model = self._create_basic_model()
+
+        # Create a beam with 2 pin supports in a line (can rotate about that line)
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 120, 0, 0)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W8x31')
+
+        # 2 pin supports along X axis - can still rotate about X
+        model.def_support('N1', True, True, True, False, False, False)
+        model.def_support('N2', True, True, True, False, False, False)
+
+        _prepare_model(model)
+
+        n = 6 * len(model.nodes)
+        K = lil_matrix((n, n))
+        for i in range(n):
+            K[i, i] = 1.0
+        D1_indices = list(range(n))
+
+        result = _diagnose_singularity(model, K, D1_indices, sparse=True)
+
+        # SHOULD warn about RX because both pins are at same Y and Z
+        self.assertIn('RX', result)
 
 
 if __name__ == '__main__':

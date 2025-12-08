@@ -705,17 +705,21 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
     # Verify that supports constrain all 6 rigid body modes (3 translations + 3 rotations)
     supported_dofs = {'DX': False, 'DY': False, 'DZ': False, 'RX': False, 'RY': False, 'RZ': False}
     support_locations = {'DX': [], 'DY': [], 'DZ': [], 'RX': [], 'RY': [], 'RZ': []}
+    support_coords = {'DX': [], 'DY': [], 'DZ': []}  # Store coordinates for geometric checks
 
     for node_name, node in model.nodes.items():
         if node.support_DX:
             supported_dofs['DX'] = True
             support_locations['DX'].append(node_name)
+            support_coords['DX'].append((node.X, node.Y, node.Z))
         if node.support_DY:
             supported_dofs['DY'] = True
             support_locations['DY'].append(node_name)
+            support_coords['DY'].append((node.X, node.Y, node.Z))
         if node.support_DZ:
             supported_dofs['DZ'] = True
             support_locations['DZ'].append(node_name)
+            support_coords['DZ'].append((node.X, node.Y, node.Z))
         if node.support_RX:
             supported_dofs['RX'] = True
             support_locations['RX'].append(node_name)
@@ -726,7 +730,42 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
             supported_dofs['RZ'] = True
             support_locations['RZ'].append(node_name)
 
-    # Check for missing global constraints
+    # Check for geometric rotation restraint from translation supports
+    # Rotation about an axis is prevented if translation supports exist at different positions
+    # perpendicular to that axis
+    geom_tol = 0.001  # Tolerance for "different" positions
+
+    # RX (rotation about X) is prevented by DY or DZ supports at different Y-Z positions
+    if not supported_dofs['RX']:
+        # Check if DY supports are at different Z coordinates
+        z_coords_dy = [c[2] for c in support_coords['DY']]
+        # Check if DZ supports are at different Y coordinates
+        y_coords_dz = [c[1] for c in support_coords['DZ']]
+        if (len(z_coords_dy) >= 2 and max(z_coords_dy) - min(z_coords_dy) > geom_tol) or \
+           (len(y_coords_dz) >= 2 and max(y_coords_dz) - min(y_coords_dz) > geom_tol):
+            supported_dofs['RX'] = True  # Geometrically restrained
+
+    # RY (rotation about Y) is prevented by DX or DZ supports at different X-Z positions
+    if not supported_dofs['RY']:
+        # Check if DX supports are at different Z coordinates
+        z_coords_dx = [c[2] for c in support_coords['DX']]
+        # Check if DZ supports are at different X coordinates
+        x_coords_dz = [c[0] for c in support_coords['DZ']]
+        if (len(z_coords_dx) >= 2 and max(z_coords_dx) - min(z_coords_dx) > geom_tol) or \
+           (len(x_coords_dz) >= 2 and max(x_coords_dz) - min(x_coords_dz) > geom_tol):
+            supported_dofs['RY'] = True  # Geometrically restrained
+
+    # RZ (rotation about Z) is prevented by DX or DY supports at different X-Y positions
+    if not supported_dofs['RZ']:
+        # Check if DX supports are at different Y coordinates
+        y_coords_dx = [c[1] for c in support_coords['DX']]
+        # Check if DY supports are at different X coordinates
+        x_coords_dy = [c[0] for c in support_coords['DY']]
+        if (len(y_coords_dx) >= 2 and max(y_coords_dx) - min(y_coords_dx) > geom_tol) or \
+           (len(x_coords_dy) >= 2 and max(x_coords_dy) - min(x_coords_dy) > geom_tol):
+            supported_dofs['RZ'] = True  # Geometrically restrained
+
+    # Check for missing global constraints (after accounting for geometric restraints)
     missing_constraints = []
     for dof, is_supported in supported_dofs.items():
         if not is_supported:
@@ -739,6 +778,7 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
         issues.append(msg)
 
     # Check if translation supports are at single point (can still rotate)
+    # But only warn if rotation is not geometrically restrained
     for trans_dof in ['DX', 'DY', 'DZ']:
         if len(support_locations[trans_dof]) == 1:
             # Only one node supports this translation - might allow rotation
@@ -830,23 +870,28 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
                                 plane_type = "oblique"
 
                             if plane_type and plane_type != "oblique":
-                                # Check if out-of-plane DOFs are properly restrained
-                                out_plane_issues = []
+                                # Check if the in-plane rotation is already geometrically restrained
+                                # (computed earlier in check 13)
+                                if supported_dofs.get(in_plane_rotation, False):
+                                    pass  # Geometrically stable, no warning needed
+                                else:
+                                    # Check if out-of-plane DOFs are properly restrained
+                                    out_plane_issues = []
 
-                                # Check for unsupported in-plane rotation at all nodes
-                                for node_name in member_nodes:
-                                    node = model.nodes.get(node_name)
-                                    if node:
-                                        rot_attr = f"support_{in_plane_rotation}"
-                                        if not getattr(node, rot_attr, False):
-                                            out_plane_issues.append(node_name)
+                                    # Check for unsupported in-plane rotation at all nodes
+                                    for node_name in member_nodes:
+                                        node = model.nodes.get(node_name)
+                                        if node:
+                                            rot_attr = f"support_{in_plane_rotation}"
+                                            if not getattr(node, rot_attr, False):
+                                                out_plane_issues.append(node_name)
 
-                                if len(out_plane_issues) == len(member_nodes):
-                                    # No nodes have the in-plane rotation supported - this is a likely issue
-                                    issues.append(f"COPLANAR FRAME STRUCTURE: All members lie in the {plane_type} plane (wall/frame). "
-                                                f"The in-plane rotation ({in_plane_rotation}) is not restrained at any node. "
-                                                "In planar frames, rotations perpendicular to member weak axes may need restraint. "
-                                                f"Consider supporting {in_plane_rotation} at key nodes or adding out-of-plane bracing.")
+                                    if len(out_plane_issues) == len(member_nodes):
+                                        # No nodes have the in-plane rotation supported - this is a likely issue
+                                        issues.append(f"COPLANAR FRAME STRUCTURE: All members lie in the {plane_type} plane (wall/frame). "
+                                                    f"The in-plane rotation ({in_plane_rotation}) is not restrained at any node. "
+                                                    "In planar frames, rotations perpendicular to member weak axes may need restraint. "
+                                                    f"Consider supporting {in_plane_rotation} at key nodes or adding out-of-plane bracing.")
         except Exception:
             pass  # Skip if detection fails
 
