@@ -320,25 +320,36 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
         issues.append(f"COINCIDENT NODES: Multiple nodes exist at the same location: {', '.join(group_strs)}. "
                      "Consider merging these nodes or using different coordinates.")
 
-    # 6. Check for unstable degrees of freedom (zero diagonal terms)
+    # 6. Check for unstable degrees of freedom (zero or very small diagonal terms)
     unstable_dofs = []
+    weak_dofs = []
+    dof_names = ['DX', 'DY', 'DZ', 'RX', 'RY', 'RZ']
+
+    # Get the maximum diagonal value for comparison
+    max_diag = max(abs(K11_dense[i, i]) for i in range(K11_dense.shape[0])) if K11_dense.shape[0] > 0 else 1
+
     for i in range(K11_dense.shape[0]):
-        if isclose(K11_dense[i, i], 0, abs_tol=1e-12):
-            # Map back to global DOF
-            global_dof = D1_indices[i]
-            node_id = global_dof // 6
-            dof_type = global_dof % 6
+        diag_val = K11_dense[i, i]
 
-            # Find the node
-            node_name = None
-            for node in model.nodes.values():
-                if node.ID == node_id:
-                    node_name = node.name
-                    break
+        # Map back to global DOF
+        global_dof = D1_indices[i]
+        node_id = global_dof // 6
+        dof_type = global_dof % 6
 
-            dof_names = ['DX', 'DY', 'DZ', 'RX', 'RY', 'RZ']
-            if node_name:
+        # Find the node
+        node_name = None
+        for node in model.nodes.values():
+            if node.ID == node_id:
+                node_name = node.name
+                break
+
+        if node_name:
+            # Check for exactly zero diagonal
+            if isclose(diag_val, 0, abs_tol=1e-12):
                 unstable_dofs.append(f"{node_name}:{dof_names[dof_type]}")
+            # Check for very small diagonal relative to max (potential numerical instability)
+            elif max_diag > 0 and abs(diag_val) / max_diag < 1e-10:
+                weak_dofs.append(f"{node_name}:{dof_names[dof_type]} (k={diag_val:.2e})")
 
     if unstable_dofs:
         dof_list = ', '.join(unstable_dofs[:10])
@@ -346,6 +357,64 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
             dof_list += f', ... and {len(unstable_dofs) - 10} more'
         issues.append(f"UNSTABLE DEGREES OF FREEDOM: The following DOFs have zero stiffness: {dof_list}. "
                      "Check that these nodes are properly connected and/or supported.")
+
+    if weak_dofs and not unstable_dofs:
+        dof_list = ', '.join(weak_dofs[:10])
+        if len(weak_dofs) > 10:
+            dof_list += f', ... and {len(weak_dofs) - 10} more'
+        issues.append(f"WEAK DEGREES OF FREEDOM: The following DOFs have very small stiffness relative to the model: {dof_list}. "
+                     "This can cause numerical instability.")
+
+    # 6b. Check for plate drilling DOF issues (common in wall models)
+    if model.plates or model.quads:
+        # Plates have no stiffness for rotation about their normal (drilling DOF)
+        # This is a common cause of singularity in plate/wall models
+
+        # Find nodes that are ONLY connected to plates/quads (not to any members)
+        plate_only_nodes = set()
+        member_nodes = set()
+
+        for member in model.members.values():
+            if hasattr(member, 'sub_members') and member.sub_members:
+                for sub_member in member.sub_members.values():
+                    member_nodes.add(sub_member.i_node.name)
+                    member_nodes.add(sub_member.j_node.name)
+            elif hasattr(member, 'i_node'):
+                member_nodes.add(member.i_node.name)
+                member_nodes.add(member.j_node.name)
+
+        for plate in model.plates.values():
+            for node in [plate.i_node, plate.j_node, plate.m_node, plate.n_node]:
+                if node.name not in member_nodes:
+                    plate_only_nodes.add(node.name)
+
+        for quad in model.quads.values():
+            for node in [quad.i_node, quad.j_node, quad.m_node, quad.n_node]:
+                if node.name not in member_nodes:
+                    plate_only_nodes.add(node.name)
+
+        # Check if these plate-only nodes have their drilling DOF supported
+        drilling_dof_issues = []
+        for node_name in plate_only_nodes:
+            node = model.nodes.get(node_name)
+            if node:
+                # Determine which rotation is the drilling DOF based on plate orientation
+                # For simplicity, check if any rotational DOF might be unsupported
+                # In a wall (vertical plate), the drilling DOF is typically RZ (rotation about Z)
+                # In a floor (horizontal plate), the drilling DOF is typically RX or RY
+                if not (node.support_RX and node.support_RY and node.support_RZ):
+                    drilling_dof_issues.append(node_name)
+
+        if drilling_dof_issues:
+            node_list = ', '.join(drilling_dof_issues[:10])
+            if len(drilling_dof_issues) > 10:
+                node_list += f', ... and {len(drilling_dof_issues) - 10} more'
+            issues.append(f"PLATE DRILLING DOF INSTABILITY: Nodes connected only to plates/quads may have unstable "
+                         f"drilling rotation DOF: {node_list}. "
+                         "Plates have no stiffness for rotation perpendicular to their surface. "
+                         "Consider: (1) supporting the drilling DOF at these nodes, "
+                         "(2) connecting frame members to provide rotational stiffness, or "
+                         "(3) using a plate formulation that includes drilling DOF stiffness.")
 
     # 7. Check for mechanism formation (member releases creating mechanisms)
     mechanism_warnings = []
@@ -518,7 +587,7 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
 
     # 12. Check numerical conditioning and identify problematic members
     try:
-        from numpy.linalg import cond
+        from numpy.linalg import cond, svd
         condition_number = cond(K11_dense)
         if condition_number > 1e15 or not issues:
             # Analyze member stiffnesses to find problematic members
@@ -526,16 +595,117 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
 
             if condition_number > 1e15:
                 msg = (f"ILL-CONDITIONED MATRIX: The stiffness matrix has a very high condition number ({condition_number:.2e}). "
-                      "This indicates large differences in stiffness values that cause numerical instability.\n")
+                      "This indicates the matrix is numerically singular.\n")
 
                 if member_stiffness_info:
+                    # Check if member stiffnesses look reasonable
+                    if "Stiffness ratio" in member_stiffness_info:
+                        # Extract stiffness ratio from the info
+                        import re
+                        ratio_match = re.search(r'Stiffness ratio.*?(\d+\.?\d*e[+-]?\d+)', member_stiffness_info)
+                        if ratio_match:
+                            ratio_val = float(ratio_match.group(1))
+                            if ratio_val < 1e4:
+                                # Stiffness ratio is reasonable - issue is elsewhere
+                                msg += "\n   NOTE: Member stiffnesses appear reasonable (ratio < 10,000).\n"
+                                msg += "   The singularity is likely caused by:\n"
+                                msg += "   - Missing support in one or more directions (check all 6 DOFs are constrained)\n"
+                                msg += "   - Members all in the same plane without out-of-plane restraint\n"
+                                msg += "   - Mechanism formation from member releases\n"
+                                msg += "   - Colinear members at a node without rotational restraint\n"
                     msg += f"\n{member_stiffness_info}"
                 else:
                     msg += "\nCheck for members with vastly different stiffness values or verify unit consistency."
 
+                # Try to identify the singular DOFs using SVD
+                try:
+                    U, S, Vh = svd(K11_dense)
+                    # Find near-zero singular values
+                    max_sv = S[0] if len(S) > 0 else 1
+                    singular_modes = []
+                    for i, sv in enumerate(S):
+                        if sv / max_sv < 1e-12:
+                            # This mode is singular - find which DOFs contribute most
+                            mode_vec = Vh[i]
+                            # Find the DOF with largest contribution
+                            max_idx = abs(mode_vec).argmax()
+                            global_dof = D1_indices[max_idx]
+                            node_id = global_dof // 6
+                            dof_type = global_dof % 6
+                            dof_names = ['DX', 'DY', 'DZ', 'RX', 'RY', 'RZ']
+
+                            node_name = None
+                            for node in model.nodes.values():
+                                if node.ID == node_id:
+                                    node_name = node.name
+                                    break
+
+                            if node_name:
+                                singular_modes.append(f"Mode {i+1}: primarily {node_name}:{dof_names[dof_type]} (contribution: {abs(mode_vec[max_idx]):.2f})")
+
+                    if singular_modes:
+                        msg += f"\n\n   SINGULAR MODES DETECTED ({len(singular_modes)} mode(s)):\n"
+                        for mode in singular_modes[:5]:
+                            msg += f"   - {mode}\n"
+                        if len(singular_modes) > 5:
+                            msg += f"   - ... and {len(singular_modes) - 5} more\n"
+                        msg += "\n   These DOFs have zero stiffness in certain directions."
+                except Exception:
+                    pass
+
                 issues.append(msg)
     except Exception:
         pass
+
+    # 13. Check for global rigid body motion potential
+    # Verify that supports constrain all 6 rigid body modes (3 translations + 3 rotations)
+    supported_dofs = {'DX': False, 'DY': False, 'DZ': False, 'RX': False, 'RY': False, 'RZ': False}
+    support_locations = {'DX': [], 'DY': [], 'DZ': [], 'RX': [], 'RY': [], 'RZ': []}
+
+    for node_name, node in model.nodes.items():
+        if node.support_DX:
+            supported_dofs['DX'] = True
+            support_locations['DX'].append(node_name)
+        if node.support_DY:
+            supported_dofs['DY'] = True
+            support_locations['DY'].append(node_name)
+        if node.support_DZ:
+            supported_dofs['DZ'] = True
+            support_locations['DZ'].append(node_name)
+        if node.support_RX:
+            supported_dofs['RX'] = True
+            support_locations['RX'].append(node_name)
+        if node.support_RY:
+            supported_dofs['RY'] = True
+            support_locations['RY'].append(node_name)
+        if node.support_RZ:
+            supported_dofs['RZ'] = True
+            support_locations['RZ'].append(node_name)
+
+    # Check for missing global constraints
+    missing_constraints = []
+    for dof, is_supported in supported_dofs.items():
+        if not is_supported:
+            missing_constraints.append(dof)
+
+    if missing_constraints:
+        msg = f"MISSING GLOBAL CONSTRAINTS: No supports restrain the following DOFs: {', '.join(missing_constraints)}. "
+        msg += "The model can undergo rigid body motion in these directions. "
+        msg += "Add supports to constrain these degrees of freedom."
+        issues.append(msg)
+
+    # Check if translation supports are at single point (can still rotate)
+    for trans_dof in ['DX', 'DY', 'DZ']:
+        if len(support_locations[trans_dof]) == 1:
+            # Only one node supports this translation - might allow rotation
+            single_node = support_locations[trans_dof][0]
+            # Determine which rotation could occur about this point
+            rot_needed = {'DX': ['RY', 'RZ'], 'DY': ['RX', 'RZ'], 'DZ': ['RX', 'RY']}
+            for rot_dof in rot_needed[trans_dof]:
+                if not supported_dofs[rot_dof]:
+                    if f"rotation about {rot_dof}" not in str(issues):
+                        issues.append(f"POTENTIAL RIGID BODY ROTATION: {trans_dof} is only supported at node {single_node}, "
+                                     f"but {rot_dof} is not restrained. The model may be able to rotate about this point.")
 
     # Build the final error message
     if issues:
