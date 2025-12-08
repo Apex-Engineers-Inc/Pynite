@@ -66,7 +66,8 @@ class PhysMember(Member3D):
 
                 # Determine if the node is colinear with the member
                 # Use abs_tol to handle floating-point precision issues (especially with inch-based models)
-                if isclose(angle, 0, abs_tol=1e-6):
+                # abs_tol=1e-3 radians ≈ 0.057 degrees, catches nodes within ~0.1" of line for 100" member
+                if isclose(angle, 0, abs_tol=1e-3):
 
                     # Determine if the node is on the member
                     if norm(vector_in) < norm(vector_ij):
