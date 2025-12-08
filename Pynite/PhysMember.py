@@ -65,7 +65,8 @@ class PhysMember(Member3D):
                 angle = acos(round(dot(vector_in, vector_ij)/(norm(vector_in)*norm(vector_ij)), 10))
 
                 # Determine if the node is colinear with the member
-                if isclose(angle, 0):
+                # Use abs_tol to handle floating-point precision issues (especially with inch-based models)
+                if isclose(angle, 0, abs_tol=1e-6):
 
                     # Determine if the node is on the member
                     if norm(vector_in) < norm(vector_ij):
