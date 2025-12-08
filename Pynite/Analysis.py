@@ -707,6 +707,105 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
                         issues.append(f"POTENTIAL RIGID BODY ROTATION: {trans_dof} is only supported at node {single_node}, "
                                      f"but {rot_dof} is not restrained. The model may be able to rotate about this point.")
 
+    # 14. Check for coplanar structures (common in framed walls)
+    # If all members lie in a single plane, out-of-plane DOFs need special attention
+    if model.members and not model.plates and not model.quads:
+        # Only check for member-only models (no plates/quads)
+        try:
+            from numpy import cross, array
+            from numpy.linalg import norm
+
+            # Collect all node positions from members
+            member_nodes = set()
+            for member in model.members.values():
+                if hasattr(member, 'sub_members') and member.sub_members:
+                    for sub_member in member.sub_members.values():
+                        member_nodes.add(sub_member.i_node.name)
+                        member_nodes.add(sub_member.j_node.name)
+                elif hasattr(member, 'i_node'):
+                    member_nodes.add(member.i_node.name)
+                    member_nodes.add(member.j_node.name)
+
+            if len(member_nodes) >= 3:
+                # Get node coordinates
+                node_coords = []
+                for node_name in member_nodes:
+                    node = model.nodes.get(node_name)
+                    if node:
+                        node_coords.append(array([node.X, node.Y, node.Z]))
+
+                if len(node_coords) >= 3:
+                    # Check if all nodes are coplanar by computing plane normal from first 3 non-collinear nodes
+                    p0 = node_coords[0]
+                    plane_normal = None
+
+                    # Find first valid plane normal from non-collinear points
+                    for i in range(1, len(node_coords)):
+                        for j in range(i + 1, len(node_coords)):
+                            v1 = node_coords[i] - p0
+                            v2 = node_coords[j] - p0
+                            n = cross(v1, v2)
+                            n_mag = norm(n)
+                            if n_mag > 1e-6:
+                                plane_normal = n / n_mag
+                                break
+                        if plane_normal is not None:
+                            break
+
+                    if plane_normal is not None:
+                        # Check if all other nodes lie on this plane
+                        is_coplanar = True
+                        max_distance = 0
+                        for coord in node_coords:
+                            dist = abs((coord - p0).dot(plane_normal))
+                            max_distance = max(max_distance, dist)
+                            if dist > 0.01:  # Tolerance for coplanarity
+                                is_coplanar = False
+                                break
+
+                        if is_coplanar:
+                            # Determine which plane (XY, XZ, or YZ)
+                            abs_normal = abs(plane_normal)
+                            plane_type = None
+                            out_of_plane_trans = None
+                            in_plane_rotation = None
+
+                            if abs_normal[0] > 0.9:  # Normal is approximately X-axis -> YZ plane
+                                plane_type = "YZ"
+                                out_of_plane_trans = "DX"
+                                in_plane_rotation = "RX"
+                            elif abs_normal[1] > 0.9:  # Normal is approximately Y-axis -> XZ plane
+                                plane_type = "XZ"
+                                out_of_plane_trans = "DY"
+                                in_plane_rotation = "RY"
+                            elif abs_normal[2] > 0.9:  # Normal is approximately Z-axis -> XY plane
+                                plane_type = "XY"
+                                out_of_plane_trans = "DZ"
+                                in_plane_rotation = "RZ"
+                            else:
+                                plane_type = "oblique"
+
+                            if plane_type and plane_type != "oblique":
+                                # Check if out-of-plane DOFs are properly restrained
+                                out_plane_issues = []
+
+                                # Check for unsupported in-plane rotation at all nodes
+                                for node_name in member_nodes:
+                                    node = model.nodes.get(node_name)
+                                    if node:
+                                        rot_attr = f"support_{in_plane_rotation}"
+                                        if not getattr(node, rot_attr, False):
+                                            out_plane_issues.append(node_name)
+
+                                if len(out_plane_issues) == len(member_nodes):
+                                    # No nodes have the in-plane rotation supported - this is a likely issue
+                                    issues.append(f"COPLANAR FRAME STRUCTURE: All members lie in the {plane_type} plane (wall/frame). "
+                                                f"The in-plane rotation ({in_plane_rotation}) is not restrained at any node. "
+                                                "In planar frames, rotations perpendicular to member weak axes may need restraint. "
+                                                f"Consider supporting {in_plane_rotation} at key nodes or adding out-of-plane bracing.")
+        except Exception:
+            pass  # Skip if detection fails
+
     # Build the final error message
     if issues:
         error_msg = "SINGULAR STIFFNESS MATRIX - Analysis cannot proceed.\n\nRoot cause(s) identified:\n"

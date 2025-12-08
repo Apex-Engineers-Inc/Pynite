@@ -508,5 +508,103 @@ class TestMemberStiffnessAnalysis(unittest.TestCase):
         self.assertEqual(result, "")
 
 
+class TestCoplanarStructureDetection(unittest.TestCase):
+    """Tests for coplanar (framed wall) structure detection."""
+
+    def setUp(self):
+        sys.stdout = StringIO()
+        warnings.filterwarnings('error')
+
+    def tearDown(self):
+        sys.stdout = sys.__stdout__
+        warnings.resetwarnings()
+
+    def _create_basic_model(self):
+        """Helper to create a basic model with material and section defined."""
+        model = FEModel3D()
+        model.add_material('Steel', 29000, 11200, 0.3, 490/1000/12**3)
+        model.add_section('W8x31', 9.13, 37.1, 110, 0.536)
+        return model
+
+    def test_coplanar_xz_wall_detected(self):
+        """Test that a framed wall in XZ plane is detected and appropriate warning given."""
+        from Pynite.Analysis import _diagnose_singularity, _prepare_model
+        from scipy.sparse import lil_matrix
+
+        model = self._create_basic_model()
+
+        # Create a simple framed wall in XZ plane (Y=0)
+        # Bottom plate nodes
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 144, 0, 0)  # 12 ft wall
+
+        # Top plate nodes
+        model.add_node('N3', 0, 0, 108)  # 9 ft height
+        model.add_node('N4', 144, 0, 108)
+
+        # Bottom plate
+        model.add_member('BP', 'N1', 'N2', 'Steel', 'W8x31')
+        # Top plate
+        model.add_member('TP', 'N3', 'N4', 'Steel', 'W8x31')
+        # Studs
+        model.add_member('S1', 'N1', 'N3', 'Steel', 'W8x31')
+        model.add_member('S2', 'N2', 'N4', 'Steel', 'W8x31')
+
+        # Add typical supports (pin at bottom corners, but no RY support)
+        model.def_support('N1', True, True, True, False, False, False)
+        model.def_support('N2', True, True, True, False, False, False)
+
+        # Prepare model to assign node IDs
+        _prepare_model(model)
+
+        # Create a simple matrix for testing
+        n = 6 * len(model.nodes)
+        K = lil_matrix((n, n))
+        for i in range(n):
+            K[i, i] = 1.0
+        D1_indices = list(range(n))
+
+        # Call the diagnostic function
+        result = _diagnose_singularity(model, K, D1_indices, sparse=True)
+
+        # Should detect this is a coplanar structure in XZ plane and warn about RY
+        self.assertIn('COPLANAR', result)
+        self.assertIn('XZ', result)
+        self.assertIn('RY', result)
+
+    def test_non_coplanar_model_no_warning(self):
+        """Test that a 3D model does not trigger coplanar warning."""
+        from Pynite.Analysis import _diagnose_singularity, _prepare_model
+        from scipy.sparse import lil_matrix
+
+        model = self._create_basic_model()
+
+        # Create a simple 3D structure (not coplanar)
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 120, 0, 0)
+        model.add_node('N3', 0, 120, 0)
+        model.add_node('N4', 0, 0, 120)  # Out of XY plane
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W8x31')
+        model.add_member('M2', 'N1', 'N3', 'Steel', 'W8x31')
+        model.add_member('M3', 'N1', 'N4', 'Steel', 'W8x31')
+
+        # Fully support one node
+        model.def_support('N1', True, True, True, True, True, True)
+
+        _prepare_model(model)
+
+        n = 6 * len(model.nodes)
+        K = lil_matrix((n, n))
+        for i in range(n):
+            K[i, i] = 1.0
+        D1_indices = list(range(n))
+
+        result = _diagnose_singularity(model, K, D1_indices, sparse=True)
+
+        # Should NOT detect coplanar warning
+        self.assertNotIn('COPLANAR', result)
+
+
 if __name__ == '__main__':
     unittest.main()
