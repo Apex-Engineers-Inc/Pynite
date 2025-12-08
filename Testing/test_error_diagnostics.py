@@ -422,6 +422,52 @@ class TestAdditionalDiagnostics(unittest.TestCase):
             f"Expected diagnostic about plate geometry or supports, got: {result[:300]}"
         )
 
+    def test_unmerged_nodes_detected(self):
+        """Test that singly-connected nodes near other nodes are flagged as potentially unmerged."""
+        from Pynite.Analysis import _diagnose_singularity, _prepare_model
+        from scipy.sparse import lil_matrix
+
+        model = self._create_basic_model()
+
+        # Create a scenario like a framed wall where studs have separate nodes
+        # that should be merged with plate nodes
+
+        # Bottom plate nodes
+        model.add_node('BP_N1', 0, 0, 0)
+        model.add_node('BP_N2', 144, 0, 0)
+
+        # Stud nodes - these are at the SAME location as plate nodes but separate
+        # Simulating floating-point precision issue by making them very slightly different
+        model.add_node('S1_i', 0.0000001, 0, 0)  # Should be at BP_N1
+        model.add_node('S1_j', 0, 0, 108)
+
+        # Bottom plate
+        model.add_member('BP', 'BP_N1', 'BP_N2', 'Steel', 'W8x31')
+        # Stud (not connected to plate - uses separate nodes)
+        model.add_member('S1', 'S1_i', 'S1_j', 'Steel', 'W8x31')
+
+        # Support the plate
+        model.def_support('BP_N1', True, True, True, True, True, True)
+        model.def_support('BP_N2', True, True, True, False, False, False)
+
+        _prepare_model(model)
+
+        n = 6 * len(model.nodes)
+        K = lil_matrix((n, n))
+        for i in range(n):
+            K[i, i] = 1.0
+        D1_indices = list(range(n))
+
+        result = _diagnose_singularity(model, K, D1_indices, sparse=True)
+
+        # Should detect singly-connected nodes and suggest they may be unmerged
+        self.assertIn('SINGLY-CONNECTED', result)
+        # Should detect that S1_i is near BP_N1 and suggest merging
+        self.assertTrue(
+            'UNMERGED' in result or 'merge_duplicate_nodes' in result,
+            f"Expected suggestion about unmerged nodes, got: {result}"
+        )
+
 
 class TestMemberStiffnessAnalysis(unittest.TestCase):
     """Tests for the _analyze_member_stiffnesses helper function."""

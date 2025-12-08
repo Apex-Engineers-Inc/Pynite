@@ -296,9 +296,17 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
         issues.append(f"ZERO STIFFNESS PROPERTIES: The following members have zero or invalid section/material properties: {member_list}.")
 
     # 5. Check for coincident nodes (different nodes at the same location)
+    # Use a tolerance that works for both inch and foot-based models
+    # Estimate model scale from node coordinates to set appropriate tolerance
+    all_coords = []
+    for node in model.nodes.values():
+        all_coords.extend([abs(node.X), abs(node.Y), abs(node.Z)])
+    max_coord = max(all_coords) if all_coords else 1.0
+    # Use relative tolerance (1e-6 of max dimension) with minimum of 1e-6
+    tolerance = max(max_coord * 1e-6, 1e-6)
+
     node_positions = {}
     coincident_groups = []
-    tolerance = 1e-6
 
     for node_name, node in model.nodes.items():
         pos_key = (round(node.X / tolerance) * tolerance,
@@ -318,7 +326,7 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
         if len(coincident_groups) > 5:
             group_strs.append(f'... and {len(coincident_groups) - 5} more groups')
         issues.append(f"COINCIDENT NODES: Multiple nodes exist at the same location: {', '.join(group_strs)}. "
-                     "Consider merging these nodes or using different coordinates.")
+                     "These nodes should share the same name, or call model.merge_duplicate_nodes() before analysis.")
 
     # 6. Check for unstable degrees of freedom (zero or very small diagonal terms)
     unstable_dofs = []
@@ -492,12 +500,48 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
         node_list = ', '.join(singly_connected[:5])
         if len(singly_connected) > 5:
             node_list += f', ... and {len(singly_connected) - 5} more'
-        issues.append(f"SINGLY-CONNECTED NODES: The following nodes are connected to only one element and may lack adequate support: {node_list}. "
-                     "These nodes may need additional supports or connections.")
+
+        # Check if any singly-connected nodes are very close to other nodes (unmerged nodes)
+        # This is a common issue when switching units (feet to inches) due to floating-point precision
+        unmerged_candidates = []
+        merge_tolerance = max(max_coord * 1e-4, 0.01) if 'max_coord' in dir() else 0.1
+
+        singly_node_names = [s.split(' (')[0] for s in singly_connected]  # Extract just the node names
+        for singly_name in singly_node_names[:20]:  # Check first 20 to avoid O(n²) explosion
+            singly_node = model.nodes.get(singly_name)
+            if not singly_node:
+                continue
+            for other_name, other_node in model.nodes.items():
+                if other_name == singly_name:
+                    continue
+                dist = ((singly_node.X - other_node.X)**2 +
+                       (singly_node.Y - other_node.Y)**2 +
+                       (singly_node.Z - other_node.Z)**2)**0.5
+                if dist < merge_tolerance:
+                    unmerged_candidates.append(f"{singly_name} near {other_name} (dist={dist:.2e})")
+                    break  # Found one nearby, move to next singly-connected node
+
+        msg = f"SINGLY-CONNECTED NODES: The following nodes are connected to only one element and may lack adequate support: {node_list}. "
+
+        if unmerged_candidates:
+            msg += f"\n\n   ** LIKELY UNMERGED NODES DETECTED **\n"
+            msg += f"   These singly-connected nodes are very close to other nodes:\n"
+            for candidate in unmerged_candidates[:5]:
+                msg += f"   - {candidate}\n"
+            if len(unmerged_candidates) > 5:
+                msg += f"   - ... and {len(unmerged_candidates) - 5} more\n"
+            msg += "\n   This often happens due to floating-point precision when generating models.\n"
+            msg += "   FIX: Call model.merge_duplicate_nodes(tolerance=0.1) before analysis,\n"
+            msg += "   or ensure members share the same node objects instead of creating separate nodes."
+        else:
+            msg += "These nodes may need additional supports or connections."
+
+        issues.append(msg)
 
     # 9. Check for near-coincident nodes (close but not exactly at same location - potential modeling errors)
     near_coincident = []
-    near_tolerance = 0.01  # Nodes within this distance but not coincident
+    # Scale-aware tolerance: use 0.01% of model size, minimum 0.001
+    near_tolerance = max(max_coord * 1e-4, 0.001) if max_coord > 0 else 0.01
     node_list_items = list(model.nodes.items())
     for i, (name1, node1) in enumerate(node_list_items):
         for name2, node2 in node_list_items[i+1:]:
