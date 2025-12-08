@@ -374,17 +374,26 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
             warn_list += f', ... and {len(mechanism_warnings) - 5} more'
         issues.append(f"POTENTIAL MECHANISM: Release combinations may create mechanisms: {warn_list}.")
 
-    # 8. Check numerical conditioning (if no other issues found)
-    if not issues:
-        try:
-            from numpy.linalg import cond
-            condition_number = cond(K11_dense)
+    # 8. Check numerical conditioning and identify problematic members
+    try:
+        from numpy.linalg import cond
+        condition_number = cond(K11_dense)
+        if condition_number > 1e15 or not issues:
+            # Analyze member stiffnesses to find problematic members
+            member_stiffness_info = _analyze_member_stiffnesses(model)
+
             if condition_number > 1e15:
-                issues.append(f"ILL-CONDITIONED MATRIX: The stiffness matrix has a very high condition number ({condition_number:.2e}). "
-                             "This may be caused by large differences in member stiffnesses or poorly scaled units. "
-                             "Check for members with vastly different stiffness values or verify unit consistency.")
-        except:
-            pass
+                msg = (f"ILL-CONDITIONED MATRIX: The stiffness matrix has a very high condition number ({condition_number:.2e}). "
+                      "This indicates large differences in stiffness values that cause numerical instability.\n")
+
+                if member_stiffness_info:
+                    msg += f"\n{member_stiffness_info}"
+                else:
+                    msg += "\nCheck for members with vastly different stiffness values or verify unit consistency."
+
+                issues.append(msg)
+    except Exception:
+        pass
 
     # Build the final error message
     if issues:
@@ -400,6 +409,148 @@ def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: 
                 "- Numerical precision issues\n"
                 "- Unusual element configurations\n\n"
                 "Please review your model for proper connectivity and support conditions.")
+
+
+def _analyze_member_stiffnesses(model: FEModel3D) -> str:
+    """
+    Analyzes member stiffnesses to identify members that may be causing
+    numerical conditioning issues.
+
+    Returns a formatted string describing problematic members.
+    """
+    from math import inf
+
+    stiffness_data = []
+
+    # Collect stiffness data for all members
+    for member_name, member in model.members.items():
+        try:
+            # Get member properties - handle both PhysMember and Member3D
+            if hasattr(member, 'sub_members') and member.sub_members:
+                # PhysMember - use first sub-member for properties
+                sub_member = list(member.sub_members.values())[0]
+                E = sub_member.material.E
+                A = sub_member.section.A
+                Iy = sub_member.section.Iy
+                Iz = sub_member.section.Iz
+                L = member.L()
+            else:
+                E = member.material.E
+                A = member.section.A
+                Iy = member.section.Iy
+                Iz = member.section.Iz
+                L = member.L()
+
+            # Skip if length is zero or near-zero (already caught by other checks)
+            if L < 1e-10:
+                continue
+
+            # Calculate characteristic stiffnesses
+            axial_stiffness = E * A / L
+            bending_stiffness_y = E * Iy / (L ** 3) if Iy > 0 else 0
+            bending_stiffness_z = E * Iz / (L ** 3) if Iz > 0 else 0
+            max_bending = max(bending_stiffness_y, bending_stiffness_z)
+
+            stiffness_data.append({
+                'name': member_name,
+                'length': L,
+                'E': E,
+                'A': A,
+                'Iy': Iy,
+                'Iz': Iz,
+                'axial_k': axial_stiffness,
+                'bending_k': max_bending,
+                'max_k': max(axial_stiffness, max_bending)
+            })
+        except Exception:
+            continue
+
+    if not stiffness_data:
+        return ""
+
+    # Find stiffness extremes
+    max_stiffness = max(m['max_k'] for m in stiffness_data)
+    min_stiffness = min(m['max_k'] for m in stiffness_data if m['max_k'] > 0)
+
+    if min_stiffness == 0 or max_stiffness == 0:
+        return ""
+
+    stiffness_ratio = max_stiffness / min_stiffness
+
+    # Find shortest and longest members
+    lengths = [m['length'] for m in stiffness_data]
+    min_length = min(lengths)
+    max_length = max(lengths)
+    length_ratio = max_length / min_length if min_length > 0 else inf
+
+    # Identify outliers (members with extreme stiffness values)
+    # Using 1e6 ratio as threshold for "problematic"
+    threshold_ratio = 1e6
+
+    very_stiff_members = []
+    very_flexible_members = []
+    very_short_members = []
+    very_long_members = []
+
+    for m in stiffness_data:
+        # Check for very stiff members (close to max)
+        if m['max_k'] > 0 and max_stiffness / m['max_k'] < 10:
+            if stiffness_ratio > threshold_ratio:
+                very_stiff_members.append(m)
+
+        # Check for very flexible members (close to min)
+        if m['max_k'] > 0 and m['max_k'] / min_stiffness < 10:
+            if stiffness_ratio > threshold_ratio:
+                very_flexible_members.append(m)
+
+        # Check for very short members (can cause high stiffness)
+        if m['length'] < min_length * 10 and m['length'] < 0.1:  # Less than 0.1 units
+            very_short_members.append(m)
+
+        # Check for extreme length ratios
+        if length_ratio > 1000 and m['length'] > max_length * 0.9:
+            very_long_members.append(m)
+
+    # Build diagnostic message
+    lines = []
+
+    lines.append(f"   Stiffness ratio (max/min): {stiffness_ratio:.2e}")
+    lines.append(f"   Length range: {min_length:.4g} to {max_length:.4g} (ratio: {length_ratio:.2e})")
+
+    if very_short_members:
+        lines.append(f"\n   VERY SHORT MEMBERS (may cause extreme stiffness):")
+        for m in very_short_members[:5]:
+            lines.append(f"   - {m['name']}: L={m['length']:.6g}, EA/L={m['axial_k']:.2e}")
+        if len(very_short_members) > 5:
+            lines.append(f"   - ... and {len(very_short_members) - 5} more")
+
+    if very_stiff_members and stiffness_ratio > threshold_ratio:
+        lines.append(f"\n   STIFFEST MEMBERS:")
+        # Sort by stiffness descending
+        very_stiff_members.sort(key=lambda x: x['max_k'], reverse=True)
+        for m in very_stiff_members[:5]:
+            lines.append(f"   - {m['name']}: L={m['length']:.4g}, E={m['E']:.2e}, A={m['A']:.4g}, max_k={m['max_k']:.2e}")
+        if len(very_stiff_members) > 5:
+            lines.append(f"   - ... and {len(very_stiff_members) - 5} more")
+
+    if very_flexible_members and stiffness_ratio > threshold_ratio:
+        lines.append(f"\n   MOST FLEXIBLE MEMBERS:")
+        # Sort by stiffness ascending
+        very_flexible_members.sort(key=lambda x: x['max_k'])
+        for m in very_flexible_members[:5]:
+            lines.append(f"   - {m['name']}: L={m['length']:.4g}, E={m['E']:.2e}, A={m['A']:.4g}, max_k={m['max_k']:.2e}")
+        if len(very_flexible_members) > 5:
+            lines.append(f"   - ... and {len(very_flexible_members) - 5} more")
+
+    # Provide actionable advice
+    if stiffness_ratio > threshold_ratio:
+        lines.append(f"\n   RECOMMENDATION: The stiffness ratio of {stiffness_ratio:.2e} is very high.")
+        if very_short_members:
+            lines.append("   - Check if very short members are intentional or modeling errors")
+        lines.append("   - Verify all members use consistent units (e.g., all in inches or all in feet)")
+        lines.append("   - Consider if any member properties (E, A, I) are incorrect")
+
+    return "\n".join(lines)
 
 
 def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArray[float64], D1_indices: List[int], D2_indices: List[int], D2: NDArray[float64], log: bool = True, sparse: bool = True, check_stability: bool = False, max_iter: int = 30) -> None:

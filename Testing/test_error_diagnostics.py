@@ -322,5 +322,90 @@ class TestDiagnoseSingularityWithSprings(unittest.TestCase):
         self.assertEqual(model.solution, 'Linear')
 
 
+class TestMemberStiffnessAnalysis(unittest.TestCase):
+    """Tests for the _analyze_member_stiffnesses helper function."""
+
+    def setUp(self):
+        sys.stdout = StringIO()
+
+    def tearDown(self):
+        sys.stdout = sys.__stdout__
+
+    def test_stiffness_analysis_runs(self):
+        """Test that the stiffness analysis function runs without error."""
+        from Pynite.Analysis import _analyze_member_stiffnesses
+
+        model = FEModel3D()
+        model.add_material('Steel', 29000, 11200, 0.3, 490/1000/12**3)
+        model.add_section('W8x31', 9.13, 37.1, 110, 0.536)
+
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 120, 0, 0)
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W8x31')
+
+        # This should run without error
+        result = _analyze_member_stiffnesses(model)
+        # Result should be a string (may be empty if no issues)
+        self.assertIsInstance(result, str)
+
+    def test_stiffness_analysis_detects_extremes(self):
+        """Test that extreme stiffness ratios are detected."""
+        from Pynite.Analysis import _analyze_member_stiffnesses
+
+        model = FEModel3D()
+        # Create materials with vastly different E values
+        model.add_material('Steel', 29000000, 11200000, 0.3, 490/1000/12**3)
+        model.add_material('Rubber', 1, 0.5, 0.49, 50/1000/12**3)  # Extremely flexible
+
+        model.add_section('Section1', 10, 100, 100, 10)
+
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 120, 0, 0)
+        model.add_node('N3', 240, 0, 0)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'Section1')
+        model.add_member('M2', 'N2', 'N3', 'Rubber', 'Section1')
+
+        result = _analyze_member_stiffnesses(model)
+
+        # With such extreme differences, should report stiffness info
+        self.assertIn('Stiffness ratio', result)
+        # Should identify the stiff and flexible members
+        self.assertTrue(
+            'STIFFEST MEMBERS' in result or 'MOST FLEXIBLE MEMBERS' in result,
+            f"Expected member identification in: {result}"
+        )
+
+    def test_stiffness_analysis_with_short_member(self):
+        """Test that very short members are flagged."""
+        from Pynite.Analysis import _analyze_member_stiffnesses
+
+        model = FEModel3D()
+        model.add_material('Steel', 29000, 11200, 0.3, 490/1000/12**3)
+        model.add_section('W8x31', 9.13, 37.1, 110, 0.536)
+
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 0.01, 0, 0)  # Very short
+        model.add_node('N3', 120, 0, 0)
+
+        model.add_member('M1', 'N1', 'N2', 'Steel', 'W8x31')
+        model.add_member('M2', 'N2', 'N3', 'Steel', 'W8x31')
+
+        result = _analyze_member_stiffnesses(model)
+
+        # Should report length range showing the short member
+        self.assertIn('Length range', result)
+
+    def test_empty_model_handled(self):
+        """Test that a model with no members doesn't crash."""
+        from Pynite.Analysis import _analyze_member_stiffnesses
+
+        model = FEModel3D()
+        model.add_node('N1', 0, 0, 0)
+
+        result = _analyze_member_stiffnesses(model)
+        self.assertEqual(result, "")
+
+
 if __name__ == '__main__':
     unittest.main()
