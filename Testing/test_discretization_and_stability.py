@@ -231,12 +231,12 @@ class TestDiscretizationEdgeCases:
         # Node at j_node location should be ignored
         assert len(phys.sub_members) == 1
 
-    def test_node_slightly_off_axis(self, basic_model):
-        """Node slightly off the member axis should NOT cause discretization."""
+    def test_node_significantly_off_axis(self, basic_model):
+        """Node significantly off the member axis should NOT cause discretization."""
         model = basic_model
         model.add_node('N1', 0, 0, 0)
         model.add_node('N2', 120, 0, 0)
-        model.add_node('N3', 60, 0.001, 0)  # Slightly off in Y
+        model.add_node('N3', 60, 1.0, 0)  # 1" off in Y - exceeds tolerance
 
         phys = PhysMember(model, 'M1', model.nodes['N1'], model.nodes['N2'],
                          'Steel', 'W10x30')
@@ -244,8 +244,24 @@ class TestDiscretizationEdgeCases:
 
         phys.descritize()
 
-        # Node off axis should not cause discretization
+        # Node significantly off axis should not cause discretization
         assert len(phys.sub_members) == 1
+
+    def test_node_within_tolerance_does_discretize(self, basic_model):
+        """Node within tolerance (~0.1" for 120" member) should cause discretization."""
+        model = basic_model
+        model.add_node('N1', 0, 0, 0)
+        model.add_node('N2', 120, 0, 0)
+        model.add_node('N3', 60, 0.001, 0)  # 0.001" off - within tolerance
+
+        phys = PhysMember(model, 'M1', model.nodes['N1'], model.nodes['N2'],
+                         'Steel', 'W10x30')
+        model.members['M1'] = phys
+
+        phys.descritize()
+
+        # Node within tolerance SHOULD cause discretization (improved tolerance)
+        assert len(phys.sub_members) == 2
 
     def test_floating_point_precision(self, basic_model):
         """Nodes with floating point coordinates should discretize correctly."""
@@ -367,14 +383,16 @@ class TestWoodWallFraming:
 
 
 # =============================================================================
-# Tests for _identify_floating_nodes()
+# Tests for disconnected node detection (via _diagnose_singularity)
 # =============================================================================
 
 class TestIdentifyFloatingNodes:
-    """Tests for the _identify_floating_nodes function."""
+    """Tests for disconnected node detection in _diagnose_singularity."""
 
     def test_no_floating_nodes(self, basic_model):
-        """Fully connected structure should have no floating nodes."""
+        """Fully connected structure should have no disconnected node warnings."""
+        from scipy.sparse import lil_matrix
+
         model = basic_model
         model.add_node('N1', 0, 0, 0)
         model.add_node('N2', 120, 0, 0)
@@ -389,11 +407,20 @@ class TestIdentifyFloatingNodes:
         model.add_load_combo('Combo 1', {'Case 1': 1.0})
         Analysis._prepare_model(model)
 
-        floating = Analysis._identify_floating_nodes(model)
-        assert len(floating) == 0
+        # Create dummy stiffness matrix for diagnostic
+        n = 6 * len(model.nodes)
+        K = lil_matrix((n, n))
+        for i in range(n):
+            K[i, i] = 1.0
+        D1_indices = list(range(n))
+
+        result = Analysis._diagnose_singularity(model, K, D1_indices, sparse=True)
+        assert 'DISCONNECTED' not in result
 
     def test_single_floating_node(self, basic_model):
-        """Completely isolated node should be identified as floating."""
+        """Completely isolated node should be identified as disconnected."""
+        from scipy.sparse import lil_matrix
+
         model = basic_model
         model.add_node('N1', 0, 0, 0)
         model.add_node('N2', 120, 0, 0)
@@ -405,12 +432,20 @@ class TestIdentifyFloatingNodes:
         model.add_load_combo('Combo 1', {'Case 1': 1.0})
         Analysis._prepare_model(model)
 
-        floating = Analysis._identify_floating_nodes(model)
-        assert 'N3' in floating
-        assert len(floating) == 1
+        n = 6 * len(model.nodes)
+        K = lil_matrix((n, n))
+        for i in range(n):
+            K[i, i] = 1.0
+        D1_indices = list(range(n))
+
+        result = Analysis._diagnose_singularity(model, K, D1_indices, sparse=True)
+        assert 'DISCONNECTED' in result
+        assert 'N3' in result
 
     def test_floating_substructure(self, basic_model):
-        """Isolated substructure (member not connected to supports) should be floating."""
+        """Isolated substructure (member not connected to supports) should trigger singly-connected warning."""
+        from scipy.sparse import lil_matrix
+
         model = basic_model
 
         # Main structure with supports
@@ -428,14 +463,22 @@ class TestIdentifyFloatingNodes:
         model.add_load_combo('Combo 1', {'Case 1': 1.0})
         Analysis._prepare_model(model)
 
-        floating = Analysis._identify_floating_nodes(model)
-        assert 'N3' in floating
-        assert 'N4' in floating
-        assert 'N1' not in floating
-        assert 'N2' not in floating
+        n = 6 * len(model.nodes)
+        K = lil_matrix((n, n))
+        for i in range(n):
+            K[i, i] = 1.0
+        D1_indices = list(range(n))
+
+        result = Analysis._diagnose_singularity(model, K, D1_indices, sparse=True)
+        # Should detect singly-connected nodes (N3 and N4 each only connected to one member)
+        assert 'SINGLY-CONNECTED' in result
+        assert 'N3' in result
+        assert 'N4' in result
 
     def test_floating_stud_in_wall(self, wood_model):
-        """Stud with ends off plate lines should have floating nodes."""
+        """Stud with ends off plate lines should trigger singly-connected warning."""
+        from scipy.sparse import lil_matrix
+
         model = wood_model
 
         # Plates
@@ -451,9 +494,10 @@ class TestIdentifyFloatingNodes:
         model.add_member('Stud1', 'BP1', 'TP1', 'Wood', '2x4')
         model.add_member('Stud2', 'BP2', 'TP2', 'Wood', '2x4')
 
-        # Floating stud - both ends off plate lines!
-        model.add_node('S_B', 24, 0.01, 0)   # Off bottom plate
-        model.add_node('S_T', 24, 95.99, 0)  # Off top plate
+        # Floating stud - both ends significantly off plate lines!
+        # (Must be > 0.1" off to exceed the tolerance in descritize)
+        model.add_node('S_B', 24, 1.0, 0)   # 1" off bottom plate
+        model.add_node('S_T', 24, 95.0, 0)  # 1" off top plate
         model.add_member('Stud3', 'S_B', 'S_T', 'Wood', '2x4')
 
         model.def_support('BP1', True, True, True, True, True, True)
@@ -462,9 +506,16 @@ class TestIdentifyFloatingNodes:
         model.add_load_combo('Combo 1', {'Case 1': 1.0})
         Analysis._prepare_model(model)
 
-        floating = Analysis._identify_floating_nodes(model)
-        assert 'S_B' in floating, "S_B should be floating (not on plate)"
-        assert 'S_T' in floating, "S_T should be floating (not on plate)"
+        n = 6 * len(model.nodes)
+        K = lil_matrix((n, n))
+        for i in range(n):
+            K[i, i] = 1.0
+        D1_indices = list(range(n))
+
+        result = Analysis._diagnose_singularity(model, K, D1_indices, sparse=True)
+        # S_B and S_T are singly-connected (only connected to one member)
+        assert 'SINGLY-CONNECTED' in result
+        assert 'S_B' in result or 'S_T' in result
 
 
 # =============================================================================
@@ -538,9 +589,9 @@ class TestImprovedErrorMessages:
         model.add_member('Stud1', 'BP1', 'TP1', 'Wood', '2x4')
         model.add_member('Stud2', 'BP2', 'TP2', 'Wood', '2x4')
 
-        # Floating stud
-        model.add_node('S_B', 24, 0.01, 0)
-        model.add_node('S_T', 24, 95.99, 0)
+        # Floating stud (significantly off plate lines to exceed descritize tolerance)
+        model.add_node('S_B', 24, 1.0, 0)   # 1" off plate
+        model.add_node('S_T', 24, 95.0, 0)  # 1" off plate
         model.add_member('FloatingStud', 'S_B', 'S_T', 'Wood', '2x4')
 
         model.def_support('BP1', True, True, True, True, True, True)

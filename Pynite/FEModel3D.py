@@ -2154,20 +2154,10 @@ class FEModel3D():
                     # Dense LU factorization
                     from scipy.linalg import lu_factor
                     K11_factored = lu_factor(K11)
-            except:
-                # Identify unstable nodes to help the user debug the issue
-                unstable_nodes = Analysis._identify_unstable_nodes(self, K11, D1_indices)
-                if unstable_nodes:
-                    node_list = ', '.join(unstable_nodes[:10])  # Show first 10
-                    if len(unstable_nodes) > 10:
-                        node_list += f', ... and {len(unstable_nodes) - 10} more'
-                    raise Exception(
-                        f'The stiffness matrix is singular, which implies rigid body motion. '
-                        f'The structure is unstable. Unstable nodes: {node_list}. '
-                        f'Check that all members are properly connected and all nodes are supported or connected to the structure.'
-                    )
-                else:
-                    raise Exception('The stiffness matrix is singular, which implies rigid body motion. The structure is unstable. Aborting analysis.')
+            except Exception as e:
+                # Diagnose the root cause of the singular matrix
+                error_msg = Analysis._diagnose_singularity(self, K11, D1_indices, sparse)
+                raise Exception(error_msg) from e
 
         # Step through each load combination
         for combo in combo_list:
@@ -2339,20 +2329,10 @@ class FEModel3D():
                                 Delta_D1 = Delta_D1.reshape(len(Delta_D1), 1)
                             else:
                                 Delta_D1 = solve(K11, subtract(subtract(Delta_P1, Delta_FER1), matmul(K12, Delta_D2)))
-                        except:
-                            # Identify unstable nodes to help the user debug the issue
-                            unstable_nodes = Analysis._identify_unstable_nodes(self, K11, D1_indices)
-                            if unstable_nodes:
-                                node_list = ', '.join(unstable_nodes[:10])
-                                if len(unstable_nodes) > 10:
-                                    node_list += f', ... and {len(unstable_nodes) - 10} more'
-                                raise Exception(
-                                    f'The stiffness matrix is singular, which implies rigid body motion. '
-                                    f'The structure is unstable. Unstable nodes: {node_list}. '
-                                    f'Check that all members are properly connected and all nodes are supported or connected to the structure.'
-                                )
-                            else:
-                                raise Exception('The stiffness matrix is singular, which implies rigid body motion. The structure is unstable. Aborting analysis.')
+                        except Exception as e:
+                            # Diagnose the root cause of the singular matrix
+                            error_msg = Analysis._diagnose_singularity(self, K11, D1_indices, sparse)
+                            raise Exception(error_msg) from e
 
                     # Store or sum the calculated displacements to the model and the nodes in the model
                     if load_step == 1:
