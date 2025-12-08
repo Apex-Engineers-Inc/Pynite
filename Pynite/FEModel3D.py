@@ -2169,9 +2169,10 @@ class FEModel3D():
                         D1 = D1.reshape(len(D1), 1)
                     else:
                         D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
-                except:
-                    # Return out of the method if 'K' is singular and provide an error message
-                    raise Exception('The stiffness matrix is singular, which implies rigid body motion. The structure is unstable. Aborting analysis.')
+                except Exception as e:
+                    # Diagnose the root cause of the singular matrix
+                    error_msg = Analysis._diagnose_singularity(self, K11, D1_indices, sparse)
+                    raise Exception(error_msg) from e
 
             # Store the calculated displacements to the model and the nodes in the model
             Analysis._store_displacements(self, D1, D2, D1_indices, D2_indices, combo)
@@ -2309,9 +2310,10 @@ class FEModel3D():
                                 Delta_D1 = Delta_D1.reshape(len(Delta_D1), 1)
                             else:
                                 Delta_D1 = solve(K11, subtract(subtract(Delta_P1, Delta_FER1), matmul(K12, Delta_D2)))
-                        except:
-                            # Return out of the method if 'K' is singular and provide an error message
-                            raise Exception('The stiffness matrix is singular, which implies rigid body motion. The structure is unstable. Aborting analysis.')
+                        except Exception as e:
+                            # Diagnose the root cause of the singular matrix
+                            error_msg = Analysis._diagnose_singularity(self, K11, D1_indices, sparse)
+                            raise Exception(error_msg) from e
 
                     # Store or sum the calculated displacements to the model and the nodes in the model
                     if load_step == 1:

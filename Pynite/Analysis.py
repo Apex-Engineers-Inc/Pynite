@@ -149,6 +149,259 @@ def _check_stability(model: FEModel3D, K: NDArray[float64]) -> None:
     return
 
 
+def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: bool = True) -> str:
+    """
+    Diagnoses the root cause of a singular stiffness matrix.
+
+    This function performs comprehensive checks to identify why the stiffness matrix
+    is singular, providing specific error messages for different failure modes.
+
+    :param model: The finite element model being analyzed.
+    :type model: FEModel3D
+    :param K11: The partitioned stiffness matrix for unknown displacements.
+    :param D1_indices: Indices of unknown degrees of freedom.
+    :type D1_indices: List[int]
+    :param sparse: Whether the matrix is in sparse format.
+    :type sparse: bool
+    :return: A detailed error message describing the root cause.
+    :rtype: str
+    """
+
+    issues = []
+
+    # Convert sparse matrix to dense for diagnostics if needed
+    if sparse:
+        try:
+            K11_dense = K11.toarray()
+        except:
+            K11_dense = array(K11)
+    else:
+        K11_dense = K11
+
+    # 1. Check for missing supports (no supports at all)
+    has_any_support = False
+    for node in model.nodes.values():
+        if (node.support_DX or node.support_DY or node.support_DZ or
+            node.support_RX or node.support_RY or node.support_RZ):
+            has_any_support = True
+            break
+
+    if not has_any_support:
+        issues.append("NO SUPPORTS DEFINED: The model has no boundary conditions. "
+                     "At least one node must be supported to prevent rigid body motion.")
+
+    # 2. Check for disconnected nodes (nodes not connected to any element)
+    connected_nodes = set()
+
+    for member in model.members.values():
+        # PhysMember has sub_members, iterate through them
+        if hasattr(member, 'sub_members'):
+            for sub_member in member.sub_members.values():
+                connected_nodes.add(sub_member.i_node.name)
+                connected_nodes.add(sub_member.j_node.name)
+        else:
+            connected_nodes.add(member.i_node.name)
+            connected_nodes.add(member.j_node.name)
+
+    for spring in model.springs.values():
+        connected_nodes.add(spring.i_node.name)
+        connected_nodes.add(spring.j_node.name)
+
+    for plate in model.plates.values():
+        connected_nodes.add(plate.i_node.name)
+        connected_nodes.add(plate.j_node.name)
+        connected_nodes.add(plate.m_node.name)
+        connected_nodes.add(plate.n_node.name)
+
+    for quad in model.quads.values():
+        connected_nodes.add(quad.i_node.name)
+        connected_nodes.add(quad.j_node.name)
+        connected_nodes.add(quad.m_node.name)
+        connected_nodes.add(quad.n_node.name)
+
+    disconnected = []
+    for node_name, node in model.nodes.items():
+        if node_name not in connected_nodes:
+            # Only report if the node is not fully supported
+            if not (node.support_DX and node.support_DY and node.support_DZ and
+                    node.support_RX and node.support_RY and node.support_RZ):
+                disconnected.append(node_name)
+
+    if disconnected:
+        node_list = ', '.join(disconnected[:10])
+        if len(disconnected) > 10:
+            node_list += f', ... and {len(disconnected) - 10} more'
+        issues.append(f"DISCONNECTED NODES: The following nodes are not connected to any element: {node_list}. "
+                     "Either connect them to elements or remove them from the model.")
+
+    # 3. Check for zero-length members
+    zero_length_members = []
+    for member_name, member in model.members.items():
+        if hasattr(member, 'sub_members'):
+            for sub_name, sub_member in member.sub_members.items():
+                if sub_member.L() < 1e-10:
+                    zero_length_members.append(f"{member_name}/{sub_name}")
+        else:
+            if member.L() < 1e-10:
+                zero_length_members.append(member_name)
+
+    if zero_length_members:
+        member_list = ', '.join(zero_length_members[:10])
+        if len(zero_length_members) > 10:
+            member_list += f', ... and {len(zero_length_members) - 10} more'
+        issues.append(f"ZERO-LENGTH MEMBERS: The following members have zero or near-zero length: {member_list}. "
+                     "This typically occurs when the i-node and j-node are at the same location.")
+
+    # 4. Check for zero stiffness properties
+    zero_stiffness_members = []
+    for member_name, member in model.members.items():
+        problems = []
+        if hasattr(member, 'material') and member.material.E <= 0:
+            problems.append("E=0")
+        elif hasattr(member, 'sub_members'):
+            # Check first sub-member
+            for sub_member in member.sub_members.values():
+                if sub_member.material.E <= 0:
+                    problems.append("E=0")
+                break
+
+        if hasattr(member, 'section'):
+            if member.section.A <= 0:
+                problems.append("A=0")
+            if member.section.Iy <= 0:
+                problems.append("Iy=0")
+            if member.section.Iz <= 0:
+                problems.append("Iz=0")
+            if member.section.J <= 0:
+                problems.append("J=0")
+        elif hasattr(member, 'sub_members'):
+            for sub_member in member.sub_members.values():
+                if sub_member.section.A <= 0:
+                    problems.append("A=0")
+                if sub_member.section.Iy <= 0:
+                    problems.append("Iy=0")
+                if sub_member.section.Iz <= 0:
+                    problems.append("Iz=0")
+                if sub_member.section.J <= 0:
+                    problems.append("J=0")
+                break
+
+        if problems:
+            zero_stiffness_members.append(f"{member_name} ({', '.join(problems)})")
+
+    if zero_stiffness_members:
+        member_list = ', '.join(zero_stiffness_members[:5])
+        if len(zero_stiffness_members) > 5:
+            member_list += f', ... and {len(zero_stiffness_members) - 5} more'
+        issues.append(f"ZERO STIFFNESS PROPERTIES: The following members have zero or invalid section/material properties: {member_list}.")
+
+    # 5. Check for coincident nodes (different nodes at the same location)
+    node_positions = {}
+    coincident_groups = []
+    tolerance = 1e-6
+
+    for node_name, node in model.nodes.items():
+        pos_key = (round(node.X / tolerance) * tolerance,
+                   round(node.Y / tolerance) * tolerance,
+                   round(node.Z / tolerance) * tolerance)
+        if pos_key in node_positions:
+            node_positions[pos_key].append(node_name)
+        else:
+            node_positions[pos_key] = [node_name]
+
+    for pos, nodes in node_positions.items():
+        if len(nodes) > 1:
+            coincident_groups.append(nodes)
+
+    if coincident_groups:
+        group_strs = [f"({', '.join(group)})" for group in coincident_groups[:5]]
+        if len(coincident_groups) > 5:
+            group_strs.append(f'... and {len(coincident_groups) - 5} more groups')
+        issues.append(f"COINCIDENT NODES: Multiple nodes exist at the same location: {', '.join(group_strs)}. "
+                     "Consider merging these nodes or using different coordinates.")
+
+    # 6. Check for unstable degrees of freedom (zero diagonal terms)
+    unstable_dofs = []
+    for i in range(K11_dense.shape[0]):
+        if isclose(K11_dense[i, i], 0, abs_tol=1e-12):
+            # Map back to global DOF
+            global_dof = D1_indices[i]
+            node_id = global_dof // 6
+            dof_type = global_dof % 6
+
+            # Find the node
+            node_name = None
+            for node in model.nodes.values():
+                if node.ID == node_id:
+                    node_name = node.name
+                    break
+
+            dof_names = ['DX', 'DY', 'DZ', 'RX', 'RY', 'RZ']
+            if node_name:
+                unstable_dofs.append(f"{node_name}:{dof_names[dof_type]}")
+
+    if unstable_dofs:
+        dof_list = ', '.join(unstable_dofs[:10])
+        if len(unstable_dofs) > 10:
+            dof_list += f', ... and {len(unstable_dofs) - 10} more'
+        issues.append(f"UNSTABLE DEGREES OF FREEDOM: The following DOFs have zero stiffness: {dof_list}. "
+                     "Check that these nodes are properly connected and/or supported.")
+
+    # 7. Check for mechanism formation (member releases creating mechanisms)
+    mechanism_warnings = []
+    for member_name, member in model.members.items():
+        if hasattr(member, 'sub_members'):
+            for sub_name, sub_member in member.sub_members.items():
+                releases = sub_member.Releases
+                # Check for problematic release combinations
+                # Both ends released for same DOF can create mechanism
+                i_releases = releases[:6]
+                j_releases = releases[6:]
+
+                # Axial release at both ends
+                if i_releases[0] and j_releases[0]:
+                    mechanism_warnings.append(f"{member_name}: axial release at both ends")
+                # Torsion release at both ends
+                if i_releases[3] and j_releases[3]:
+                    mechanism_warnings.append(f"{member_name}: torsion release at both ends")
+                # Moment releases in same plane at both ends without intermediate support
+                if (i_releases[4] and j_releases[4]) or (i_releases[5] and j_releases[5]):
+                    mechanism_warnings.append(f"{member_name}: moment release at both ends (potential mechanism)")
+
+    if mechanism_warnings:
+        warn_list = ', '.join(mechanism_warnings[:5])
+        if len(mechanism_warnings) > 5:
+            warn_list += f', ... and {len(mechanism_warnings) - 5} more'
+        issues.append(f"POTENTIAL MECHANISM: Release combinations may create mechanisms: {warn_list}.")
+
+    # 8. Check numerical conditioning (if no other issues found)
+    if not issues:
+        try:
+            from numpy.linalg import cond
+            condition_number = cond(K11_dense)
+            if condition_number > 1e15:
+                issues.append(f"ILL-CONDITIONED MATRIX: The stiffness matrix has a very high condition number ({condition_number:.2e}). "
+                             "This may be caused by large differences in member stiffnesses or poorly scaled units. "
+                             "Check for members with vastly different stiffness values or verify unit consistency.")
+        except:
+            pass
+
+    # Build the final error message
+    if issues:
+        error_msg = "SINGULAR STIFFNESS MATRIX - Analysis cannot proceed.\n\nRoot cause(s) identified:\n"
+        for i, issue in enumerate(issues, 1):
+            error_msg += f"\n{i}. {issue}\n"
+        return error_msg
+    else:
+        # Fallback message if no specific cause found
+        return ("SINGULAR STIFFNESS MATRIX - The structure is unstable.\n\n"
+                "No specific cause was identified. Possible issues include:\n"
+                "- Complex mechanism formations not detected by diagnostics\n"
+                "- Numerical precision issues\n"
+                "- Unusual element configurations\n\n"
+                "Please review your model for proper connectivity and support conditions.")
+
+
 def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArray[float64], D1_indices: List[int], D2_indices: List[int], D2: NDArray[float64], log: bool = True, sparse: bool = True, check_stability: bool = False, max_iter: int = 30) -> None:
     """Performs second order (P-Delta) analysis. This type of analysis is appropriate for most models using beams, columns and braces. Second order analysis is usually required by material-specific codes. Models with slender members and/or members with combined bending and axial loads will generally have more significant P-Delta effects. P-Delta effects in plates/quads are not considered by Pynite at this time.
 
@@ -260,9 +513,10 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
                         # The partitioned stiffness matrix is in `csr` format. It will be converted to a 2D dense array for mathematical operations.
                         D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
 
-                except:
-                    # Return out of the method if 'K' is singular and provide an error message
-                    raise ValueError('The stiffness matrix is singular, which indicates that the structure is unstable.')
+                except Exception as e:
+                    # Diagnose the root cause of the singular matrix
+                    error_msg = _diagnose_singularity(model, K11, D1_indices, sparse)
+                    raise ValueError(error_msg) from e
 
             # Store the calculated displacements
             _store_displacements(model, D1, D2, D1_indices, D2_indices, model.load_combos[combo_name])
