@@ -6,6 +6,7 @@ from numpy import array, atleast_2d, zeros, subtract, matmul, divide, seterr, na
 from numpy.linalg import solve
 
 from Pynite.LoadCombo import LoadCombo
+from Pynite.Diagnostics import ModelDiagnostics, diagnose_instability
 
 if TYPE_CHECKING:
     from typing import List, Tuple
@@ -13,6 +14,25 @@ if TYPE_CHECKING:
     from numpy import float64
     from numpy.typing import NDArray
     from scipy.sparse import lil_matrix
+
+
+class AnalysisError(Exception):
+    """
+    Custom exception for analysis failures with detailed diagnostics.
+
+    Attributes:
+        message: The error message
+        diagnostic_report: Optional detailed diagnostic report
+    """
+    def __init__(self, message: str, diagnostic_report: str = None):
+        self.message = message
+        self.diagnostic_report = diagnostic_report
+        super().__init__(self._format_message())
+
+    def _format_message(self) -> str:
+        if self.diagnostic_report:
+            return f"{self.message}\n\n{self.diagnostic_report}"
+        return self.message
 
 
 def _prepare_model(model: FEModel3D) -> None:
@@ -91,62 +111,149 @@ def _identify_combos(model: FEModel3D, combo_tags: List[str] | None = None) -> L
 
 def _check_stability(model: FEModel3D, K: NDArray[float64]) -> None:
     """
-    Identifies nodal instabilities in a model's stiffness matrix.
+    Identifies nodal instabilities in a model's stiffness matrix and provides
+    comprehensive diagnostics about the root cause.
+
+    This function checks the diagonal terms of the stiffness matrix to identify
+    DOFs with zero stiffness (indicating potential instability). When instabilities
+    are found, it runs full diagnostics to explain the likely root cause.
+
+    Parameters
+    ----------
+    model : FEModel3D
+        The finite element model to check
+    K : NDArray[float64]
+        The assembled stiffness matrix
+
+    Raises
+    ------
+    AnalysisError
+        If unstable DOFs are detected, with detailed diagnostic information
     """
 
-    # Initialize the `unstable` flag to `False`
-    unstable = False
+    # DOF names for clear error messages
+    DOF_NAMES = ['DX (translation in X)', 'DY (translation in Y)', 'DZ (translation in Z)',
+                 'RX (rotation about X)', 'RY (rotation about Y)', 'RZ (rotation about Z)']
+
+    unstable_dofs = []  # List of (node_name, dof_name, stiffness_value)
 
     # Step through each diagonal term in the stiffness matrix
     for i in range(K.shape[0]):
-        
+
         # Determine which node this term belongs to
-        node = [node for node in model.nodes.values() if node.ID == int(i/6)][0]
+        node_id = int(i / 6)
+        node = None
+        for n in model.nodes.values():
+            if n.ID == node_id:
+                node = n
+                break
+
+        if node is None:
+            continue
 
         # Determine which degree of freedom this term belongs to
-        dof = i%6
+        dof = i % 6
 
-        # Check to see if this degree of freedom is supported
+        # Check to see if this degree of freedom is supported (fixed or spring)
         if dof == 0:
-            supported = node.support_DX
+            supported = node.support_DX or node.spring_DX[0] is not None
         elif dof == 1:
-            supported = node.support_DY
+            supported = node.support_DY or node.spring_DY[0] is not None
         elif dof == 2:
-            supported = node.support_DZ
+            supported = node.support_DZ or node.spring_DZ[0] is not None
         elif dof == 3:
-            supported = node.support_RX
+            supported = node.support_RX or node.spring_RX[0] is not None
         elif dof == 4:
-            supported = node.support_RY
+            supported = node.support_RY or node.spring_RY[0] is not None
         elif dof == 5:
-            supported = node.support_RZ
+            supported = node.support_RZ or node.spring_RZ[0] is not None
+        else:
+            supported = False
 
         # Check if the degree of freedom on this diagonal is unstable
-        if isclose(K[i, i], 0) and not supported:
+        stiffness_value = K[i, i] if hasattr(K, '__getitem__') else 0
+        if isclose(stiffness_value, 0, abs_tol=1e-10) and not supported:
+            unstable_dofs.append((node.name, DOF_NAMES[dof], stiffness_value))
 
-            # Flag the model as unstable
-            unstable = True
+    if unstable_dofs:
+        # Print detailed instability information
+        print('')
+        print('=' * 60)
+        print('INSTABILITY DETECTED - Analysis cannot proceed')
+        print('=' * 60)
+        print('')
+        print(f'Found {len(unstable_dofs)} unstable degree(s) of freedom:')
+        print('')
 
-            # Identify which direction this instability affects
-            if i%6 == 0:
-                direction = 'for translation in the global X direction.'
-            if i%6 == 1:
-                direction = 'for translation in the global Y direction.'
-            if i%6 == 2:
-                direction = 'for translation in the global Z direction.'
-            if i%6 == 3:
-                direction = 'for rotation about the global X axis.'
-            if i%6 == 4:
-                direction = 'for rotation about the global Y axis.'
-            if i%6 == 5:
-                direction = 'for rotation about the global Z axis.'
+        # Group by node for cleaner output
+        from collections import defaultdict
+        node_dofs = defaultdict(list)
+        for node_name, dof_name, stiffness in unstable_dofs:
+            node_dofs[node_name].append(dof_name)
 
-            # Print a message to the console
-            print('* Nodal instability detected: node ' + node.name + ' is unstable ' + direction)
+        for node_name, dofs in node_dofs.items():
+            print(f'  Node "{node_name}":')
+            for dof in dofs:
+                print(f'    - {dof}')
 
-    if unstable:
-        raise Exception('Unstable node(s). See console output for details.')
+        print('')
+
+        # Run full diagnostics to explain why
+        print('Running diagnostics to identify root cause...')
+        print('')
+
+        diagnostics = ModelDiagnostics(model)
+        report = diagnostics.run_full_diagnosis()
+        diagnostic_text = report.format(verbose=True)
+        print(diagnostic_text)
+
+        # Create a summary message
+        error_msg = f"Model is unstable: {len(unstable_dofs)} degree(s) of freedom have zero stiffness."
+
+        raise AnalysisError(error_msg, diagnostic_text)
 
     return
+
+
+def run_pre_analysis_checks(model: FEModel3D, log: bool = True) -> bool:
+    """
+    Run comprehensive pre-analysis checks on a model.
+
+    This function performs various checks before analysis to identify potential
+    issues early and provide helpful feedback. It's recommended to run this
+    before attempting analysis on a new or modified model.
+
+    Parameters
+    ----------
+    model : FEModel3D
+        The finite element model to check
+    log : bool, optional
+        Whether to print the diagnostic report (default: True)
+
+    Returns
+    -------
+    bool
+        True if no errors were found, False if there are issues that would
+        prevent successful analysis
+
+    Example
+    -------
+    >>> from Pynite import FEModel3D
+    >>> from Pynite.Analysis import run_pre_analysis_checks
+    >>> model = FEModel3D()
+    >>> # ... build model ...
+    >>> if run_pre_analysis_checks(model):
+    ...     model.analyze()
+    ... else:
+    ...     print("Fix the issues above before analyzing")
+    """
+    diagnostics = ModelDiagnostics(model)
+    report = diagnostics.run_full_diagnosis()
+
+    if log:
+        print(report.format(verbose=True))
+
+    return not report.has_errors
 
 
 def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArray[float64], D1_indices: List[int], D2_indices: List[int], D2: NDArray[float64], log: bool = True, sparse: bool = True, check_stability: bool = False, max_iter: int = 30) -> None:
@@ -260,9 +367,32 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
                         # The partitioned stiffness matrix is in `csr` format. It will be converted to a 2D dense array for mathematical operations.
                         D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
 
-                except:
+                except Exception as e:
                     # Return out of the method if 'K' is singular and provide an error message
-                    raise ValueError('The stiffness matrix is singular, which indicates that the structure is unstable.')
+                    # Run diagnostics to explain why the matrix is singular
+                    print('')
+                    print('=' * 60)
+                    print('P-DELTA ANALYSIS FAILED - Singular Stiffness Matrix')
+                    print('=' * 60)
+                    print('')
+                    print('The stiffness matrix could not be inverted during P-Delta analysis.')
+                    print('This can occur when:')
+                    print('  1. The structure is geometrically unstable')
+                    print('  2. P-Delta effects have caused buckling')
+                    print('  3. The structure lacks sufficient bracing')
+                    print('')
+                    print('Running diagnostics to identify root cause...')
+                    print('')
+
+                    diagnostics = ModelDiagnostics(model)
+                    report = diagnostics.run_full_diagnosis()
+                    diagnostic_text = report.format(verbose=True)
+                    print(diagnostic_text)
+
+                    raise AnalysisError(
+                        'The stiffness matrix is singular during P-Delta analysis (structure may have buckled)',
+                        diagnostic_text
+                    ) from e
 
             # Store the calculated displacements
             _store_displacements(model, D1, D2, D1_indices, D2_indices, model.load_combos[combo_name])
@@ -288,7 +418,33 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
         # Check for divergence in the tension/compression-only analysis
         if iter_count_TC > max_iter:
             divergence_TC = True
-            raise Exception('- Model diverged during tension/compression-only analysis')
+            print('')
+            print('=' * 60)
+            print('P-DELTA ANALYSIS FAILED - T/C-Only Divergence')
+            print('=' * 60)
+            print('')
+            print(f'The tension/compression-only analysis failed to converge after {max_iter} iterations.')
+            print('')
+            print('This typically happens when:')
+            print('  1. Combined P-Delta effects with T/C-only elements create oscillation')
+            print('  2. The structure becomes unstable as elements deactivate')
+            print('  3. Large P-Delta effects cause element status to flip repeatedly')
+            print('')
+            print('Suggestions:')
+            print('  - Increase max_iter for more convergence attempts')
+            print('  - Reduce the number of T/C-only elements')
+            print('  - Check if brace arrangement is stable under P-Delta')
+            print('')
+
+            diagnostics = ModelDiagnostics(model)
+            report = diagnostics.run_full_diagnosis()
+            diagnostic_text = report.format(verbose=True)
+            print(diagnostic_text)
+
+            raise AnalysisError(
+                'Model diverged during P-Delta tension/compression-only analysis',
+                diagnostic_text
+            )
 
     # Flag the model as solved
     model.solution = 'P-Delta'
@@ -369,9 +525,31 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
                     # converted to a 2D dense array for mathematical operations.
                     Delta_D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
 
-            except:
+            except Exception as e:
                 # Return out of the method if 'K' is singular and provide an error message
-                raise ValueError('The structure is unstable. Unable to proceed any further with analysis.')
+                print('')
+                print('=' * 60)
+                print('PUSHOVER ANALYSIS FAILED - Structure Became Unstable')
+                print('=' * 60)
+                print('')
+                print('The structure became unstable during pushover analysis.')
+                print('This typically occurs when:')
+                print('  1. A plastic mechanism has formed')
+                print('  2. The structure has reached its ultimate capacity')
+                print('  3. P-Delta effects have caused collapse')
+                print('')
+                print('This may be the expected end of the pushover analysis.')
+                print('')
+
+                diagnostics = ModelDiagnostics(model)
+                report = diagnostics.run_full_diagnosis()
+                diagnostic_text = report.format(verbose=True)
+                print(diagnostic_text)
+
+                raise AnalysisError(
+                    'The structure became unstable during pushover analysis (possible collapse mechanism)',
+                    diagnostic_text
+                ) from e
 
         # Unpartition the displacement results from the analysis step
         Delta_D = _unpartition_disp(model, Delta_D1, D2, D1_indices, D2_indices)
