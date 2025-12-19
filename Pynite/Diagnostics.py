@@ -284,8 +284,9 @@ class ModelDiagnostics:
         self._check_geometry()
         self._check_near_coincident_nodes()
         self._check_singly_connected_nodes()
-        self._check_plate_drilling_dof()
-        self._check_coplanar_frame()
+        # NOTE: _check_plate_drilling_dof and _check_coplanar_frame removed due to
+        # high false positive risk. Pynite handles plate drilling DOF internally with
+        # weak stiffness, and 2D coplanar frames work correctly.
         self._check_materials_and_sections()
         self._check_loading()
 
@@ -996,10 +997,9 @@ class ModelDiagnostics:
         """
         Check for nodes connected to only one element without adequate support.
 
-        Singly-connected nodes may indicate:
-        - Unmerged nodes (common with floating-point precision issues)
-        - Incomplete member connections
-        - Missing elements
+        Only reports an issue if unmerged node candidates are detected (nodes that
+        are singly-connected AND very close to other nodes). This avoids false
+        positives for legitimate cantilever ends.
         """
         # Build node connectivity map
         node_connections: Dict[str, List[str]] = defaultdict(list)
@@ -1043,6 +1043,7 @@ class ModelDiagnostics:
             return
 
         # Check for unmerged nodes (singly-connected nodes close to other nodes)
+        # ONLY report if we find unmerged candidates - avoid false positives for cantilevers
         max_coord = self._get_model_scale()
         merge_tolerance = max(max_coord * 1e-4, 0.01)
 
@@ -1059,208 +1060,31 @@ class ModelDiagnostics:
                     unmerged_candidates.append(f"{singly_name} near {other_name} (dist={dist:.2e})")
                     break
 
+        # Only report if we found likely unmerged nodes
+        if not unmerged_candidates:
+            return  # Don't warn about legitimate cantilever ends
+
         affected = [f"{name} (connected to {conn})" for name, conn in singly_connected[:5]]
         if len(singly_connected) > 5:
             affected.append(f"... and {len(singly_connected) - 5} more")
 
-        suggestions = ["These nodes may need additional supports or connections"]
-
-        if unmerged_candidates:
-            suggestions = [
-                "LIKELY UNMERGED NODES: Some singly-connected nodes are very close to other nodes",
-                f"Call model.merge_duplicate_nodes(tolerance={merge_tolerance:.3g}) before analysis",
-                "Ensure members share node objects instead of creating separate nodes at same location"
-            ]
-            for candidate in unmerged_candidates[:3]:
-                suggestions.append(f"  - {candidate}")
+        suggestions = [
+            "LIKELY UNMERGED NODES: These singly-connected nodes are very close to other nodes",
+            f"Call model.merge_duplicate_nodes(tolerance={merge_tolerance:.3g}) before analysis",
+            "Ensure members share node objects instead of creating separate nodes at same location"
+        ]
+        for candidate in unmerged_candidates[:3]:
+            suggestions.append(f"  - {candidate}")
 
         self.issues.append(DiagnosticIssue(
-            severity=IssueSeverity.WARNING if not unmerged_candidates else IssueSeverity.ERROR,
+            severity=IssueSeverity.ERROR,
             category=IssueCategory.CONNECTIVITY,
-            title=f"Singly-connected nodes ({len(singly_connected)} nodes)",
-            description="These nodes are connected to only one element and may lack adequate support. "
-                       "This often indicates unmerged nodes from floating-point precision issues.",
+            title=f"Likely unmerged nodes ({len(unmerged_candidates)} detected)",
+            description="Singly-connected nodes were found very close to other nodes. "
+                       "This typically indicates nodes that should be merged but weren't due to floating-point precision.",
             affected_entities=affected,
             suggestions=suggestions
         ))
-
-    def _check_plate_drilling_dof(self) -> None:
-        """
-        Check for plate/quad drilling DOF instabilities.
-
-        Plates have no stiffness for rotation perpendicular to their surface
-        (the "drilling" DOF). Nodes connected only to plates may have unstable
-        drilling rotations unless specifically supported.
-        """
-        if not self.model.plates and not self.model.quads:
-            return
-
-        # Find nodes connected ONLY to plates/quads (not to members)
-        member_nodes: Set[str] = set()
-        plate_nodes: Set[str] = set()
-
-        for member in self.model.members.values():
-            if hasattr(member, 'sub_members') and member.sub_members:
-                for sub_member in member.sub_members.values():
-                    member_nodes.add(sub_member.i_node.name)
-                    member_nodes.add(sub_member.j_node.name)
-            elif hasattr(member, 'i_node'):
-                member_nodes.add(member.i_node.name)
-                member_nodes.add(member.j_node.name)
-
-        for plate in self.model.plates.values():
-            for node in [plate.i_node, plate.j_node, plate.m_node, plate.n_node]:
-                plate_nodes.add(node.name)
-
-        for quad in self.model.quads.values():
-            for node in [quad.i_node, quad.j_node, quad.m_node, quad.n_node]:
-                plate_nodes.add(node.name)
-
-        # Nodes only in plates, not in members
-        plate_only_nodes = plate_nodes - member_nodes
-
-        # Check if drilling DOFs are supported
-        drilling_issues = []
-        for node_name in plate_only_nodes:
-            node = self.model.nodes.get(node_name)
-            if node:
-                # Plates typically have drilling DOF issues for out-of-plane rotation
-                # Without knowing plate orientation, check all rotational DOFs
-                if not (node.support_RX and node.support_RY and node.support_RZ):
-                    drilling_issues.append(node_name)
-
-        if drilling_issues:
-            affected = drilling_issues[:10]
-            if len(drilling_issues) > 10:
-                affected.append(f"... and {len(drilling_issues) - 10} more")
-
-            self.issues.append(DiagnosticIssue(
-                severity=IssueSeverity.WARNING,
-                category=IssueCategory.STABILITY,
-                title=f"Plate drilling DOF instability ({len(drilling_issues)} nodes)",
-                description="Nodes connected only to plates/quads may have unstable drilling rotation DOFs. "
-                           "Plates have no stiffness for rotation perpendicular to their surface.",
-                affected_entities=affected,
-                suggestions=[
-                    "Support the drilling DOF (RX, RY, or RZ depending on plate orientation) at these nodes",
-                    "Connect frame members to provide rotational stiffness",
-                    "Use a plate formulation that includes drilling DOF stiffness"
-                ]
-            ))
-
-    def _check_coplanar_frame(self) -> None:
-        """
-        Check for coplanar frame structures that may need out-of-plane restraint.
-
-        When all members lie in a single plane (e.g., wall framing), certain
-        DOFs perpendicular to that plane may be unrestrained.
-        """
-        if not self.model.members or self.model.plates or self.model.quads:
-            return  # Only check member-only models
-
-        try:
-            import numpy as np
-            from numpy.linalg import norm
-
-            # Collect all member node positions
-            member_nodes: Set[str] = set()
-            for member in self.model.members.values():
-                if hasattr(member, 'sub_members') and member.sub_members:
-                    for sub_member in member.sub_members.values():
-                        member_nodes.add(sub_member.i_node.name)
-                        member_nodes.add(sub_member.j_node.name)
-                elif hasattr(member, 'i_node'):
-                    member_nodes.add(member.i_node.name)
-                    member_nodes.add(member.j_node.name)
-
-            if len(member_nodes) < 3:
-                return
-
-            # Get node coordinates
-            node_coords = []
-            for node_name in member_nodes:
-                node = self.model.nodes.get(node_name)
-                if node:
-                    node_coords.append(np.array([node.X, node.Y, node.Z]))
-
-            if len(node_coords) < 3:
-                return
-
-            # Check if all nodes are coplanar
-            p0 = node_coords[0]
-            plane_normal = None
-
-            # Find first valid plane normal from non-collinear points
-            for i in range(1, len(node_coords)):
-                for j in range(i + 1, len(node_coords)):
-                    v1 = node_coords[i] - p0
-                    v2 = node_coords[j] - p0
-                    n = np.cross(v1, v2)
-                    n_mag = norm(n)
-                    if n_mag > 1e-6:
-                        plane_normal = n / n_mag
-                        break
-                if plane_normal is not None:
-                    break
-
-            if plane_normal is None:
-                return  # All points are collinear
-
-            # Check if all nodes lie on this plane
-            is_coplanar = True
-            for coord in node_coords:
-                dist = abs(np.dot(coord - p0, plane_normal))
-                if dist > 0.01:
-                    is_coplanar = False
-                    break
-
-            if not is_coplanar:
-                return
-
-            # Determine plane type
-            abs_normal = np.abs(plane_normal)
-            plane_type = None
-            in_plane_rotation = None
-
-            if abs_normal[0] > 0.9:  # YZ plane
-                plane_type = "YZ"
-                in_plane_rotation = "RX"
-            elif abs_normal[1] > 0.9:  # XZ plane
-                plane_type = "XZ"
-                in_plane_rotation = "RY"
-            elif abs_normal[2] > 0.9:  # XY plane
-                plane_type = "XY"
-                in_plane_rotation = "RZ"
-            else:
-                plane_type = "oblique"
-
-            if plane_type and plane_type != "oblique":
-                # Check if the in-plane rotation is restrained at any node
-                rotation_restrained = False
-                for node_name in member_nodes:
-                    node = self.model.nodes.get(node_name)
-                    if node:
-                        rot_attr = f"support_{in_plane_rotation}"
-                        if getattr(node, rot_attr, False):
-                            rotation_restrained = True
-                            break
-
-                if not rotation_restrained:
-                    self.issues.append(DiagnosticIssue(
-                        severity=IssueSeverity.WARNING,
-                        category=IssueCategory.STABILITY,
-                        title=f"Coplanar frame structure in {plane_type} plane",
-                        description=f"All members lie in the {plane_type} plane (wall/frame configuration). "
-                                   f"The in-plane rotation ({in_plane_rotation}) is not restrained at any node.",
-                        affected_entities=list(member_nodes)[:5],
-                        suggestions=[
-                            f"Support {in_plane_rotation} at key nodes to prevent in-plane rotation",
-                            "Add out-of-plane bracing or connections",
-                            "For wall framing, ensure adequate restraint perpendicular to wall"
-                        ]
-                    ))
-        except ImportError:
-            pass  # NumPy not available
 
     def _check_geometric_rotation_restraint(self) -> None:
         """
