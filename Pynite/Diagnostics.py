@@ -480,16 +480,16 @@ class ModelDiagnostics:
                     ]
                 ))
             else:
+                # All components have supports - this may be intentional for multi-structure analysis
                 self.issues.append(DiagnosticIssue(
-                    severity=IssueSeverity.WARNING,
+                    severity=IssueSeverity.INFO,
                     category=IssueCategory.CONNECTIVITY,
                     title=f"Model has {len(components)} disconnected components",
-                    description="While each component has supports, the structure consists of separate, "
-                               "disconnected parts. Verify this is intentional.",
+                    description="The structure consists of separate, disconnected parts. Each component "
+                               "has supports so analysis should succeed.",
                     affected_entities=[],
                     suggestions=[
-                        "If unintentional, connect the parts with structural elements",
-                        "If intentional, consider analyzing each part separately"
+                        "If unintentional, connect the parts with structural elements"
                     ]
                 ))
 
@@ -621,19 +621,32 @@ class ModelDiagnostics:
                 ]
             ))
         elif total_dofs < 6:
-            self.issues.append(DiagnosticIssue(
-                severity=IssueSeverity.ERROR,
-                category=IssueCategory.SUPPORTS,
-                title=f"Insufficient supports ({total_dofs} DOFs, need at least 6)",
-                description="A 3D structure requires at least 6 supported degrees of freedom to prevent "
-                           "rigid body motion (3 translations and 3 rotations). Your model has fewer.",
-                affected_entities=supported_nodes,
-                suggestions=[
-                    f"Add {6 - total_dofs} more supported DOFs",
-                    "Consider using a fixed support (6 DOFs) at one node",
-                    "Alternatively, use multiple pinned/roller supports strategically placed"
-                ]
-            ))
+            # Check if geometric rotation restraint makes up for missing explicit rotation supports
+            # Translation supports at different locations can geometrically restrain rotations
+            geom_restraint = self._geometric_rotation_restraint
+            effective_dofs = total_dofs
+            if geom_restraint.get('RX', False) and rotation_dofs['RX'] == 0:
+                effective_dofs += 1
+            if geom_restraint.get('RY', False) and rotation_dofs['RY'] == 0:
+                effective_dofs += 1
+            if geom_restraint.get('RZ', False) and rotation_dofs['RZ'] == 0:
+                effective_dofs += 1
+
+            if effective_dofs < 6:
+                self.issues.append(DiagnosticIssue(
+                    severity=IssueSeverity.ERROR,
+                    category=IssueCategory.SUPPORTS,
+                    title=f"Insufficient supports ({total_dofs} explicit DOFs)",
+                    description="A 3D structure requires at least 6 supported degrees of freedom to prevent "
+                               "rigid body motion (3 translations and 3 rotations). Your model may have fewer "
+                               "even accounting for geometric restraint from support positions.",
+                    affected_entities=supported_nodes,
+                    suggestions=[
+                        f"Add more supported DOFs",
+                        "Consider using a fixed support (6 DOFs) at one node",
+                        "Alternatively, use multiple pinned/roller supports strategically placed"
+                    ]
+                ))
 
         if rigid_body_modes:
             # Determine severity based on what modes are possible
@@ -861,22 +874,9 @@ class ModelDiagnostics:
                     ]
                 ))
 
-        # Check for zero-length springs
-        for spring in self.model.springs.values():
-            length = spring.i_node.distance(spring.j_node)
-            if length < 1e-10:
-                self.issues.append(DiagnosticIssue(
-                    severity=IssueSeverity.ERROR,
-                    category=IssueCategory.GEOMETRY,
-                    title=f"Zero-length spring '{spring.name}'",
-                    description=f"Spring connects nodes at the same location. While mathematically valid, "
-                               "this may indicate a modeling error.",
-                    affected_entities=[spring.name, spring.i_node.name, spring.j_node.name],
-                    suggestions=[
-                        "If modeling a nodal spring, use model.def_support_spring() instead",
-                        "Check if spring endpoints are correct"
-                    ]
-                ))
+        # Note: Zero-length springs are intentionally NOT flagged as issues.
+        # They are commonly used and mathematically valid for modeling nodal
+        # springs connecting coincident nodes or for special release conditions.
 
     def _check_materials_and_sections(self) -> None:
         """
