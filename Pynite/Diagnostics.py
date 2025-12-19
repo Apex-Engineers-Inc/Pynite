@@ -264,6 +264,7 @@ class ModelDiagnostics:
         self.issues: List[DiagnosticIssue] = []
         self._connectivity: Optional[ConnectivityInfo] = None
         self._supports: Optional[SupportInfo] = None
+        self._geometric_rotation_restraint: Dict[str, bool] = {}
 
     def run_full_diagnosis(self) -> DiagnosticReport:
         """
@@ -277,9 +278,14 @@ class ModelDiagnostics:
         # Run all diagnostic checks
         self._check_basic_requirements()
         self._analyze_connectivity()
+        self._check_geometric_rotation_restraint()  # Must run before _analyze_supports
         self._analyze_supports()
         self._check_mechanisms()
         self._check_geometry()
+        self._check_near_coincident_nodes()
+        self._check_singly_connected_nodes()
+        self._check_plate_drilling_dof()
+        self._check_coplanar_frame()
         self._check_materials_and_sections()
         self._check_loading()
 
@@ -567,21 +573,28 @@ class ModelDiagnostics:
         if translation_dofs['Z'] == 0:
             rigid_body_modes.append("Translation in Z (structure can slide in Z direction)")
 
-        # Rotation checks are more complex - need to check geometric arrangement
-        # For now, check if there's potential for rigid body rotation
+        # Check rotation restraints, accounting for geometric restraint from translation supports
+        # Rotation about an axis can be prevented by translation supports at different positions
+        geom_restraint = self._geometric_rotation_restraint
+
         if len(supported_nodes) == 1:
             # Single supported node - check rotation restraints
             node = self.model.nodes[supported_nodes[0]]
-            if not (node.support_RX or node.spring_RX[0] is not None):
+            if not (node.support_RX or node.spring_RX[0] is not None or geom_restraint.get('RX', False)):
                 rigid_body_modes.append("Rotation about X through the single support")
-            if not (node.support_RY or node.spring_RY[0] is not None):
+            if not (node.support_RY or node.spring_RY[0] is not None or geom_restraint.get('RY', False)):
                 rigid_body_modes.append("Rotation about Y through the single support")
-            if not (node.support_RZ or node.spring_RZ[0] is not None):
+            if not (node.support_RZ or node.spring_RZ[0] is not None or geom_restraint.get('RZ', False)):
                 rigid_body_modes.append("Rotation about Z through the single support")
-        elif len(supported_nodes) == 2:
-            # Two supports - can rotate about the axis connecting them
-            # unless rotational DOFs are restrained
-            self._check_two_support_rotation(supported_nodes, rigid_body_modes)
+        elif len(supported_nodes) >= 2:
+            # Multiple supports - check if rotations are geometrically or explicitly restrained
+            if rotation_dofs['RX'] == 0 and not geom_restraint.get('RX', False):
+                # Check if translation supports provide geometric restraint
+                pass  # Already checked in _check_geometric_rotation_restraint
+            if len(supported_nodes) == 2:
+                # Two supports - can rotate about the axis connecting them
+                # unless rotational DOFs are restrained
+                self._check_two_support_rotation(supported_nodes, rigid_body_modes)
 
         self._supports = SupportInfo(
             total_supported_dofs=total_dofs,
@@ -978,6 +991,365 @@ class ModelDiagnostics:
                                     ]
                                 ))
                             break
+
+    def _check_singly_connected_nodes(self) -> None:
+        """
+        Check for nodes connected to only one element without adequate support.
+
+        Singly-connected nodes may indicate:
+        - Unmerged nodes (common with floating-point precision issues)
+        - Incomplete member connections
+        - Missing elements
+        """
+        # Build node connectivity map
+        node_connections: Dict[str, List[str]] = defaultdict(list)
+
+        for member_name, member in self.model.members.items():
+            if hasattr(member, 'sub_members') and member.sub_members:
+                for sub_member in member.sub_members.values():
+                    node_connections[sub_member.i_node.name].append(f"member:{member_name}")
+                    node_connections[sub_member.j_node.name].append(f"member:{member_name}")
+                    break  # Only count connectivity once per physical member
+            elif hasattr(member, 'i_node'):
+                node_connections[member.i_node.name].append(f"member:{member_name}")
+                node_connections[member.j_node.name].append(f"member:{member_name}")
+
+        for spring_name, spring in self.model.springs.items():
+            node_connections[spring.i_node.name].append(f"spring:{spring_name}")
+            node_connections[spring.j_node.name].append(f"spring:{spring_name}")
+
+        for plate_name, plate in self.model.plates.items():
+            for node in [plate.i_node, plate.j_node, plate.m_node, plate.n_node]:
+                node_connections[node.name].append(f"plate:{plate_name}")
+
+        for quad_name, quad in self.model.quads.items():
+            for node in [quad.i_node, quad.j_node, quad.m_node, quad.n_node]:
+                node_connections[node.name].append(f"quad:{quad_name}")
+
+        # Find singly-connected unsupported nodes
+        singly_connected = []
+        for node_name, connections in node_connections.items():
+            if len(connections) == 1:
+                node = self.model.nodes.get(node_name)
+                if node:
+                    is_fully_supported = (
+                        node.support_DX and node.support_DY and node.support_DZ and
+                        node.support_RX and node.support_RY and node.support_RZ
+                    )
+                    if not is_fully_supported:
+                        singly_connected.append((node_name, connections[0]))
+
+        if not singly_connected:
+            return
+
+        # Check for unmerged nodes (singly-connected nodes close to other nodes)
+        max_coord = self._get_model_scale()
+        merge_tolerance = max(max_coord * 1e-4, 0.01)
+
+        unmerged_candidates = []
+        for singly_name, _ in singly_connected[:20]:  # Check first 20 to avoid O(n²)
+            singly_node = self.model.nodes.get(singly_name)
+            if not singly_node:
+                continue
+            for other_name, other_node in self.model.nodes.items():
+                if other_name == singly_name:
+                    continue
+                dist = singly_node.distance(other_node)
+                if dist < merge_tolerance and dist > 1e-10:
+                    unmerged_candidates.append(f"{singly_name} near {other_name} (dist={dist:.2e})")
+                    break
+
+        affected = [f"{name} (connected to {conn})" for name, conn in singly_connected[:5]]
+        if len(singly_connected) > 5:
+            affected.append(f"... and {len(singly_connected) - 5} more")
+
+        suggestions = ["These nodes may need additional supports or connections"]
+
+        if unmerged_candidates:
+            suggestions = [
+                "LIKELY UNMERGED NODES: Some singly-connected nodes are very close to other nodes",
+                f"Call model.merge_duplicate_nodes(tolerance={merge_tolerance:.3g}) before analysis",
+                "Ensure members share node objects instead of creating separate nodes at same location"
+            ]
+            for candidate in unmerged_candidates[:3]:
+                suggestions.append(f"  - {candidate}")
+
+        self.issues.append(DiagnosticIssue(
+            severity=IssueSeverity.WARNING if not unmerged_candidates else IssueSeverity.ERROR,
+            category=IssueCategory.CONNECTIVITY,
+            title=f"Singly-connected nodes ({len(singly_connected)} nodes)",
+            description="These nodes are connected to only one element and may lack adequate support. "
+                       "This often indicates unmerged nodes from floating-point precision issues.",
+            affected_entities=affected,
+            suggestions=suggestions
+        ))
+
+    def _check_plate_drilling_dof(self) -> None:
+        """
+        Check for plate/quad drilling DOF instabilities.
+
+        Plates have no stiffness for rotation perpendicular to their surface
+        (the "drilling" DOF). Nodes connected only to plates may have unstable
+        drilling rotations unless specifically supported.
+        """
+        if not self.model.plates and not self.model.quads:
+            return
+
+        # Find nodes connected ONLY to plates/quads (not to members)
+        member_nodes: Set[str] = set()
+        plate_nodes: Set[str] = set()
+
+        for member in self.model.members.values():
+            if hasattr(member, 'sub_members') and member.sub_members:
+                for sub_member in member.sub_members.values():
+                    member_nodes.add(sub_member.i_node.name)
+                    member_nodes.add(sub_member.j_node.name)
+            elif hasattr(member, 'i_node'):
+                member_nodes.add(member.i_node.name)
+                member_nodes.add(member.j_node.name)
+
+        for plate in self.model.plates.values():
+            for node in [plate.i_node, plate.j_node, plate.m_node, plate.n_node]:
+                plate_nodes.add(node.name)
+
+        for quad in self.model.quads.values():
+            for node in [quad.i_node, quad.j_node, quad.m_node, quad.n_node]:
+                plate_nodes.add(node.name)
+
+        # Nodes only in plates, not in members
+        plate_only_nodes = plate_nodes - member_nodes
+
+        # Check if drilling DOFs are supported
+        drilling_issues = []
+        for node_name in plate_only_nodes:
+            node = self.model.nodes.get(node_name)
+            if node:
+                # Plates typically have drilling DOF issues for out-of-plane rotation
+                # Without knowing plate orientation, check all rotational DOFs
+                if not (node.support_RX and node.support_RY and node.support_RZ):
+                    drilling_issues.append(node_name)
+
+        if drilling_issues:
+            affected = drilling_issues[:10]
+            if len(drilling_issues) > 10:
+                affected.append(f"... and {len(drilling_issues) - 10} more")
+
+            self.issues.append(DiagnosticIssue(
+                severity=IssueSeverity.WARNING,
+                category=IssueCategory.STABILITY,
+                title=f"Plate drilling DOF instability ({len(drilling_issues)} nodes)",
+                description="Nodes connected only to plates/quads may have unstable drilling rotation DOFs. "
+                           "Plates have no stiffness for rotation perpendicular to their surface.",
+                affected_entities=affected,
+                suggestions=[
+                    "Support the drilling DOF (RX, RY, or RZ depending on plate orientation) at these nodes",
+                    "Connect frame members to provide rotational stiffness",
+                    "Use a plate formulation that includes drilling DOF stiffness"
+                ]
+            ))
+
+    def _check_coplanar_frame(self) -> None:
+        """
+        Check for coplanar frame structures that may need out-of-plane restraint.
+
+        When all members lie in a single plane (e.g., wall framing), certain
+        DOFs perpendicular to that plane may be unrestrained.
+        """
+        if not self.model.members or self.model.plates or self.model.quads:
+            return  # Only check member-only models
+
+        try:
+            import numpy as np
+            from numpy.linalg import norm
+
+            # Collect all member node positions
+            member_nodes: Set[str] = set()
+            for member in self.model.members.values():
+                if hasattr(member, 'sub_members') and member.sub_members:
+                    for sub_member in member.sub_members.values():
+                        member_nodes.add(sub_member.i_node.name)
+                        member_nodes.add(sub_member.j_node.name)
+                elif hasattr(member, 'i_node'):
+                    member_nodes.add(member.i_node.name)
+                    member_nodes.add(member.j_node.name)
+
+            if len(member_nodes) < 3:
+                return
+
+            # Get node coordinates
+            node_coords = []
+            for node_name in member_nodes:
+                node = self.model.nodes.get(node_name)
+                if node:
+                    node_coords.append(np.array([node.X, node.Y, node.Z]))
+
+            if len(node_coords) < 3:
+                return
+
+            # Check if all nodes are coplanar
+            p0 = node_coords[0]
+            plane_normal = None
+
+            # Find first valid plane normal from non-collinear points
+            for i in range(1, len(node_coords)):
+                for j in range(i + 1, len(node_coords)):
+                    v1 = node_coords[i] - p0
+                    v2 = node_coords[j] - p0
+                    n = np.cross(v1, v2)
+                    n_mag = norm(n)
+                    if n_mag > 1e-6:
+                        plane_normal = n / n_mag
+                        break
+                if plane_normal is not None:
+                    break
+
+            if plane_normal is None:
+                return  # All points are collinear
+
+            # Check if all nodes lie on this plane
+            is_coplanar = True
+            for coord in node_coords:
+                dist = abs(np.dot(coord - p0, plane_normal))
+                if dist > 0.01:
+                    is_coplanar = False
+                    break
+
+            if not is_coplanar:
+                return
+
+            # Determine plane type
+            abs_normal = np.abs(plane_normal)
+            plane_type = None
+            in_plane_rotation = None
+
+            if abs_normal[0] > 0.9:  # YZ plane
+                plane_type = "YZ"
+                in_plane_rotation = "RX"
+            elif abs_normal[1] > 0.9:  # XZ plane
+                plane_type = "XZ"
+                in_plane_rotation = "RY"
+            elif abs_normal[2] > 0.9:  # XY plane
+                plane_type = "XY"
+                in_plane_rotation = "RZ"
+            else:
+                plane_type = "oblique"
+
+            if plane_type and plane_type != "oblique":
+                # Check if the in-plane rotation is restrained at any node
+                rotation_restrained = False
+                for node_name in member_nodes:
+                    node = self.model.nodes.get(node_name)
+                    if node:
+                        rot_attr = f"support_{in_plane_rotation}"
+                        if getattr(node, rot_attr, False):
+                            rotation_restrained = True
+                            break
+
+                if not rotation_restrained:
+                    self.issues.append(DiagnosticIssue(
+                        severity=IssueSeverity.WARNING,
+                        category=IssueCategory.STABILITY,
+                        title=f"Coplanar frame structure in {plane_type} plane",
+                        description=f"All members lie in the {plane_type} plane (wall/frame configuration). "
+                                   f"The in-plane rotation ({in_plane_rotation}) is not restrained at any node.",
+                        affected_entities=list(member_nodes)[:5],
+                        suggestions=[
+                            f"Support {in_plane_rotation} at key nodes to prevent in-plane rotation",
+                            "Add out-of-plane bracing or connections",
+                            "For wall framing, ensure adequate restraint perpendicular to wall"
+                        ]
+                    ))
+        except ImportError:
+            pass  # NumPy not available
+
+    def _check_geometric_rotation_restraint(self) -> None:
+        """
+        Check if rotation is geometrically restrained by translation supports.
+
+        Rotation about an axis can be prevented by translation supports at
+        different positions perpendicular to that axis, even without explicit
+        rotational supports.
+        """
+        # Collect support coordinates
+        support_coords = {'DX': [], 'DY': [], 'DZ': []}
+
+        for node in self.model.nodes.values():
+            if node.support_DX or (node.spring_DX[0] is not None):
+                support_coords['DX'].append((node.X, node.Y, node.Z))
+            if node.support_DY or (node.spring_DY[0] is not None):
+                support_coords['DY'].append((node.X, node.Y, node.Z))
+            if node.support_DZ or (node.spring_DZ[0] is not None):
+                support_coords['DZ'].append((node.X, node.Y, node.Z))
+
+        geom_tol = 0.001
+
+        # Check rotation restraints
+        # RX restrained by DY at different Z, or DZ at different Y
+        # RY restrained by DX at different Z, or DZ at different X
+        # RZ restrained by DX at different Y, or DY at different X
+
+        rotation_checks = {
+            'RX': [('DY', 2), ('DZ', 1)],  # Check Z coords for DY, Y coords for DZ
+            'RY': [('DX', 2), ('DZ', 0)],  # Check Z coords for DX, X coords for DZ
+            'RZ': [('DX', 1), ('DY', 0)],  # Check Y coords for DX, X coords for DY
+        }
+
+        geometrically_restrained = {'RX': False, 'RY': False, 'RZ': False}
+
+        for rot_dof, checks in rotation_checks.items():
+            for trans_dof, coord_idx in checks:
+                coords = [c[coord_idx] for c in support_coords[trans_dof]]
+                if len(coords) >= 2 and max(coords) - min(coords) > geom_tol:
+                    geometrically_restrained[rot_dof] = True
+                    break
+
+        # Store for use by _analyze_supports
+        self._geometric_rotation_restraint = geometrically_restrained
+
+    def _check_near_coincident_nodes(self) -> None:
+        """
+        Check for nodes that are very close but not exactly coincident.
+
+        This often indicates modeling errors or unintentional duplicate nodes.
+        """
+        max_coord = self._get_model_scale()
+        # Use 0.01% of model size as tolerance, minimum 0.001
+        near_tolerance = max(max_coord * 1e-4, 0.001)
+
+        near_coincident = []
+        node_list = list(self.model.nodes.items())
+
+        for i, (name1, node1) in enumerate(node_list):
+            for name2, node2 in node_list[i+1:]:
+                dist = node1.distance(node2)
+                if 1e-6 < dist < near_tolerance:
+                    near_coincident.append((name1, name2, dist))
+
+        if near_coincident:
+            affected = [f"({n1}, {n2}): dist={d:.6g}" for n1, n2, d in near_coincident[:5]]
+            if len(near_coincident) > 5:
+                affected.append(f"... and {len(near_coincident) - 5} more pairs")
+
+            self.issues.append(DiagnosticIssue(
+                severity=IssueSeverity.WARNING,
+                category=IssueCategory.GEOMETRY,
+                title=f"Near-coincident nodes ({len(near_coincident)} pairs)",
+                description="These node pairs are very close but not exactly coincident. "
+                           "This may indicate a modeling error or unintentional duplication.",
+                affected_entities=affected,
+                suggestions=[
+                    "Merge these nodes if they should be the same point",
+                    f"Call model.merge_duplicate_nodes(tolerance={near_tolerance:.4g})",
+                    "Check if members were defined with separate nodes at same location"
+                ]
+            ))
+
+    def _get_model_scale(self) -> float:
+        """Get the characteristic scale of the model from node coordinates."""
+        all_coords = []
+        for node in self.model.nodes.values():
+            all_coords.extend([abs(node.X), abs(node.Y), abs(node.Z)])
+        return max(all_coords) if all_coords else 1.0
 
 
 def diagnose_instability(model: 'FEModel3D', K: 'NDArray[float64]' = None) -> str:
