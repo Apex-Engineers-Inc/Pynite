@@ -440,14 +440,16 @@ class ModelDiagnostics:
             self.issues.append(DiagnosticIssue(
                 severity=IssueSeverity.WARNING,
                 category=IssueCategory.CONNECTIVITY,
-                title=f"Floating nodes detected ({len(floating_nodes)} nodes)",
-                description="These nodes are not connected to any structural element. They contribute "
-                           "to the stiffness matrix size but add no stiffness, which can cause instability.",
+                title=f"Orphan nodes detected ({len(floating_nodes)} nodes)",
+                description="These nodes exist in your model but are not connected to any beam, column, "
+                           "plate, or other structural element. Think of them as 'orphan' points floating "
+                           "in space. They add unknowns to the analysis but provide no structural resistance, "
+                           "which can cause the analysis to fail.",
                 affected_entities=sorted(list(floating_nodes)),
                 suggestions=[
-                    "Connect these nodes to structural elements (members, springs, plates)",
-                    "Remove unused nodes from the model",
-                    "Check if these nodes were intended to be part of members that weren't created"
+                    "Check if you forgot to create a member connecting to these nodes",
+                    "If these nodes are unused, remove them with model.delete_node()",
+                    "Verify that member definitions use the correct node names"
                 ]
             ))
 
@@ -588,14 +590,11 @@ class ModelDiagnostics:
             if not (node.support_RZ or node.spring_RZ[0] is not None or geom_restraint.get('RZ', False)):
                 rigid_body_modes.append("Rotation about Z through the single support")
         elif len(supported_nodes) >= 2:
-            # Multiple supports - check if rotations are geometrically or explicitly restrained
-            if rotation_dofs['RX'] == 0 and not geom_restraint.get('RX', False):
-                # Check if translation supports provide geometric restraint
-                pass  # Already checked in _check_geometric_rotation_restraint
-            if len(supported_nodes) == 2:
-                # Two supports - can rotate about the axis connecting them
-                # unless rotational DOFs are restrained
-                self._check_two_support_rotation(supported_nodes, rigid_body_modes)
+            # Multiple supports - geometric restraint typically prevents rotation.
+            # Note: We intentionally do NOT check for rotation about axis connecting
+            # two supports because member torsional/bending stiffness provides restraint
+            # in practice. Flagging this would be a misleading "red herring" for users.
+            pass
 
         self._supports = SupportInfo(
             total_supported_dofs=total_dofs,
@@ -610,14 +609,14 @@ class ModelDiagnostics:
             self.issues.append(DiagnosticIssue(
                 severity=IssueSeverity.ERROR,
                 category=IssueCategory.SUPPORTS,
-                title="No supports defined",
-                description="The model has no support conditions. Without supports, the entire structure "
-                           "is free to move as a rigid body and cannot be analyzed.",
+                title="No supports defined - structure is floating in space",
+                description="Your model has no supports at all. Without supports, the structure is like "
+                           "a satellite floating in space - it can drift in any direction. The analysis "
+                           "needs at least one point anchored to calculate how the structure responds to loads.",
                 suggestions=[
-                    "Add supports using model.def_support(node_name, support_DX=True, ...)",
-                    "For a basic fixed support: def_support(node, True, True, True, True, True, True)",
-                    "For a pinned support: def_support(node, True, True, True, False, False, False)",
-                    "For a roller: def_support(node, False, True, False, False, False, False)"
+                    "Add a fixed support (prevents all movement): def_support(node, True, True, True, True, True, True)",
+                    "Or a pinned support (allows rotation): def_support(node, True, True, True, False, False, False)",
+                    "At minimum, the structure needs to be prevented from sliding and rotating"
                 ]
             ))
         elif total_dofs < 6:
@@ -636,15 +635,16 @@ class ModelDiagnostics:
                 self.issues.append(DiagnosticIssue(
                     severity=IssueSeverity.ERROR,
                     category=IssueCategory.SUPPORTS,
-                    title=f"Insufficient supports ({total_dofs} explicit DOFs)",
-                    description="A 3D structure requires at least 6 supported degrees of freedom to prevent "
-                               "rigid body motion (3 translations and 3 rotations). Your model may have fewer "
-                               "even accounting for geometric restraint from support positions.",
+                    title=f"Insufficient supports - structure not fully restrained",
+                    description="A 3D structure needs to be prevented from moving in 6 ways: sliding in "
+                               "X, Y, Z directions, and rotating about X, Y, Z axes. Your current supports "
+                               "only restrain some of these movements. The unrestrained directions will cause "
+                               "the analysis to fail.",
                     affected_entities=supported_nodes,
                     suggestions=[
-                        f"Add more supported DOFs",
-                        "Consider using a fixed support (6 DOFs) at one node",
-                        "Alternatively, use multiple pinned/roller supports strategically placed"
+                        "Add a fixed support at one node (restrains all 6 movements)",
+                        "Or use multiple supports that together prevent all movement",
+                        "Example: Two pinned supports at different heights prevent rotation"
                     ]
                 ))
 
@@ -655,50 +655,17 @@ class ModelDiagnostics:
             self.issues.append(DiagnosticIssue(
                 severity=IssueSeverity.ERROR if has_translation_mode else IssueSeverity.WARNING,
                 category=IssueCategory.SUPPORTS,
-                title=f"Potential rigid body motion ({len(rigid_body_modes)} mode(s))",
-                description="The support arrangement may allow the structure to move as a rigid body. "
-                           "This will cause the stiffness matrix to be singular.",
+                title=f"Structure can move freely ({len(rigid_body_modes)} direction(s))",
+                description="Your supports don't fully restrain the structure. Just like a book on a "
+                           "frictionless table can slide around, your structure can move without "
+                           "any resistance in certain directions. The analysis cannot solve because "
+                           "there's no unique equilibrium position.",
                 affected_entities=supported_nodes,
                 suggestions=[
-                    "Review support conditions for completeness",
-                    *[f"Address: {mode}" for mode in rigid_body_modes[:3]]
+                    "Add supports to prevent movement in all directions",
+                    *[f"Problem: {mode}" for mode in rigid_body_modes[:3]]
                 ]
             ))
-
-    def _check_two_support_rotation(self, supported_nodes: List[str], rigid_body_modes: List[str]) -> None:
-        """Check for rotation about axis connecting two supports."""
-        if len(supported_nodes) != 2:
-            return
-
-        node1 = self.model.nodes[supported_nodes[0]]
-        node2 = self.model.nodes[supported_nodes[1]]
-
-        # Calculate the axis direction
-        dx = node2.X - node1.X
-        dy = node2.Y - node1.Y
-        dz = node2.Z - node1.Z
-        length = (dx**2 + dy**2 + dz**2)**0.5
-
-        if length < 1e-10:
-            return  # Nodes are coincident
-
-        # Normalize
-        dx, dy, dz = dx/length, dy/length, dz/length
-
-        # Check if rotation about this axis is restrained
-        # This is a simplified check - we're looking if rotational DOFs are restrained
-        # A more rigorous check would involve the actual geometry
-
-        rotation_restrained = False
-        for node in [node1, node2]:
-            if ((node.support_RX or node.spring_RX[0] is not None) or
-                (node.support_RY or node.spring_RY[0] is not None) or
-                (node.support_RZ or node.spring_RZ[0] is not None)):
-                rotation_restrained = True
-                break
-
-        if not rotation_restrained:
-            rigid_body_modes.append(f"Rotation about axis connecting {supported_nodes[0]} and {supported_nodes[1]}")
 
     def _check_mechanisms(self) -> None:
         """
@@ -736,13 +703,14 @@ class ModelDiagnostics:
                 self.issues.append(DiagnosticIssue(
                     severity=IssueSeverity.ERROR,
                     category=IssueCategory.MECHANISM,
-                    title=f"Member '{member.name}' has axial release at both ends",
-                    description="Releasing the axial force at both ends of a member makes it unable to "
-                               "carry any axial load, effectively disconnecting its nodes axially.",
+                    title=f"Member '{member.name}' cannot carry axial load",
+                    description="This member has axial (push/pull) releases at BOTH ends. Imagine a rod "
+                               "that can slide freely at both ends - it cannot resist any pushing or "
+                               "pulling force. The member is essentially 'floating' in the axial direction.",
                     affected_entities=[member.name, i_node, j_node],
                     suggestions=[
-                        "Remove the axial release at one end",
-                        "If modeling a true mechanism, consider using a spring element instead"
+                        "Remove the axial release from one end",
+                        "If this is intentional, use a spring element instead"
                     ]
                 ))
 
@@ -775,14 +743,15 @@ class ModelDiagnostics:
                     self.issues.append(DiagnosticIssue(
                         severity=IssueSeverity.ERROR,
                         category=IssueCategory.MECHANISM,
-                        title=f"Hinge mechanism at node '{node_name}' (My releases)",
-                        description=f"Node has {my_releases} My (strong-axis bending) releases but only "
-                                   f"{num_members} connected members. This creates an unstable hinge.",
+                        title=f"Too many hinges at node '{node_name}' (strong-axis bending)",
+                        description=f"This node has {my_releases} moment hinges about the strong axis "
+                                   f"but only {num_members} member(s) connect here. Think of a door with "
+                                   "hinges on every side - it would spin freely! At least one connection "
+                                   "must be rigid (no hinge) to prevent the node from spinning.",
                         affected_entities=[node_name] + [m for m, _ in releases if 'My' in _],
                         suggestions=[
-                            "Remove moment release from at least one member",
-                            "Add a rotational support at this node",
-                            "Use a beam element without end releases at one connection"
+                            "Remove the moment release (hinge) from at least one member end",
+                            "Or add a rotational support at this node to prevent spinning"
                         ]
                     ))
 
@@ -790,14 +759,15 @@ class ModelDiagnostics:
                     self.issues.append(DiagnosticIssue(
                         severity=IssueSeverity.ERROR,
                         category=IssueCategory.MECHANISM,
-                        title=f"Hinge mechanism at node '{node_name}' (Mz releases)",
-                        description=f"Node has {mz_releases} Mz (weak-axis bending) releases but only "
-                                   f"{num_members} connected members. This creates an unstable hinge.",
+                        title=f"Too many hinges at node '{node_name}' (weak-axis bending)",
+                        description=f"This node has {mz_releases} moment hinges about the weak axis "
+                                   f"but only {num_members} member(s) connect here. Think of a door with "
+                                   "hinges on every side - it would spin freely! At least one connection "
+                                   "must be rigid (no hinge) to prevent the node from spinning.",
                         affected_entities=[node_name] + [m for m, _ in releases if 'Mz' in _],
                         suggestions=[
-                            "Remove moment release from at least one member",
-                            "Add a rotational support at this node",
-                            "Use a beam element without end releases at one connection"
+                            "Remove the moment release (hinge) from at least one member end",
+                            "Or add a rotational support at this node to prevent spinning"
                         ]
                     ))
 
@@ -828,14 +798,15 @@ class ModelDiagnostics:
                     severity=IssueSeverity.ERROR,
                     category=IssueCategory.GEOMETRY,
                     title=f"Zero-length member '{member.name}'",
-                    description=f"Member connects nodes '{member.i_node.name}' and '{member.j_node.name}' "
-                               f"which are at the same location. Zero-length members cannot have a defined "
-                               "local coordinate system.",
+                    description=f"Member '{member.name}' connects nodes '{member.i_node.name}' and "
+                               f"'{member.j_node.name}' which are at exactly the same location. A beam/column "
+                               "needs a length to have stiffness - you can't have a structural member with "
+                               "zero length! This usually means the two nodes should actually be the same node.",
                     affected_entities=[member.name, member.i_node.name, member.j_node.name],
                     suggestions=[
-                        "Merge the two nodes into one",
-                        "Check if one node has incorrect coordinates",
-                        "If modeling a rigid connection, use node constraints instead"
+                        "Check if these nodes have incorrect coordinates",
+                        "If they should be the same point, use one node for both member ends",
+                        "Run model.merge_duplicate_nodes() to automatically fix this"
                     ]
                 ))
             elif length < 1e-6:
@@ -1069,19 +1040,19 @@ class ModelDiagnostics:
             affected.append(f"... and {len(singly_connected) - 5} more")
 
         suggestions = [
-            "LIKELY UNMERGED NODES: These singly-connected nodes are very close to other nodes",
-            f"Call model.merge_duplicate_nodes(tolerance={merge_tolerance:.3g}) before analysis",
-            "Ensure members share node objects instead of creating separate nodes at same location"
+            f"Run model.merge_duplicate_nodes(tolerance={merge_tolerance:.3g}) to automatically fix this",
+            "Or ensure members share the same node object instead of creating separate nodes"
         ]
         for candidate in unmerged_candidates[:3]:
-            suggestions.append(f"  - {candidate}")
+            suggestions.append(f"  Close pair: {candidate}")
 
         self.issues.append(DiagnosticIssue(
             severity=IssueSeverity.ERROR,
             category=IssueCategory.CONNECTIVITY,
-            title=f"Likely unmerged nodes ({len(unmerged_candidates)} detected)",
-            description="Singly-connected nodes were found very close to other nodes. "
-                       "This typically indicates nodes that should be merged but weren't due to floating-point precision.",
+            title=f"Members not connected - nodes almost overlap ({len(unmerged_candidates)} found)",
+            description="Some member endpoints are VERY close to other nodes but not actually connected. "
+                       "This is like having two puzzle pieces that almost touch but don't snap together. "
+                       "The members won't transfer forces between each other, causing the analysis to fail.",
             affected_entities=affected,
             suggestions=suggestions
         ))
@@ -1150,21 +1121,21 @@ class ModelDiagnostics:
                     near_coincident.append((name1, name2, dist))
 
         if near_coincident:
-            affected = [f"({n1}, {n2}): dist={d:.6g}" for n1, n2, d in near_coincident[:5]]
+            affected = [f"'{n1}' and '{n2}' are {d:.4g} apart" for n1, n2, d in near_coincident[:5]]
             if len(near_coincident) > 5:
                 affected.append(f"... and {len(near_coincident) - 5} more pairs")
 
             self.issues.append(DiagnosticIssue(
                 severity=IssueSeverity.WARNING,
                 category=IssueCategory.GEOMETRY,
-                title=f"Near-coincident nodes ({len(near_coincident)} pairs)",
-                description="These node pairs are very close but not exactly coincident. "
-                           "This may indicate a modeling error or unintentional duplication.",
+                title=f"Nodes suspiciously close together ({len(near_coincident)} pairs)",
+                description="These nodes are extremely close together but not at exactly the same spot. "
+                           "This often happens when coordinates are entered with slight differences "
+                           "(e.g., 10.0 vs 10.001). If these should be the same point, merge them.",
                 affected_entities=affected,
                 suggestions=[
-                    "Merge these nodes if they should be the same point",
-                    f"Call model.merge_duplicate_nodes(tolerance={near_tolerance:.4g})",
-                    "Check if members were defined with separate nodes at same location"
+                    f"Run model.merge_duplicate_nodes(tolerance={near_tolerance:.4g}) to merge close nodes",
+                    "Or check if the coordinates were entered incorrectly"
                 ]
             ))
 
