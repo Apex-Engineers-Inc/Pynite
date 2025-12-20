@@ -1189,3 +1189,212 @@ def get_connectivity_summary(model: 'FEModel3D') -> str:
             lines.append(f"      {', '.join(sorted(conn.floating_nodes))}")
 
     return "\n".join(lines)
+
+
+def get_connectivity_graph(model: 'FEModel3D', format: str = 'text') -> str:
+    """
+    Generate a graph representation of the model's node-member connectivity.
+
+    Parameters
+    ----------
+    model : FEModel3D
+        The finite element model to analyze
+    format : str
+        Output format: 'text' for readable adjacency list, 'dot' for Graphviz DOT format
+
+    Returns
+    -------
+    str
+        Graph representation in the specified format
+
+    Example
+    -------
+    >>> print(get_connectivity_graph(model))
+    >>> # Or export to Graphviz:
+    >>> with open('model.dot', 'w') as f:
+    ...     f.write(get_connectivity_graph(model, format='dot'))
+    """
+    from collections import defaultdict
+
+    # Build adjacency data
+    node_to_elements: Dict[str, List[str]] = defaultdict(list)
+    element_to_nodes: Dict[str, List[str]] = {}
+
+    # Collect member connections
+    for name, member in model.members.items():
+        i_name = member.i_node.name
+        j_name = member.j_node.name
+        element_to_nodes[f"M:{name}"] = [i_name, j_name]
+        node_to_elements[i_name].append(f"M:{name}")
+        node_to_elements[j_name].append(f"M:{name}")
+
+    # Collect spring connections
+    for name, spring in model.springs.items():
+        i_name = spring.i_node.name
+        j_name = spring.j_node.name
+        element_to_nodes[f"S:{name}"] = [i_name, j_name]
+        node_to_elements[i_name].append(f"S:{name}")
+        node_to_elements[j_name].append(f"S:{name}")
+
+    # Collect plate connections
+    for name, plate in model.plates.items():
+        nodes = [plate.i_node.name, plate.j_node.name, plate.m_node.name, plate.n_node.name]
+        element_to_nodes[f"P:{name}"] = nodes
+        for n in nodes:
+            node_to_elements[n].append(f"P:{name}")
+
+    # Collect quad connections
+    for name, quad in model.quads.items():
+        nodes = [quad.i_node.name, quad.j_node.name, quad.m_node.name, quad.n_node.name]
+        element_to_nodes[f"Q:{name}"] = nodes
+        for n in nodes:
+            node_to_elements[n].append(f"Q:{name}")
+
+    # Classify nodes
+    supported_nodes = set()
+    for node in model.nodes.values():
+        if (node.support_DX or node.support_DY or node.support_DZ or
+            node.support_RX or node.support_RY or node.support_RZ or
+            node.spring_DX[0] is not None or node.spring_DY[0] is not None or
+            node.spring_DZ[0] is not None):
+            supported_nodes.add(node.name)
+
+    floating_nodes = set(model.nodes.keys()) - set(node_to_elements.keys())
+    singly_connected = {n for n, elems in node_to_elements.items() if len(elems) == 1}
+
+    if format == 'dot':
+        return _format_dot_graph(model, node_to_elements, element_to_nodes,
+                                  supported_nodes, floating_nodes, singly_connected)
+    else:
+        return _format_text_graph(model, node_to_elements, element_to_nodes,
+                                   supported_nodes, floating_nodes, singly_connected)
+
+
+def _format_text_graph(model: 'FEModel3D',
+                        node_to_elements: Dict[str, List[str]],
+                        element_to_nodes: Dict[str, List[str]],
+                        supported_nodes: Set[str],
+                        floating_nodes: Set[str],
+                        singly_connected: Set[str]) -> str:
+    """Format connectivity as readable text."""
+    lines = []
+    lines.append("=" * 60)
+    lines.append("           MODEL CONNECTIVITY GRAPH")
+    lines.append("=" * 60)
+    lines.append("")
+
+    # Summary
+    lines.append(f"Nodes: {len(model.nodes)}  |  Members: {len(model.members)}  |  "
+                f"Springs: {len(model.springs)}  |  Plates: {len(model.plates) + len(model.quads)}")
+    lines.append("")
+
+    # Legend
+    lines.append("Node markers:  [S]=Supported  [F]=Floating  [1]=Singly-connected")
+    lines.append("-" * 60)
+    lines.append("")
+
+    # Node adjacency list
+    lines.append("NODE CONNECTIONS:")
+    lines.append("")
+
+    for node_name in sorted(model.nodes.keys()):
+        # Build node marker
+        markers = []
+        if node_name in supported_nodes:
+            markers.append("S")
+        if node_name in floating_nodes:
+            markers.append("F")
+        if node_name in singly_connected:
+            markers.append("1")
+        marker_str = f"[{''.join(markers)}]" if markers else "   "
+
+        elements = node_to_elements.get(node_name, [])
+        if elements:
+            elem_str = ", ".join(elements)
+            lines.append(f"  {marker_str} {node_name} ── {elem_str}")
+        else:
+            lines.append(f"  {marker_str} {node_name} ── (no connections)")
+
+    lines.append("")
+    lines.append("-" * 60)
+    lines.append("")
+
+    # Element list with endpoints
+    lines.append("ELEMENT ENDPOINTS:")
+    lines.append("")
+
+    for elem_name in sorted(element_to_nodes.keys()):
+        nodes = element_to_nodes[elem_name]
+        if len(nodes) == 2:
+            lines.append(f"  {elem_name}:  {nodes[0]} ←→ {nodes[1]}")
+        else:
+            lines.append(f"  {elem_name}:  {' ─ '.join(nodes)}")
+
+    lines.append("")
+    lines.append("=" * 60)
+
+    return "\n".join(lines)
+
+
+def _format_dot_graph(model: 'FEModel3D',
+                       node_to_elements: Dict[str, List[str]],
+                       element_to_nodes: Dict[str, List[str]],
+                       supported_nodes: Set[str],
+                       floating_nodes: Set[str],
+                       singly_connected: Set[str]) -> str:
+    """Format connectivity as Graphviz DOT format."""
+    lines = []
+    lines.append("graph model {")
+    lines.append("  // Generated by Pynite Diagnostics")
+    lines.append("  rankdir=TB;")
+    lines.append("  node [shape=circle, width=0.5, fixedsize=true];")
+    lines.append("")
+
+    # Define node styles
+    lines.append("  // Nodes")
+    for node_name in sorted(model.nodes.keys()):
+        attrs = []
+        if node_name in supported_nodes:
+            attrs.append('shape=triangle')
+            attrs.append('color=blue')
+        if node_name in floating_nodes:
+            attrs.append('color=red')
+            attrs.append('style=dashed')
+        if node_name in singly_connected and node_name not in floating_nodes:
+            attrs.append('color=orange')
+
+        # Escape node name for DOT format
+        safe_name = node_name.replace('"', '\\"')
+        if attrs:
+            lines.append(f'  "{safe_name}" [{", ".join(attrs)}];')
+        else:
+            lines.append(f'  "{safe_name}";')
+
+    lines.append("")
+    lines.append("  // Elements (edges)")
+
+    # Add edges for members and springs
+    for elem_name, nodes in sorted(element_to_nodes.items()):
+        safe_nodes = [n.replace('"', '\\"') for n in nodes]
+
+        if elem_name.startswith("M:"):
+            # Member - solid line
+            label = elem_name[2:]
+            lines.append(f'  "{safe_nodes[0]}" -- "{safe_nodes[1]}" [label="{label}"];')
+        elif elem_name.startswith("S:"):
+            # Spring - dashed line
+            label = elem_name[2:]
+            lines.append(f'  "{safe_nodes[0]}" -- "{safe_nodes[1]}" [label="{label}", style=dashed];')
+        elif elem_name.startswith("P:") or elem_name.startswith("Q:"):
+            # Plate/Quad - connect all corners
+            label = elem_name[2:]
+            for i in range(len(safe_nodes)):
+                j = (i + 1) % len(safe_nodes)
+                if i == 0:
+                    lines.append(f'  "{safe_nodes[i]}" -- "{safe_nodes[j]}" [label="{label}", color=gray];')
+                else:
+                    lines.append(f'  "{safe_nodes[i]}" -- "{safe_nodes[j]}" [color=gray];')
+
+    lines.append("}")
+
+    return "\n".join(lines)

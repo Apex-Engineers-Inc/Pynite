@@ -2778,3 +2778,40 @@ class FEModel3D():
         summary = get_connectivity_summary(self)
         print(summary)
         return summary
+
+    def connectivity_graph(self, format: str = 'text') -> str:
+        """
+        Generate a graph representation of the model's node-member connectivity.
+
+        This method produces a visual/textual representation showing which nodes
+        connect to which elements, useful for debugging connectivity issues.
+
+        Parameters
+        ----------
+        format : str, optional
+            Output format (default: 'text'):
+            - 'text': Readable adjacency list with node markers
+            - 'dot': Graphviz DOT format for visualization
+
+        Returns
+        -------
+        str
+            Graph representation in the specified format.
+
+        Examples
+        --------
+        >>> model = FEModel3D()
+        >>> # ... build model ...
+        >>> print(model.connectivity_graph())
+
+        >>> # Export to Graphviz for visualization:
+        >>> with open('model.dot', 'w') as f:
+        ...     f.write(model.connectivity_graph(format='dot'))
+        >>> # Then run: dot -Tpng model.dot -o model.png
+        """
+        from Pynite.Diagnostics import get_connectivity_graph
+
+        graph = get_connectivity_graph(self, format=format)
+        if format == 'text':
+            print(graph)
+        return graph

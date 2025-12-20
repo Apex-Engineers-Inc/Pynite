@@ -1,7 +1,7 @@
 # Select libraries that will be imported into Pynite for the user
 from Pynite.FEModel3D import FEModel3D
 from Pynite.ShearWall import ShearWall
-from Pynite.Diagnostics import ModelDiagnostics, diagnose_instability, get_connectivity_summary
+from Pynite.Diagnostics import ModelDiagnostics, diagnose_instability, get_connectivity_summary, get_connectivity_graph
 from Pynite.Analysis import AnalysisError, run_pre_analysis_checks
 import Pynite
 
