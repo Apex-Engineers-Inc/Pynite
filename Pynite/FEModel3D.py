@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Literal
 
 from numpy import array, zeros, matmul, subtract
 from numpy.linalg import solve
+from scipy.sparse.linalg import spsolve
 
 from Pynite.Node3D import Node3D
 from Pynite.Material import Material
