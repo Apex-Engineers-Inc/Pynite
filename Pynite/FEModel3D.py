@@ -2179,19 +2179,48 @@ class FEModel3D():
                 # All displacements are known, so D1 is an empty vector
                 D1 = []
             else:
-                # Build the right-hand side vector
-                if sparse == True:
-                    RHS = subtract(subtract(P1, FER1), K12_csr @ D2)
-                else:
-                    RHS = subtract(subtract(P1, FER1), matmul(K12, D2))
+                try:
+                    # Calculate the unknown displacements D1
+                    if sparse == True:
+                        # The partitioned stiffness matrix is in `lil` format, which is great
+                        # for memory, but slow for mathematical operations. The stiffness
+                        # matrix will be converted to `csr` format for mathematical operations.
+                        # The `@` operator performs matrix multiplication on sparse matrices.
+                        D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2))
+                        D1 = D1.reshape(len(D1), 1)
+                    else:
+                        D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
 
-                # Solve using pre-factored matrix (O(n²) back-substitution only)
-                if sparse == True:
-                    D1 = K11_factored.solve(RHS.flatten())
-                    D1 = D1.reshape(len(D1), 1)
-                else:
-                    from scipy.linalg import lu_solve
-                    D1 = lu_solve(K11_factored, RHS)
+                    # Check for NaN or Inf values which indicate a singular matrix
+                    # (scipy spsolve may not raise an exception for singular matrices)
+                    import numpy as np
+                    if np.any(np.isnan(D1)) or np.any(np.isinf(D1)):
+                        raise ValueError("Solution contains NaN or Inf values - matrix is singular")
+
+                except Exception as e:
+                    # Return out of the method if 'K' is singular and provide an error message
+                    # Run diagnostics to explain why the matrix is singular
+                    from Pynite.Diagnostics import ModelDiagnostics
+                    print('')
+                    print('=' * 60)
+                    print('ANALYSIS FAILED - Singular Stiffness Matrix')
+                    print('=' * 60)
+                    print('')
+                    print('The stiffness matrix could not be inverted, which means the')
+                    print('structure has one or more rigid body modes (it can move freely).')
+                    print('')
+                    print('Running diagnostics to identify root cause...')
+                    print('')
+
+                    diagnostics = ModelDiagnostics(self)
+                    report = diagnostics.run_full_diagnosis()
+                    diagnostic_text = report.format(verbose=True)
+                    print(diagnostic_text)
+
+                    raise Analysis.AnalysisError(
+                        'The stiffness matrix is singular (structure is unstable)',
+                        diagnostic_text
+                    ) from e
 
             # Store the calculated displacements to the model and the nodes in the model
             Analysis._store_displacements(self, D1, D2, D1_indices, D2_indices, combo)
@@ -2305,7 +2334,35 @@ class FEModel3D():
                     # Check for tension/compression-only divergence
                     if iter_count > max_iter:
                         divergence = True
-                        raise Exception('Model diverged during tension/compression-only analysis')
+                        from Pynite.Diagnostics import ModelDiagnostics
+                        print('')
+                        print('=' * 60)
+                        print('ANALYSIS FAILED - Tension/Compression-Only Divergence')
+                        print('=' * 60)
+                        print('')
+                        print(f'The model failed to converge after {max_iter} iterations.')
+                        print('')
+                        print('This typically happens when:')
+                        print('  1. Too many tension-only or compression-only elements')
+                        print('  2. The structure becomes unstable as elements deactivate')
+                        print('  3. Loads cause elements to repeatedly activate/deactivate')
+                        print('')
+                        print('Suggestions:')
+                        print('  - Increase max_iter if convergence is nearly achieved')
+                        print('  - Reduce num_steps for better load stepping')
+                        print('  - Check if T/C-only element arrangement is physically sensible')
+                        print('  - Consider using regular elements for some members')
+                        print('')
+
+                        diagnostics = ModelDiagnostics(self)
+                        report = diagnostics.run_full_diagnosis()
+                        diagnostic_text = report.format(verbose=True)
+                        print(diagnostic_text)
+
+                        raise Analysis.AnalysisError(
+                            'Model diverged during tension/compression-only analysis',
+                            diagnostic_text
+                        )
 
                     # Report which load step we are on
                     if log:
@@ -2329,10 +2386,37 @@ class FEModel3D():
                                 Delta_D1 = Delta_D1.reshape(len(Delta_D1), 1)
                             else:
                                 Delta_D1 = solve(K11, subtract(subtract(Delta_P1, Delta_FER1), matmul(K12, Delta_D2)))
+
+                            # Check for NaN or Inf values which indicate a singular matrix
+                            # (scipy spsolve may not raise an exception for singular matrices)
+                            import numpy as np
+                            if np.any(np.isnan(Delta_D1)) or np.any(np.isinf(Delta_D1)):
+                                raise ValueError("Solution contains NaN or Inf values - matrix is singular")
+
                         except Exception as e:
-                            # Diagnose the root cause of the singular matrix
-                            error_msg = Analysis._diagnose_singularity(self, K11, D1_indices, sparse)
-                            raise Exception(error_msg) from e
+                            # Return out of the method if 'K' is singular and provide an error message
+                            # Run diagnostics to explain why the matrix is singular
+                            from Pynite.Diagnostics import ModelDiagnostics
+                            print('')
+                            print('=' * 60)
+                            print('ANALYSIS FAILED - Singular Stiffness Matrix')
+                            print('=' * 60)
+                            print('')
+                            print('The stiffness matrix could not be inverted, which means the')
+                            print('structure has one or more rigid body modes (it can move freely).')
+                            print('')
+                            print('Running diagnostics to identify root cause...')
+                            print('')
+
+                            diagnostics = ModelDiagnostics(self)
+                            report = diagnostics.run_full_diagnosis()
+                            diagnostic_text = report.format(verbose=True)
+                            print(diagnostic_text)
+
+                            raise Analysis.AnalysisError(
+                                'The stiffness matrix is singular (structure is unstable)',
+                                diagnostic_text
+                            ) from e
 
                     # Store or sum the calculated displacements to the model and the nodes in the model
                     if load_step == 1:
@@ -3061,3 +3145,113 @@ class FEModel3D():
                 orphans.append(node.name)
 
         return orphans
+
+    def diagnose(self, verbose: bool = True, include_info: bool = False) -> 'DiagnosticReport':
+        """
+        Run comprehensive diagnostics on the model to identify potential issues.
+
+        This method checks for common modeling problems that could prevent
+        successful analysis or cause unexpected results. It's recommended to
+        run this before attempting analysis on a new or modified model.
+
+        Parameters
+        ----------
+        verbose : bool, optional
+            If True, includes detailed descriptions and suggestions for each
+            issue found (default: True).
+        include_info : bool, optional
+            If True, includes informational messages in addition to errors
+            and warnings (default: False).
+
+        Returns
+        -------
+        DiagnosticReport
+            A report object containing all findings. The report can be printed
+            or accessed programmatically.
+
+        Examples
+        --------
+        >>> model = FEModel3D()
+        >>> # ... build model ...
+        >>> report = model.diagnose()
+        >>> print(report.format())
+
+        >>> # Check if model is ready for analysis
+        >>> if not report.has_errors:
+        ...     model.analyze()
+        ... else:
+        ...     print("Fix errors before analyzing")
+        """
+        from Pynite.Diagnostics import ModelDiagnostics
+
+        diagnostics = ModelDiagnostics(self)
+        report = diagnostics.run_full_diagnosis()
+
+        # Print the report
+        print(report.format(verbose=verbose, include_info=include_info))
+
+        return report
+
+    def check_connectivity(self) -> str:
+        """
+        Get a summary of the model's structural connectivity.
+
+        This method analyzes how nodes are connected through structural
+        elements and identifies any disconnected components or floating nodes.
+
+        Returns
+        -------
+        str
+            A formatted string describing the connectivity of the model.
+
+        Examples
+        --------
+        >>> model = FEModel3D()
+        >>> # ... build model ...
+        >>> print(model.check_connectivity())
+        Connectivity Summary:
+          - 1 connected component(s)
+            Component 1: 10 nodes (with supports)
+        """
+        from Pynite.Diagnostics import get_connectivity_summary
+
+        summary = get_connectivity_summary(self)
+        print(summary)
+        return summary
+
+    def connectivity_graph(self, format: str = 'text') -> str:
+        """
+        Generate a graph representation of the model's node-member connectivity.
+
+        This method produces a visual/textual representation showing which nodes
+        connect to which elements, useful for debugging connectivity issues.
+
+        Parameters
+        ----------
+        format : str, optional
+            Output format (default: 'text'):
+            - 'text': Readable adjacency list with node markers
+            - 'dot': Graphviz DOT format for visualization
+
+        Returns
+        -------
+        str
+            Graph representation in the specified format.
+
+        Examples
+        --------
+        >>> model = FEModel3D()
+        >>> # ... build model ...
+        >>> print(model.connectivity_graph())
+
+        >>> # Export to Graphviz for visualization:
+        >>> with open('model.dot', 'w') as f:
+        ...     f.write(model.connectivity_graph(format='dot'))
+        >>> # Then run: dot -Tpng model.dot -o model.png
+        """
+        from Pynite.Diagnostics import get_connectivity_graph
+
+        graph = get_connectivity_graph(self, format=format)
+        if format == 'text':
+            print(graph)
+        return graph

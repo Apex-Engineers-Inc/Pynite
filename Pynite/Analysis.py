@@ -6,6 +6,7 @@ from numpy import array, atleast_2d, zeros, subtract, matmul, divide, seterr, na
 from numpy.linalg import solve
 
 from Pynite.LoadCombo import LoadCombo
+from Pynite.Diagnostics import ModelDiagnostics, diagnose_instability
 
 if TYPE_CHECKING:
     from typing import List, Tuple
@@ -13,6 +14,25 @@ if TYPE_CHECKING:
     from numpy import float64
     from numpy.typing import NDArray
     from scipy.sparse import lil_matrix
+
+
+class AnalysisError(Exception):
+    """
+    Custom exception for analysis failures with detailed diagnostics.
+
+    Attributes:
+        message: The error message
+        diagnostic_report: Optional detailed diagnostic report
+    """
+    def __init__(self, message: str, diagnostic_report: str = None):
+        self.message = message
+        self.diagnostic_report = diagnostic_report
+        super().__init__(self._format_message())
+
+    def _format_message(self) -> str:
+        if self.diagnostic_report:
+            return f"{self.message}\n\n{self.diagnostic_report}"
+        return self.message
 
 
 def _prepare_model(model: FEModel3D) -> None:
@@ -91,966 +111,149 @@ def _identify_combos(model: FEModel3D, combo_tags: List[str] | None = None) -> L
 
 def _check_stability(model: FEModel3D, K: NDArray[float64]) -> None:
     """
-    Identifies nodal instabilities in a model's stiffness matrix.
+    Identifies nodal instabilities in a model's stiffness matrix and provides
+    comprehensive diagnostics about the root cause.
+
+    This function checks the diagonal terms of the stiffness matrix to identify
+    DOFs with zero stiffness (indicating potential instability). When instabilities
+    are found, it runs full diagnostics to explain the likely root cause.
+
+    Parameters
+    ----------
+    model : FEModel3D
+        The finite element model to check
+    K : NDArray[float64]
+        The assembled stiffness matrix
+
+    Raises
+    ------
+    AnalysisError
+        If unstable DOFs are detected, with detailed diagnostic information
     """
 
-    # Initialize the `unstable` flag to `False`
-    unstable = False
+    # DOF names for clear error messages
+    DOF_NAMES = ['DX (translation in X)', 'DY (translation in Y)', 'DZ (translation in Z)',
+                 'RX (rotation about X)', 'RY (rotation about Y)', 'RZ (rotation about Z)']
+
+    unstable_dofs = []  # List of (node_name, dof_name, stiffness_value)
 
     # Step through each diagonal term in the stiffness matrix
     for i in range(K.shape[0]):
-        
+
         # Determine which node this term belongs to
-        node = [node for node in model.nodes.values() if node.ID == int(i/6)][0]
+        node_id = int(i / 6)
+        node = None
+        for n in model.nodes.values():
+            if n.ID == node_id:
+                node = n
+                break
+
+        if node is None:
+            continue
 
         # Determine which degree of freedom this term belongs to
-        dof = i%6
+        dof = i % 6
 
-        # Check to see if this degree of freedom is supported
+        # Check to see if this degree of freedom is supported (fixed or spring)
         if dof == 0:
-            supported = node.support_DX
+            supported = node.support_DX or node.spring_DX[0] is not None
         elif dof == 1:
-            supported = node.support_DY
+            supported = node.support_DY or node.spring_DY[0] is not None
         elif dof == 2:
-            supported = node.support_DZ
+            supported = node.support_DZ or node.spring_DZ[0] is not None
         elif dof == 3:
-            supported = node.support_RX
+            supported = node.support_RX or node.spring_RX[0] is not None
         elif dof == 4:
-            supported = node.support_RY
+            supported = node.support_RY or node.spring_RY[0] is not None
         elif dof == 5:
-            supported = node.support_RZ
+            supported = node.support_RZ or node.spring_RZ[0] is not None
+        else:
+            supported = False
 
         # Check if the degree of freedom on this diagonal is unstable
-        if isclose(K[i, i], 0) and not supported:
+        stiffness_value = K[i, i] if hasattr(K, '__getitem__') else 0
+        if isclose(stiffness_value, 0, abs_tol=1e-10) and not supported:
+            unstable_dofs.append((node.name, DOF_NAMES[dof], stiffness_value))
 
-            # Flag the model as unstable
-            unstable = True
+    if unstable_dofs:
+        # Print detailed instability information
+        print('')
+        print('=' * 60)
+        print('INSTABILITY DETECTED - Analysis cannot proceed')
+        print('=' * 60)
+        print('')
+        print(f'Found {len(unstable_dofs)} unstable degree(s) of freedom:')
+        print('')
 
-            # Identify which direction this instability affects
-            if i%6 == 0:
-                direction = 'for translation in the global X direction.'
-            if i%6 == 1:
-                direction = 'for translation in the global Y direction.'
-            if i%6 == 2:
-                direction = 'for translation in the global Z direction.'
-            if i%6 == 3:
-                direction = 'for rotation about the global X axis.'
-            if i%6 == 4:
-                direction = 'for rotation about the global Y axis.'
-            if i%6 == 5:
-                direction = 'for rotation about the global Z axis.'
+        # Group by node for cleaner output
+        from collections import defaultdict
+        node_dofs = defaultdict(list)
+        for node_name, dof_name, stiffness in unstable_dofs:
+            node_dofs[node_name].append(dof_name)
 
-            # Print a message to the console
-            print('* Nodal instability detected: node ' + node.name + ' is unstable ' + direction)
+        for node_name, dofs in node_dofs.items():
+            print(f'  Node "{node_name}":')
+            for dof in dofs:
+                print(f'    - {dof}')
 
-    if unstable:
-        raise Exception('Unstable node(s). See console output for details.')
+        print('')
+
+        # Run full diagnostics to explain why
+        print('Running diagnostics to identify root cause...')
+        print('')
+
+        diagnostics = ModelDiagnostics(model)
+        report = diagnostics.run_full_diagnosis()
+        diagnostic_text = report.format(verbose=True)
+        print(diagnostic_text)
+
+        # Create a summary message
+        error_msg = f"Model is unstable: {len(unstable_dofs)} degree(s) of freedom have zero stiffness."
+
+        raise AnalysisError(error_msg, diagnostic_text)
 
     return
 
 
-def _diagnose_singularity(model: FEModel3D, K11, D1_indices: List[int], sparse: bool = True) -> str:
+def run_pre_analysis_checks(model: FEModel3D, log: bool = True) -> bool:
     """
-    Diagnoses the root cause of a singular stiffness matrix.
+    Run comprehensive pre-analysis checks on a model.
 
-    This function performs comprehensive checks to identify why the stiffness matrix
-    is singular, providing specific error messages for different failure modes.
+    This function performs various checks before analysis to identify potential
+    issues early and provide helpful feedback. It's recommended to run this
+    before attempting analysis on a new or modified model.
 
-    :param model: The finite element model being analyzed.
-    :type model: FEModel3D
-    :param K11: The partitioned stiffness matrix for unknown displacements.
-    :param D1_indices: Indices of unknown degrees of freedom.
-    :type D1_indices: List[int]
-    :param sparse: Whether the matrix is in sparse format.
-    :type sparse: bool
-    :return: A detailed error message describing the root cause.
-    :rtype: str
+    Parameters
+    ----------
+    model : FEModel3D
+        The finite element model to check
+    log : bool, optional
+        Whether to print the diagnostic report (default: True)
+
+    Returns
+    -------
+    bool
+        True if no errors were found, False if there are issues that would
+        prevent successful analysis
+
+    Example
+    -------
+    >>> from Pynite import FEModel3D
+    >>> from Pynite.Analysis import run_pre_analysis_checks
+    >>> model = FEModel3D()
+    >>> # ... build model ...
+    >>> if run_pre_analysis_checks(model):
+    ...     model.analyze()
+    ... else:
+    ...     print("Fix the issues above before analyzing")
     """
+    diagnostics = ModelDiagnostics(model)
+    report = diagnostics.run_full_diagnosis()
 
-    issues = []
+    if log:
+        print(report.format(verbose=True))
 
-    # Convert sparse matrix to dense for diagnostics if needed
-    if sparse:
-        try:
-            K11_dense = K11.toarray()
-        except:
-            K11_dense = array(K11)
-    else:
-        K11_dense = K11
-
-    # 1. Check for missing supports (no supports at all)
-    has_any_support = False
-    for node in model.nodes.values():
-        if (node.support_DX or node.support_DY or node.support_DZ or
-            node.support_RX or node.support_RY or node.support_RZ):
-            has_any_support = True
-            break
-
-    if not has_any_support:
-        issues.append("NO SUPPORTS DEFINED: The model has no boundary conditions. "
-                     "At least one node must be supported to prevent rigid body motion.")
-
-    # 2. Check for disconnected nodes (nodes not connected to any element)
-    connected_nodes = set()
-
-    for member in model.members.values():
-        # PhysMember has sub_members, iterate through them
-        if hasattr(member, 'sub_members'):
-            for sub_member in member.sub_members.values():
-                connected_nodes.add(sub_member.i_node.name)
-                connected_nodes.add(sub_member.j_node.name)
-        else:
-            connected_nodes.add(member.i_node.name)
-            connected_nodes.add(member.j_node.name)
-
-    for spring in model.springs.values():
-        connected_nodes.add(spring.i_node.name)
-        connected_nodes.add(spring.j_node.name)
-
-    for plate in model.plates.values():
-        connected_nodes.add(plate.i_node.name)
-        connected_nodes.add(plate.j_node.name)
-        connected_nodes.add(plate.m_node.name)
-        connected_nodes.add(plate.n_node.name)
-
-    for quad in model.quads.values():
-        connected_nodes.add(quad.i_node.name)
-        connected_nodes.add(quad.j_node.name)
-        connected_nodes.add(quad.m_node.name)
-        connected_nodes.add(quad.n_node.name)
-
-    disconnected = []
-    for node_name, node in model.nodes.items():
-        if node_name not in connected_nodes:
-            # Only report if the node is not fully supported
-            if not (node.support_DX and node.support_DY and node.support_DZ and
-                    node.support_RX and node.support_RY and node.support_RZ):
-                disconnected.append(node_name)
-
-    if disconnected:
-        node_list = ', '.join(disconnected[:10])
-        if len(disconnected) > 10:
-            node_list += f', ... and {len(disconnected) - 10} more'
-        issues.append(f"DISCONNECTED NODES: The following nodes are not connected to any element: {node_list}. "
-                     "Either connect them to elements or remove them from the model.")
-
-    # 3. Check for zero-length members
-    zero_length_members = []
-    for member_name, member in model.members.items():
-        if hasattr(member, 'sub_members'):
-            for sub_name, sub_member in member.sub_members.items():
-                if sub_member.L() < 1e-10:
-                    zero_length_members.append(f"{member_name}/{sub_name}")
-        else:
-            if member.L() < 1e-10:
-                zero_length_members.append(member_name)
-
-    if zero_length_members:
-        member_list = ', '.join(zero_length_members[:10])
-        if len(zero_length_members) > 10:
-            member_list += f', ... and {len(zero_length_members) - 10} more'
-        issues.append(f"ZERO-LENGTH MEMBERS: The following members have zero or near-zero length: {member_list}. "
-                     "This typically occurs when the i-node and j-node are at the same location.")
-
-    # 4. Check for zero stiffness properties
-    zero_stiffness_members = []
-    for member_name, member in model.members.items():
-        problems = []
-        if hasattr(member, 'material') and member.material.E <= 0:
-            problems.append("E=0")
-        elif hasattr(member, 'sub_members'):
-            # Check first sub-member
-            for sub_member in member.sub_members.values():
-                if sub_member.material.E <= 0:
-                    problems.append("E=0")
-                break
-
-        if hasattr(member, 'section'):
-            if member.section.A <= 0:
-                problems.append("A=0")
-            if member.section.Iy <= 0:
-                problems.append("Iy=0")
-            if member.section.Iz <= 0:
-                problems.append("Iz=0")
-            if member.section.J <= 0:
-                problems.append("J=0")
-        elif hasattr(member, 'sub_members'):
-            for sub_member in member.sub_members.values():
-                if sub_member.section.A <= 0:
-                    problems.append("A=0")
-                if sub_member.section.Iy <= 0:
-                    problems.append("Iy=0")
-                if sub_member.section.Iz <= 0:
-                    problems.append("Iz=0")
-                if sub_member.section.J <= 0:
-                    problems.append("J=0")
-                break
-
-        if problems:
-            zero_stiffness_members.append(f"{member_name} ({', '.join(problems)})")
-
-    if zero_stiffness_members:
-        member_list = ', '.join(zero_stiffness_members[:5])
-        if len(zero_stiffness_members) > 5:
-            member_list += f', ... and {len(zero_stiffness_members) - 5} more'
-        issues.append(f"ZERO STIFFNESS PROPERTIES: The following members have zero or invalid section/material properties: {member_list}.")
-
-    # 5. Check for coincident nodes (different nodes at the same location)
-    # Use a tolerance that works for both inch and foot-based models
-    # Estimate model scale from node coordinates to set appropriate tolerance
-    all_coords = []
-    for node in model.nodes.values():
-        all_coords.extend([abs(node.X), abs(node.Y), abs(node.Z)])
-    max_coord = max(all_coords) if all_coords else 1.0
-    # Use relative tolerance (1e-6 of max dimension) with minimum of 1e-6
-    tolerance = max(max_coord * 1e-6, 1e-6)
-
-    node_positions = {}
-    coincident_groups = []
-
-    for node_name, node in model.nodes.items():
-        pos_key = (round(node.X / tolerance) * tolerance,
-                   round(node.Y / tolerance) * tolerance,
-                   round(node.Z / tolerance) * tolerance)
-        if pos_key in node_positions:
-            node_positions[pos_key].append(node_name)
-        else:
-            node_positions[pos_key] = [node_name]
-
-    for pos, nodes in node_positions.items():
-        if len(nodes) > 1:
-            coincident_groups.append(nodes)
-
-    if coincident_groups:
-        group_strs = [f"({', '.join(group)})" for group in coincident_groups[:5]]
-        if len(coincident_groups) > 5:
-            group_strs.append(f'... and {len(coincident_groups) - 5} more groups')
-        issues.append(f"COINCIDENT NODES: Multiple nodes exist at the same location: {', '.join(group_strs)}. "
-                     "These nodes should share the same name, or call model.merge_duplicate_nodes() before analysis.")
-
-    # 6. Check for unstable degrees of freedom (zero or very small diagonal terms)
-    unstable_dofs = []
-    weak_dofs = []
-    dof_names = ['DX', 'DY', 'DZ', 'RX', 'RY', 'RZ']
-
-    # Get the maximum diagonal value for comparison
-    max_diag = max(abs(K11_dense[i, i]) for i in range(K11_dense.shape[0])) if K11_dense.shape[0] > 0 else 1
-
-    for i in range(K11_dense.shape[0]):
-        diag_val = K11_dense[i, i]
-
-        # Map back to global DOF
-        global_dof = D1_indices[i]
-        node_id = global_dof // 6
-        dof_type = global_dof % 6
-
-        # Find the node
-        node_name = None
-        for node in model.nodes.values():
-            if node.ID == node_id:
-                node_name = node.name
-                break
-
-        if node_name:
-            # Check for exactly zero diagonal
-            if isclose(diag_val, 0, abs_tol=1e-12):
-                unstable_dofs.append(f"{node_name}:{dof_names[dof_type]}")
-            # Check for very small diagonal relative to max (potential numerical instability)
-            elif max_diag > 0 and abs(diag_val) / max_diag < 1e-10:
-                weak_dofs.append(f"{node_name}:{dof_names[dof_type]} (k={diag_val:.2e})")
-
-    if unstable_dofs:
-        dof_list = ', '.join(unstable_dofs[:10])
-        if len(unstable_dofs) > 10:
-            dof_list += f', ... and {len(unstable_dofs) - 10} more'
-        issues.append(f"UNSTABLE DEGREES OF FREEDOM: The following DOFs have zero stiffness: {dof_list}. "
-                     "Check that these nodes are properly connected and/or supported.")
-
-    if weak_dofs and not unstable_dofs:
-        dof_list = ', '.join(weak_dofs[:10])
-        if len(weak_dofs) > 10:
-            dof_list += f', ... and {len(weak_dofs) - 10} more'
-        issues.append(f"WEAK DEGREES OF FREEDOM: The following DOFs have very small stiffness relative to the model: {dof_list}. "
-                     "This can cause numerical instability.")
-
-    # 6b. Check for plate drilling DOF issues (common in wall models)
-    if model.plates or model.quads:
-        # Plates have no stiffness for rotation about their normal (drilling DOF)
-        # This is a common cause of singularity in plate/wall models
-
-        # Find nodes that are ONLY connected to plates/quads (not to any members)
-        plate_only_nodes = set()
-        member_nodes = set()
-
-        for member in model.members.values():
-            if hasattr(member, 'sub_members') and member.sub_members:
-                for sub_member in member.sub_members.values():
-                    member_nodes.add(sub_member.i_node.name)
-                    member_nodes.add(sub_member.j_node.name)
-            elif hasattr(member, 'i_node'):
-                member_nodes.add(member.i_node.name)
-                member_nodes.add(member.j_node.name)
-
-        for plate in model.plates.values():
-            for node in [plate.i_node, plate.j_node, plate.m_node, plate.n_node]:
-                if node.name not in member_nodes:
-                    plate_only_nodes.add(node.name)
-
-        for quad in model.quads.values():
-            for node in [quad.i_node, quad.j_node, quad.m_node, quad.n_node]:
-                if node.name not in member_nodes:
-                    plate_only_nodes.add(node.name)
-
-        # Check if these plate-only nodes have their drilling DOF supported
-        drilling_dof_issues = []
-        for node_name in plate_only_nodes:
-            node = model.nodes.get(node_name)
-            if node:
-                # Determine which rotation is the drilling DOF based on plate orientation
-                # For simplicity, check if any rotational DOF might be unsupported
-                # In a wall (vertical plate), the drilling DOF is typically RZ (rotation about Z)
-                # In a floor (horizontal plate), the drilling DOF is typically RX or RY
-                if not (node.support_RX and node.support_RY and node.support_RZ):
-                    drilling_dof_issues.append(node_name)
-
-        if drilling_dof_issues:
-            node_list = ', '.join(drilling_dof_issues[:10])
-            if len(drilling_dof_issues) > 10:
-                node_list += f', ... and {len(drilling_dof_issues) - 10} more'
-            issues.append(f"PLATE DRILLING DOF INSTABILITY: Nodes connected only to plates/quads may have unstable "
-                         f"drilling rotation DOF: {node_list}. "
-                         "Plates have no stiffness for rotation perpendicular to their surface. "
-                         "Consider: (1) supporting the drilling DOF at these nodes, "
-                         "(2) connecting frame members to provide rotational stiffness, or "
-                         "(3) using a plate formulation that includes drilling DOF stiffness.")
-
-    # 7. Check for mechanism formation (member releases creating mechanisms)
-    mechanism_warnings = []
-    for member_name, member in model.members.items():
-        if hasattr(member, 'sub_members'):
-            for sub_name, sub_member in member.sub_members.items():
-                releases = sub_member.Releases
-                # Check for problematic release combinations
-                # Both ends released for same DOF can create mechanism
-                i_releases = releases[:6]
-                j_releases = releases[6:]
-
-                # Axial release at both ends
-                if i_releases[0] and j_releases[0]:
-                    mechanism_warnings.append(f"{member_name}: axial release at both ends")
-                # Torsion release at both ends
-                if i_releases[3] and j_releases[3]:
-                    mechanism_warnings.append(f"{member_name}: torsion release at both ends")
-                # Moment releases in same plane at both ends without intermediate support
-                if (i_releases[4] and j_releases[4]) or (i_releases[5] and j_releases[5]):
-                    mechanism_warnings.append(f"{member_name}: moment release at both ends (potential mechanism)")
-
-    if mechanism_warnings:
-        warn_list = ', '.join(mechanism_warnings[:5])
-        if len(mechanism_warnings) > 5:
-            warn_list += f', ... and {len(mechanism_warnings) - 5} more'
-        issues.append(f"POTENTIAL MECHANISM: Release combinations may create mechanisms: {warn_list}.")
-
-    # 8. Check for singly-connected nodes (nodes connected to only one element without support)
-    node_connections = {}  # node_name -> list of connected element names
-    for member_name, member in model.members.items():
-        if hasattr(member, 'sub_members') and member.sub_members:
-            for sub_member in member.sub_members.values():
-                for node in [sub_member.i_node, sub_member.j_node]:
-                    if node.name not in node_connections:
-                        node_connections[node.name] = []
-                    node_connections[node.name].append(f"member:{member_name}")
-                break  # Only need to check connectivity once per physical member
-        elif hasattr(member, 'i_node'):
-            for node in [member.i_node, member.j_node]:
-                if node.name not in node_connections:
-                    node_connections[node.name] = []
-                node_connections[node.name].append(f"member:{member_name}")
-
-    for spring_name, spring in model.springs.items():
-        for node in [spring.i_node, spring.j_node]:
-            if node.name not in node_connections:
-                node_connections[node.name] = []
-            node_connections[node.name].append(f"spring:{spring_name}")
-
-    for plate_name, plate in model.plates.items():
-        for node in [plate.i_node, plate.j_node, plate.m_node, plate.n_node]:
-            if node.name not in node_connections:
-                node_connections[node.name] = []
-            node_connections[node.name].append(f"plate:{plate_name}")
-
-    for quad_name, quad in model.quads.items():
-        for node in [quad.i_node, quad.j_node, quad.m_node, quad.n_node]:
-            if node.name not in node_connections:
-                node_connections[node.name] = []
-            node_connections[node.name].append(f"quad:{quad_name}")
-
-    singly_connected = []
-    for node_name, connections in node_connections.items():
-        if len(connections) == 1:
-            node = model.nodes.get(node_name)
-            if node:
-                # Check if node is fully supported
-                is_fully_supported = (node.support_DX and node.support_DY and node.support_DZ and
-                                     node.support_RX and node.support_RY and node.support_RZ)
-                if not is_fully_supported:
-                    singly_connected.append(f"{node_name} (connected only to {connections[0]})")
-
-    if singly_connected:
-        node_list = ', '.join(singly_connected[:5])
-        if len(singly_connected) > 5:
-            node_list += f', ... and {len(singly_connected) - 5} more'
-
-        # Check if any singly-connected nodes are very close to other nodes (unmerged nodes)
-        # This is a common issue when switching units (feet to inches) due to floating-point precision
-        unmerged_candidates = []
-        merge_tolerance = max(max_coord * 1e-4, 0.01) if 'max_coord' in dir() else 0.1
-
-        singly_node_names = [s.split(' (')[0] for s in singly_connected]  # Extract just the node names
-        for singly_name in singly_node_names[:20]:  # Check first 20 to avoid O(n²) explosion
-            singly_node = model.nodes.get(singly_name)
-            if not singly_node:
-                continue
-            for other_name, other_node in model.nodes.items():
-                if other_name == singly_name:
-                    continue
-                dist = ((singly_node.X - other_node.X)**2 +
-                       (singly_node.Y - other_node.Y)**2 +
-                       (singly_node.Z - other_node.Z)**2)**0.5
-                if dist < merge_tolerance:
-                    unmerged_candidates.append(f"{singly_name} near {other_name} (dist={dist:.2e})")
-                    break  # Found one nearby, move to next singly-connected node
-
-        msg = f"SINGLY-CONNECTED NODES: The following nodes are connected to only one element and may lack adequate support: {node_list}. "
-
-        if unmerged_candidates:
-            msg += f"\n\n   ** LIKELY UNMERGED NODES DETECTED **\n"
-            msg += f"   These singly-connected nodes are very close to other nodes:\n"
-            for candidate in unmerged_candidates[:5]:
-                msg += f"   - {candidate}\n"
-            if len(unmerged_candidates) > 5:
-                msg += f"   - ... and {len(unmerged_candidates) - 5} more\n"
-            msg += "\n   This often happens due to floating-point precision when generating models.\n"
-            msg += "   FIX: Call model.merge_duplicate_nodes(tolerance=0.1) before analysis,\n"
-            msg += "   or ensure members share the same node objects instead of creating separate nodes."
-        else:
-            msg += "These nodes may need additional supports or connections."
-
-        issues.append(msg)
-
-    # 9. Check for near-coincident nodes (close but not exactly at same location - potential modeling errors)
-    near_coincident = []
-    # Scale-aware tolerance: use 0.01% of model size, minimum 0.001
-    near_tolerance = max(max_coord * 1e-4, 0.001) if max_coord > 0 else 0.01
-    node_list_items = list(model.nodes.items())
-    for i, (name1, node1) in enumerate(node_list_items):
-        for name2, node2 in node_list_items[i+1:]:
-            dist = ((node1.X - node2.X)**2 + (node1.Y - node2.Y)**2 + (node1.Z - node2.Z)**2)**0.5
-            if 1e-6 < dist < near_tolerance:
-                near_coincident.append(f"({name1}, {name2}): distance={dist:.6g}")
-
-    if near_coincident:
-        pair_list = ', '.join(near_coincident[:5])
-        if len(near_coincident) > 5:
-            pair_list += f', ... and {len(near_coincident) - 5} more pairs'
-        issues.append(f"NEAR-COINCIDENT NODES: The following node pairs are very close but not coincident: {pair_list}. "
-                     "This may indicate a modeling error. Consider merging these nodes if they should be connected.")
-
-    # 10. Check for plate/quad issues
-    plate_issues = []
-    for plate_name, plate in list(model.plates.items()) + [(q.name if hasattr(q, 'name') else k, q) for k, q in model.quads.items()]:
-        try:
-            # Check thickness
-            if hasattr(plate, 't') and plate.t <= 0:
-                plate_issues.append(f"{plate_name}: zero or negative thickness (t={plate.t})")
-                continue
-
-            # Check aspect ratio (approximate using node distances)
-            nodes = [plate.i_node, plate.j_node, plate.m_node, plate.n_node]
-            edges = []
-            for idx in range(4):
-                n1, n2 = nodes[idx], nodes[(idx + 1) % 4]
-                dist = ((n1.X - n2.X)**2 + (n1.Y - n2.Y)**2 + (n1.Z - n2.Z)**2)**0.5
-                edges.append(dist)
-
-            if min(edges) > 0:
-                aspect_ratio = max(edges) / min(edges)
-                if aspect_ratio > 10:
-                    plate_issues.append(f"{plate_name}: poor aspect ratio ({aspect_ratio:.1f}:1)")
-
-            # Check for very small edges
-            if min(edges) < 1e-6:
-                plate_issues.append(f"{plate_name}: near-zero edge length ({min(edges):.2e})")
-
-        except Exception:
-            continue
-
-    if plate_issues:
-        issue_list = ', '.join(plate_issues[:5])
-        if len(plate_issues) > 5:
-            issue_list += f', ... and {len(plate_issues) - 5} more'
-        issues.append(f"PLATE/QUAD ISSUES: {issue_list}. "
-                     "Poor element geometry can cause numerical instability.")
-
-    # 11. Check for spring issues
-    spring_issues = []
-    spring_stiffnesses = []
-    for spring_name, spring in model.springs.items():
-        try:
-            # Collect stiffness values
-            k_values = []
-            for attr in ['ks']:  # Main stiffness attribute
-                if hasattr(spring, attr):
-                    k = getattr(spring, attr)
-                    if k is not None and k != 0:
-                        k_values.append(k)
-                        spring_stiffnesses.append((spring_name, k))
-
-            # Check for zero stiffness springs (that aren't intentionally zero)
-            if hasattr(spring, 'ks') and spring.ks == 0:
-                spring_issues.append(f"{spring_name}: zero stiffness")
-
-        except Exception:
-            continue
-
-    # Check for extreme spring stiffness ratios
-    if len(spring_stiffnesses) > 1:
-        k_values = [k for _, k in spring_stiffnesses]
-        max_k = max(k_values)
-        min_k = min(k for k in k_values if k > 0)
-        if min_k > 0 and max_k / min_k > 1e6:
-            stiffest = max(spring_stiffnesses, key=lambda x: x[1])
-            weakest = min(spring_stiffnesses, key=lambda x: x[1] if x[1] > 0 else float('inf'))
-            spring_issues.append(f"extreme stiffness ratio ({max_k/min_k:.2e}): stiffest={stiffest[0]} (k={stiffest[1]:.2e}), weakest={weakest[0]} (k={weakest[1]:.2e})")
-
-    if spring_issues:
-        issue_list = '; '.join(spring_issues[:5])
-        if len(spring_issues) > 5:
-            issue_list += f'; ... and {len(spring_issues) - 5} more'
-        issues.append(f"SPRING ISSUES: {issue_list}.")
-
-    # 12. Check numerical conditioning and identify problematic members
-    try:
-        from numpy.linalg import cond, svd
-        condition_number = cond(K11_dense)
-        if condition_number > 1e15 or not issues:
-            # Analyze member stiffnesses to find problematic members
-            member_stiffness_info = _analyze_member_stiffnesses(model)
-
-            if condition_number > 1e15:
-                msg = (f"ILL-CONDITIONED MATRIX: The stiffness matrix has a very high condition number ({condition_number:.2e}). "
-                      "This indicates the matrix is numerically singular.\n")
-
-                if member_stiffness_info:
-                    # Check if member stiffnesses look reasonable
-                    if "Stiffness ratio" in member_stiffness_info:
-                        # Extract stiffness ratio from the info
-                        import re
-                        ratio_match = re.search(r'Stiffness ratio.*?(\d+\.?\d*e[+-]?\d+)', member_stiffness_info)
-                        if ratio_match:
-                            ratio_val = float(ratio_match.group(1))
-                            if ratio_val < 1e4:
-                                # Stiffness ratio is reasonable - issue is elsewhere
-                                msg += "\n   NOTE: Member stiffnesses appear reasonable (ratio < 10,000).\n"
-                                msg += "   The singularity is likely caused by:\n"
-                                msg += "   - Missing support in one or more directions (check all 6 DOFs are constrained)\n"
-                                msg += "   - Members all in the same plane without out-of-plane restraint\n"
-                                msg += "   - Mechanism formation from member releases\n"
-                                msg += "   - Colinear members at a node without rotational restraint\n"
-                    msg += f"\n{member_stiffness_info}"
-                else:
-                    msg += "\nCheck for members with vastly different stiffness values or verify unit consistency."
-
-                # Try to identify the singular DOFs using SVD
-                try:
-                    U, S, Vh = svd(K11_dense)
-                    # Find near-zero singular values
-                    max_sv = S[0] if len(S) > 0 else 1
-                    singular_modes = []
-                    for i, sv in enumerate(S):
-                        if sv / max_sv < 1e-12:
-                            # This mode is singular - find which DOFs contribute most
-                            mode_vec = Vh[i]
-                            # Find the DOF with largest contribution
-                            max_idx = abs(mode_vec).argmax()
-                            global_dof = D1_indices[max_idx]
-                            node_id = global_dof // 6
-                            dof_type = global_dof % 6
-                            dof_names = ['DX', 'DY', 'DZ', 'RX', 'RY', 'RZ']
-
-                            node_name = None
-                            for node in model.nodes.values():
-                                if node.ID == node_id:
-                                    node_name = node.name
-                                    break
-
-                            if node_name:
-                                singular_modes.append(f"Mode {i+1}: primarily {node_name}:{dof_names[dof_type]} (contribution: {abs(mode_vec[max_idx]):.2f})")
-
-                    if singular_modes:
-                        msg += f"\n\n   SINGULAR MODES DETECTED ({len(singular_modes)} mode(s)):\n"
-                        for mode in singular_modes[:5]:
-                            msg += f"   - {mode}\n"
-                        if len(singular_modes) > 5:
-                            msg += f"   - ... and {len(singular_modes) - 5} more\n"
-                        msg += "\n   These DOFs have zero stiffness in certain directions."
-                except Exception:
-                    pass
-
-                issues.append(msg)
-    except Exception:
-        pass
-
-    # 13. Check for global rigid body motion potential
-    # Verify that supports constrain all 6 rigid body modes (3 translations + 3 rotations)
-    supported_dofs = {'DX': False, 'DY': False, 'DZ': False, 'RX': False, 'RY': False, 'RZ': False}
-    support_locations = {'DX': [], 'DY': [], 'DZ': [], 'RX': [], 'RY': [], 'RZ': []}
-    support_coords = {'DX': [], 'DY': [], 'DZ': []}  # Store coordinates for geometric checks
-
-    for node_name, node in model.nodes.items():
-        if node.support_DX:
-            supported_dofs['DX'] = True
-            support_locations['DX'].append(node_name)
-            support_coords['DX'].append((node.X, node.Y, node.Z))
-        if node.support_DY:
-            supported_dofs['DY'] = True
-            support_locations['DY'].append(node_name)
-            support_coords['DY'].append((node.X, node.Y, node.Z))
-        if node.support_DZ:
-            supported_dofs['DZ'] = True
-            support_locations['DZ'].append(node_name)
-            support_coords['DZ'].append((node.X, node.Y, node.Z))
-        if node.support_RX:
-            supported_dofs['RX'] = True
-            support_locations['RX'].append(node_name)
-        if node.support_RY:
-            supported_dofs['RY'] = True
-            support_locations['RY'].append(node_name)
-        if node.support_RZ:
-            supported_dofs['RZ'] = True
-            support_locations['RZ'].append(node_name)
-
-    # Check for geometric rotation restraint from translation supports
-    # Rotation about an axis is prevented if translation supports exist at different positions
-    # perpendicular to that axis
-    geom_tol = 0.001  # Tolerance for "different" positions
-
-    # RX (rotation about X) is prevented by DY or DZ supports at different Y-Z positions
-    if not supported_dofs['RX']:
-        # Check if DY supports are at different Z coordinates
-        z_coords_dy = [c[2] for c in support_coords['DY']]
-        # Check if DZ supports are at different Y coordinates
-        y_coords_dz = [c[1] for c in support_coords['DZ']]
-        if (len(z_coords_dy) >= 2 and max(z_coords_dy) - min(z_coords_dy) > geom_tol) or \
-           (len(y_coords_dz) >= 2 and max(y_coords_dz) - min(y_coords_dz) > geom_tol):
-            supported_dofs['RX'] = True  # Geometrically restrained
-
-    # RY (rotation about Y) is prevented by DX or DZ supports at different X-Z positions
-    if not supported_dofs['RY']:
-        # Check if DX supports are at different Z coordinates
-        z_coords_dx = [c[2] for c in support_coords['DX']]
-        # Check if DZ supports are at different X coordinates
-        x_coords_dz = [c[0] for c in support_coords['DZ']]
-        if (len(z_coords_dx) >= 2 and max(z_coords_dx) - min(z_coords_dx) > geom_tol) or \
-           (len(x_coords_dz) >= 2 and max(x_coords_dz) - min(x_coords_dz) > geom_tol):
-            supported_dofs['RY'] = True  # Geometrically restrained
-
-    # RZ (rotation about Z) is prevented by DX or DY supports at different X-Y positions
-    if not supported_dofs['RZ']:
-        # Check if DX supports are at different Y coordinates
-        y_coords_dx = [c[1] for c in support_coords['DX']]
-        # Check if DY supports are at different X coordinates
-        x_coords_dy = [c[0] for c in support_coords['DY']]
-        if (len(y_coords_dx) >= 2 and max(y_coords_dx) - min(y_coords_dx) > geom_tol) or \
-           (len(x_coords_dy) >= 2 and max(x_coords_dy) - min(x_coords_dy) > geom_tol):
-            supported_dofs['RZ'] = True  # Geometrically restrained
-
-    # Check for missing global constraints (after accounting for geometric restraints)
-    missing_constraints = []
-    for dof, is_supported in supported_dofs.items():
-        if not is_supported:
-            missing_constraints.append(dof)
-
-    if missing_constraints:
-        msg = f"MISSING GLOBAL CONSTRAINTS: No supports restrain the following DOFs: {', '.join(missing_constraints)}. "
-        msg += "The model can undergo rigid body motion in these directions. "
-        msg += "Add supports to constrain these degrees of freedom."
-        issues.append(msg)
-
-    # Check if translation supports are at single point (can still rotate)
-    # But only warn if rotation is not geometrically restrained
-    for trans_dof in ['DX', 'DY', 'DZ']:
-        if len(support_locations[trans_dof]) == 1:
-            # Only one node supports this translation - might allow rotation
-            single_node = support_locations[trans_dof][0]
-            # Determine which rotation could occur about this point
-            rot_needed = {'DX': ['RY', 'RZ'], 'DY': ['RX', 'RZ'], 'DZ': ['RX', 'RY']}
-            for rot_dof in rot_needed[trans_dof]:
-                if not supported_dofs[rot_dof]:
-                    if f"rotation about {rot_dof}" not in str(issues):
-                        issues.append(f"POTENTIAL RIGID BODY ROTATION: {trans_dof} is only supported at node {single_node}, "
-                                     f"but {rot_dof} is not restrained. The model may be able to rotate about this point.")
-
-    # 14. Check for coplanar structures (common in framed walls)
-    # If all members lie in a single plane, out-of-plane DOFs need special attention
-    if model.members and not model.plates and not model.quads:
-        # Only check for member-only models (no plates/quads)
-        try:
-            from numpy import cross, array
-            from numpy.linalg import norm
-
-            # Collect all node positions from members
-            member_nodes = set()
-            for member in model.members.values():
-                if hasattr(member, 'sub_members') and member.sub_members:
-                    for sub_member in member.sub_members.values():
-                        member_nodes.add(sub_member.i_node.name)
-                        member_nodes.add(sub_member.j_node.name)
-                elif hasattr(member, 'i_node'):
-                    member_nodes.add(member.i_node.name)
-                    member_nodes.add(member.j_node.name)
-
-            if len(member_nodes) >= 3:
-                # Get node coordinates
-                node_coords = []
-                for node_name in member_nodes:
-                    node = model.nodes.get(node_name)
-                    if node:
-                        node_coords.append(array([node.X, node.Y, node.Z]))
-
-                if len(node_coords) >= 3:
-                    # Check if all nodes are coplanar by computing plane normal from first 3 non-collinear nodes
-                    p0 = node_coords[0]
-                    plane_normal = None
-
-                    # Find first valid plane normal from non-collinear points
-                    for i in range(1, len(node_coords)):
-                        for j in range(i + 1, len(node_coords)):
-                            v1 = node_coords[i] - p0
-                            v2 = node_coords[j] - p0
-                            n = cross(v1, v2)
-                            n_mag = norm(n)
-                            if n_mag > 1e-6:
-                                plane_normal = n / n_mag
-                                break
-                        if plane_normal is not None:
-                            break
-
-                    if plane_normal is not None:
-                        # Check if all other nodes lie on this plane
-                        is_coplanar = True
-                        max_distance = 0
-                        for coord in node_coords:
-                            dist = abs((coord - p0).dot(plane_normal))
-                            max_distance = max(max_distance, dist)
-                            if dist > 0.01:  # Tolerance for coplanarity
-                                is_coplanar = False
-                                break
-
-                        if is_coplanar:
-                            # Determine which plane (XY, XZ, or YZ)
-                            abs_normal = abs(plane_normal)
-                            plane_type = None
-                            out_of_plane_trans = None
-                            in_plane_rotation = None
-
-                            if abs_normal[0] > 0.9:  # Normal is approximately X-axis -> YZ plane
-                                plane_type = "YZ"
-                                out_of_plane_trans = "DX"
-                                in_plane_rotation = "RX"
-                            elif abs_normal[1] > 0.9:  # Normal is approximately Y-axis -> XZ plane
-                                plane_type = "XZ"
-                                out_of_plane_trans = "DY"
-                                in_plane_rotation = "RY"
-                            elif abs_normal[2] > 0.9:  # Normal is approximately Z-axis -> XY plane
-                                plane_type = "XY"
-                                out_of_plane_trans = "DZ"
-                                in_plane_rotation = "RZ"
-                            else:
-                                plane_type = "oblique"
-
-                            if plane_type and plane_type != "oblique":
-                                # Check if the in-plane rotation is already geometrically restrained
-                                # (computed earlier in check 13)
-                                if supported_dofs.get(in_plane_rotation, False):
-                                    pass  # Geometrically stable, no warning needed
-                                else:
-                                    # Check if out-of-plane DOFs are properly restrained
-                                    out_plane_issues = []
-
-                                    # Check for unsupported in-plane rotation at all nodes
-                                    for node_name in member_nodes:
-                                        node = model.nodes.get(node_name)
-                                        if node:
-                                            rot_attr = f"support_{in_plane_rotation}"
-                                            if not getattr(node, rot_attr, False):
-                                                out_plane_issues.append(node_name)
-
-                                    if len(out_plane_issues) == len(member_nodes):
-                                        # No nodes have the in-plane rotation supported - this is a likely issue
-                                        issues.append(f"COPLANAR FRAME STRUCTURE: All members lie in the {plane_type} plane (wall/frame). "
-                                                    f"The in-plane rotation ({in_plane_rotation}) is not restrained at any node. "
-                                                    "In planar frames, rotations perpendicular to member weak axes may need restraint. "
-                                                    f"Consider supporting {in_plane_rotation} at key nodes or adding out-of-plane bracing.")
-        except Exception:
-            pass  # Skip if detection fails
-
-    # Build the final error message
-    if issues:
-        error_msg = "SINGULAR STIFFNESS MATRIX - Analysis cannot proceed.\n\nRoot cause(s) identified:\n"
-        for i, issue in enumerate(issues, 1):
-            error_msg += f"\n{i}. {issue}\n"
-        return error_msg
-    else:
-        # Fallback message if no specific cause found
-        return ("SINGULAR STIFFNESS MATRIX - The structure is unstable.\n\n"
-                "No specific cause was identified. Possible issues include:\n"
-                "- Complex mechanism formations not detected by diagnostics\n"
-                "- Numerical precision issues\n"
-                "- Unusual element configurations\n\n"
-                "Please review your model for proper connectivity and support conditions.")
-
-
-def _analyze_member_stiffnesses(model: FEModel3D) -> str:
-    """
-    Analyzes member stiffnesses to identify members that may be causing
-    numerical conditioning issues.
-
-    Returns a formatted string describing problematic members.
-    """
-    from math import inf
-
-    stiffness_data = []
-
-    # Collect stiffness data for all members
-    for member_name, member in model.members.items():
-        try:
-            # Get member properties - handle both PhysMember and Member3D
-            if hasattr(member, 'sub_members') and member.sub_members:
-                # PhysMember - use first sub-member for properties
-                sub_member = list(member.sub_members.values())[0]
-                E = sub_member.material.E
-                A = sub_member.section.A
-                Iy = sub_member.section.Iy
-                Iz = sub_member.section.Iz
-                L = member.L()
-            else:
-                E = member.material.E
-                A = member.section.A
-                Iy = member.section.Iy
-                Iz = member.section.Iz
-                L = member.L()
-
-            # Skip if length is zero or near-zero (already caught by other checks)
-            if L < 1e-10:
-                continue
-
-            # Calculate characteristic stiffnesses
-            axial_stiffness = E * A / L
-            bending_stiffness_y = E * Iy / (L ** 3) if Iy > 0 else 0
-            bending_stiffness_z = E * Iz / (L ** 3) if Iz > 0 else 0
-            max_bending = max(bending_stiffness_y, bending_stiffness_z)
-
-            stiffness_data.append({
-                'name': member_name,
-                'length': L,
-                'E': E,
-                'A': A,
-                'Iy': Iy,
-                'Iz': Iz,
-                'axial_k': axial_stiffness,
-                'bending_k': max_bending,
-                'max_k': max(axial_stiffness, max_bending)
-            })
-        except Exception:
-            continue
-
-    if not stiffness_data:
-        return ""
-
-    # Find stiffness extremes
-    max_stiffness = max(m['max_k'] for m in stiffness_data)
-    min_stiffness = min(m['max_k'] for m in stiffness_data if m['max_k'] > 0)
-
-    if min_stiffness == 0 or max_stiffness == 0:
-        return ""
-
-    stiffness_ratio = max_stiffness / min_stiffness
-
-    # Find shortest and longest members
-    lengths = [m['length'] for m in stiffness_data]
-    min_length = min(lengths)
-    max_length = max(lengths)
-    length_ratio = max_length / min_length if min_length > 0 else inf
-
-    # Identify outliers (members with extreme stiffness values)
-    # Using 1e6 ratio as threshold for "problematic"
-    threshold_ratio = 1e6
-
-    very_stiff_members = []
-    very_flexible_members = []
-    very_short_members = []
-    very_long_members = []
-
-    for m in stiffness_data:
-        # Check for very stiff members (close to max)
-        if m['max_k'] > 0 and max_stiffness / m['max_k'] < 10:
-            if stiffness_ratio > threshold_ratio:
-                very_stiff_members.append(m)
-
-        # Check for very flexible members (close to min)
-        if m['max_k'] > 0 and m['max_k'] / min_stiffness < 10:
-            if stiffness_ratio > threshold_ratio:
-                very_flexible_members.append(m)
-
-        # Check for very short members (can cause high stiffness)
-        if m['length'] < min_length * 10 and m['length'] < 0.1:  # Less than 0.1 units
-            very_short_members.append(m)
-
-        # Check for extreme length ratios
-        if length_ratio > 1000 and m['length'] > max_length * 0.9:
-            very_long_members.append(m)
-
-    # Build diagnostic message
-    lines = []
-
-    lines.append(f"   Stiffness ratio (max/min): {stiffness_ratio:.2e}")
-    lines.append(f"   Length range: {min_length:.4g} to {max_length:.4g} (ratio: {length_ratio:.2e})")
-
-    if very_short_members:
-        lines.append(f"\n   VERY SHORT MEMBERS (may cause extreme stiffness):")
-        for m in very_short_members[:5]:
-            lines.append(f"   - {m['name']}: L={m['length']:.6g}, EA/L={m['axial_k']:.2e}")
-        if len(very_short_members) > 5:
-            lines.append(f"   - ... and {len(very_short_members) - 5} more")
-
-    if very_stiff_members and stiffness_ratio > threshold_ratio:
-        lines.append(f"\n   STIFFEST MEMBERS:")
-        # Sort by stiffness descending
-        very_stiff_members.sort(key=lambda x: x['max_k'], reverse=True)
-        for m in very_stiff_members[:5]:
-            lines.append(f"   - {m['name']}: L={m['length']:.4g}, E={m['E']:.2e}, A={m['A']:.4g}, max_k={m['max_k']:.2e}")
-        if len(very_stiff_members) > 5:
-            lines.append(f"   - ... and {len(very_stiff_members) - 5} more")
-
-    if very_flexible_members and stiffness_ratio > threshold_ratio:
-        lines.append(f"\n   MOST FLEXIBLE MEMBERS:")
-        # Sort by stiffness ascending
-        very_flexible_members.sort(key=lambda x: x['max_k'])
-        for m in very_flexible_members[:5]:
-            lines.append(f"   - {m['name']}: L={m['length']:.4g}, E={m['E']:.2e}, A={m['A']:.4g}, max_k={m['max_k']:.2e}")
-        if len(very_flexible_members) > 5:
-            lines.append(f"   - ... and {len(very_flexible_members) - 5} more")
-
-    # Provide actionable advice
-    if stiffness_ratio > threshold_ratio:
-        lines.append(f"\n   RECOMMENDATION: The stiffness ratio of {stiffness_ratio:.2e} is very high.")
-        if very_short_members:
-            lines.append("   - Check if very short members are intentional or modeling errors")
-        lines.append("   - Verify all members use consistent units (e.g., all in inches or all in feet)")
-        lines.append("   - Consider if any member properties (E, A, I) are incorrect")
-
-    return "\n".join(lines)
+    return not report.has_errors
 
 
 def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArray[float64], D1_indices: List[int], D2_indices: List[int], D2: NDArray[float64], log: bool = True, sparse: bool = True, check_stability: bool = False, max_iter: int = 30) -> None:
@@ -1165,9 +368,31 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
                         D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
 
                 except Exception as e:
-                    # Diagnose the root cause of the singular matrix
-                    error_msg = _diagnose_singularity(model, K11, D1_indices, sparse)
-                    raise ValueError(error_msg) from e
+                    # Return out of the method if 'K' is singular and provide an error message
+                    # Run diagnostics to explain why the matrix is singular
+                    print('')
+                    print('=' * 60)
+                    print('P-DELTA ANALYSIS FAILED - Singular Stiffness Matrix')
+                    print('=' * 60)
+                    print('')
+                    print('The stiffness matrix could not be inverted during P-Delta analysis.')
+                    print('This can occur when:')
+                    print('  1. The structure is geometrically unstable')
+                    print('  2. P-Delta effects have caused buckling')
+                    print('  3. The structure lacks sufficient bracing')
+                    print('')
+                    print('Running diagnostics to identify root cause...')
+                    print('')
+
+                    diagnostics = ModelDiagnostics(model)
+                    report = diagnostics.run_full_diagnosis()
+                    diagnostic_text = report.format(verbose=True)
+                    print(diagnostic_text)
+
+                    raise AnalysisError(
+                        'The stiffness matrix is singular during P-Delta analysis (structure may have buckled)',
+                        diagnostic_text
+                    ) from e
 
             # Store the calculated displacements
             _store_displacements(model, D1, D2, D1_indices, D2_indices, model.load_combos[combo_name])
@@ -1193,7 +418,33 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
         # Check for divergence in the tension/compression-only analysis
         if iter_count_TC > max_iter:
             divergence_TC = True
-            raise Exception('- Model diverged during tension/compression-only analysis')
+            print('')
+            print('=' * 60)
+            print('P-DELTA ANALYSIS FAILED - T/C-Only Divergence')
+            print('=' * 60)
+            print('')
+            print(f'The tension/compression-only analysis failed to converge after {max_iter} iterations.')
+            print('')
+            print('This typically happens when:')
+            print('  1. Combined P-Delta effects with T/C-only elements create oscillation')
+            print('  2. The structure becomes unstable as elements deactivate')
+            print('  3. Large P-Delta effects cause element status to flip repeatedly')
+            print('')
+            print('Suggestions:')
+            print('  - Increase max_iter for more convergence attempts')
+            print('  - Reduce the number of T/C-only elements')
+            print('  - Check if brace arrangement is stable under P-Delta')
+            print('')
+
+            diagnostics = ModelDiagnostics(model)
+            report = diagnostics.run_full_diagnosis()
+            diagnostic_text = report.format(verbose=True)
+            print(diagnostic_text)
+
+            raise AnalysisError(
+                'Model diverged during P-Delta tension/compression-only analysis',
+                diagnostic_text
+            )
 
     # Flag the model as solved
     model.solution = 'P-Delta'
@@ -1274,9 +525,31 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
                     # converted to a 2D dense array for mathematical operations.
                     Delta_D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
 
-            except:
+            except Exception as e:
                 # Return out of the method if 'K' is singular and provide an error message
-                raise ValueError('The structure is unstable. Unable to proceed any further with analysis.')
+                print('')
+                print('=' * 60)
+                print('PUSHOVER ANALYSIS FAILED - Structure Became Unstable')
+                print('=' * 60)
+                print('')
+                print('The structure became unstable during pushover analysis.')
+                print('This typically occurs when:')
+                print('  1. A plastic mechanism has formed')
+                print('  2. The structure has reached its ultimate capacity')
+                print('  3. P-Delta effects have caused collapse')
+                print('')
+                print('This may be the expected end of the pushover analysis.')
+                print('')
+
+                diagnostics = ModelDiagnostics(model)
+                report = diagnostics.run_full_diagnosis()
+                diagnostic_text = report.format(verbose=True)
+                print(diagnostic_text)
+
+                raise AnalysisError(
+                    'The structure became unstable during pushover analysis (possible collapse mechanism)',
+                    diagnostic_text
+                ) from e
 
         # Unpartition the displacement results from the analysis step
         Delta_D = _unpartition_disp(model, Delta_D1, D2, D1_indices, D2_indices)
