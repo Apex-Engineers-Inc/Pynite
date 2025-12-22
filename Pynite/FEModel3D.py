@@ -26,7 +26,8 @@ if TYPE_CHECKING:
     from numpy import float64
     from numpy.typing import NDArray
 else:
-    # Import NDArray for runtime type hints
+    # Import types for runtime type hints
+    from typing import Union
     from numpy.typing import NDArray
 
 
@@ -2875,5 +2876,93 @@ class FEModel3D():
             results[name] = filtered
 
         return results
+
+    def get_all_member_forces_array(
+        self,
+        combo_names: List[str] | None = None,
+        member_names: List[str] | None = None,
+        n_points: int = 20
+    ) -> Dict[str, Union[List[str], NDArray]]:
+        """
+        Extract internal forces for all members as stacked 3D arrays.
+
+        Returns contiguous arrays suitable for vectorized downstream operations
+        like finding max forces across all members.
+
+        Parameters
+        ----------
+        combo_names : List[str] | None, optional
+            List of load combination names. If None, uses all combos.
+        member_names : List[str] | None, optional
+            List of member names. If None, uses all members.
+        n_points : int, optional
+            Number of points along each member (default: 20).
+
+        Returns
+        -------
+        Dict[str, Union[List[str], NDArray]]
+            Dictionary with keys:
+            - 'member_names': List[str] of member names (for indexing)
+            - 'combo_names': List[str] of combo names (for indexing)
+            - 'x': array of shape (n_members, n_points) - positions along each member
+            - 'shear_y': array of shape (n_members, n_combos, n_points)
+            - 'moment_z': array of shape (n_members, n_combos, n_points)
+            - 'axial': array of shape (n_members, n_combos, n_points)
+            - 'torque': array of shape (n_members, n_combos, n_points)
+
+        Examples
+        --------
+        >>> model.analyze()
+        >>> forces = model.get_all_member_forces_array(n_points=20)
+        >>> # Get max moment across all members and combos
+        >>> max_moment = np.max(np.abs(forces['moment_z']))
+        >>> # Get forces for specific member by index
+        >>> idx = forces['member_names'].index('Stud_5')
+        >>> stud5_shear = forces['shear_y'][idx, :, :]
+
+        Notes
+        -----
+        This method uses the optimized per-member extraction and stacks results
+        into contiguous arrays for efficient downstream processing.
+        """
+        from numpy import empty
+
+        # Default to all combos and all members
+        if combo_names is None:
+            combo_names = list(self.load_combos.keys())
+        if member_names is None:
+            member_names = list(self.members.keys())
+
+        n_members = len(member_names)
+        n_combos = len(combo_names)
+
+        # Get per-member results
+        forces_dict = self.get_all_member_forces(combo_names, member_names, n_points)
+
+        # Pre-allocate output arrays
+        x_all = empty((n_members, n_points))
+        shear_y_all = empty((n_members, n_combos, n_points))
+        moment_z_all = empty((n_members, n_combos, n_points))
+        axial_all = empty((n_members, n_combos, n_points))
+        torque_all = empty((n_members, n_combos, n_points))
+
+        # Stack results into contiguous arrays
+        for i, member_name in enumerate(member_names):
+            forces = forces_dict[member_name]
+            x_all[i, :] = forces['x']
+            shear_y_all[i, :, :] = forces['shear_y']
+            moment_z_all[i, :, :] = forces['moment_z']
+            axial_all[i, :, :] = forces['axial']
+            torque_all[i, :, :] = forces['torque']
+
+        return {
+            'member_names': member_names,
+            'combo_names': combo_names,
+            'x': x_all,
+            'shear_y': shear_y_all,
+            'moment_z': moment_z_all,
+            'axial': axial_all,
+            'torque': torque_all,
+        }
 
 # %%
