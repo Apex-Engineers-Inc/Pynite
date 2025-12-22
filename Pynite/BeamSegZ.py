@@ -3,11 +3,14 @@
 Created on Mon Nov  6 20:52:31 2017
 
 @author: D. Craig Brinck, SE
+
+Optimized for performance with __slots__ and vectorized numpy operations.
 """
 from __future__ import annotations  # Allows more recent type hints features
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Union
 
-from numpy import full
+import numpy as np
+from numpy import full, asarray, ndarray
 
 if TYPE_CHECKING:
     from typing import Any, List
@@ -18,7 +21,7 @@ if TYPE_CHECKING:
 # A mathematically continuous beam segment
 class BeamSegZ():
     """
-    A mathematically continuous beam segment
+    A mathematically continuous beam segment with vectorized operations.
 
     Properties
     ----------
@@ -53,138 +56,203 @@ class BeamSegZ():
     EA : number
       The axial stiffness of the segment
 
-    Methods
-    -------
-    __init__()
-      Constructor
-    Length()
-      Returns the length of the segment
-    Shear(x)
-      Returns the shear force at a location on the segment
-
     Notes
     -----
-    Any unit system may be used as long as the units are consistent with each other
-
+    Any unit system may be used as long as the units are consistent with each other.
+    All computational methods are vectorized to accept numpy arrays for x.
     """
+
+    # Use __slots__ for memory efficiency and faster attribute access
+    __slots__ = ('x1', 'x2', 'w1', 'w2', 'p1', 'p2', 'V1', 'M1', 'P1', 'T1',
+                 'theta1', 'delta1', 'delta_x1', 'EI', 'EA', '_length')
 
     def __init__(self) -> None:
         """
         Constructor
         """
+        self.x1: float = 0.0  # Start location of beam segment (relative to start of beam)
+        self.x2: float = 0.0  # End location of beam segment (relative to start of beam)
+        self.w1: float = 0.0  # Linear distributed transverse load at start of segment
+        self.w2: float = 0.0  # Linear distributed transverse load at end of segment
+        self.p1: float = 0.0  # Linear distributed axial load at start of segment
+        self.p2: float = 0.0  # Linear distributed axial load at end of segment
+        self.V1: float = 0.0  # Internal shear force at start of segment
+        self.M1: float = 0.0  # Internal moment at start of segment
+        self.P1: float = 0.0  # Internal axial force at start of segment
+        self.T1: float = 0.0  # Torsional moment at start of segment
+        self.theta1: float = 0.0  # Slope at start of beam segment
+        self.delta1: float = 0.0  # Displacement at start of beam segment
+        self.delta_x1: float = 0.0  # Axial displacement at start of beam segment
+        self.EI: float = 0.0  # Flexural stiffness of the beam segment
+        self.EA: float = 0.0  # Axial stiffness of the beam segment
+        self._length: float = 0.0  # Cached length
 
-        self.x1: float | None = None  # Start location of beam segment (relative to start of beam)
-        self.x2: float | None = None  # End location of beam segment (relative to start of beam)
-        self.w1: float | None = None  # Linear distributed transverse load at start of segment
-        self.w2: float | None = None  # Linear distributed transverse load at end of segment
-        self.p1: float | None = None  # Linear distributed axial load at start of segment
-        self.p2: float | None = None  # Linear distributed axial load at end of segment
-        self.V1: float | None = None  # Internal shear force at start of segment
-        self.M1: float | None = None  # Internal moment at start of segment
-        self.P1: float | None = None  # Internal axial force at start of segment
-        self.T1: float | None = None  # Torsional moment at start of segment
-        self.theta1: float | None = None  # Slope at start of beam segment
-        self.delta1: float | None = None  # Displacement at start of beam segment
-        self.delta_x1: float | None = None  # Axial displacement at start of beam segment
-        self.EI: float | None = None  # Flexural stiffness of the beam segment
-        self.EA: float | None = None  # Axial stiffness of the beam segment
-
-    # Returns the length of the segment
     def Length(self) -> float:
         """
-        Returns the length of the segment
+        Returns the length of the segment (cached for performance).
         """
+        if self._length == 0.0:
+            self._length = self.x2 - self.x1
+        return self._length
 
-        return self.x2 - self.x1
+    def Shear(self, x: Union[float, ndarray]) -> Union[float, ndarray]:
+        """
+        Returns the shear force at location(s) 'x' on the segment.
+        Vectorized: accepts scalar or numpy array.
 
-    # Returns the shear force at a location 'x' on the segment
-    def Shear(self, x: float) -> float:
+        Parameters
+        ----------
+        x : float or ndarray
+            Location(s) relative to start of segment
 
+        Returns
+        -------
+        float or ndarray
+            Shear force(s) at the location(s)
+        """
         V1 = self.V1
         w1 = self.w1
         w2 = self.w2
         L = self.Length()
 
-        return V1 + w1*x + x**2*(-w1 + w2)/(2*L)
+        # V(x) = V1 + w1*x + x^2*(w2-w1)/(2L)
+        return V1 + w1*x + x*x*(-w1 + w2)/(2*L)
 
-    # Returns the moment at a location on the segment
-    def moment(self, x: float, P_delta: bool = False) -> float:
+    def moment(self, x: Union[float, ndarray], P_delta: bool = False) -> Union[float, ndarray]:
+        """
+        Returns the moment at location(s) on the segment.
+        Vectorized: accepts scalar or numpy array.
 
+        Parameters
+        ----------
+        x : float or ndarray
+            Location(s) relative to start of segment
+        P_delta : bool
+            Include P-Delta effects
+
+        Returns
+        -------
+        float or ndarray
+            Moment(s) at the location(s)
+        """
         V1 = self.V1
         M1 = self.M1
-        P1 = self.P1
         w1 = self.w1
         w2 = self.w2
         L = self.Length()
 
-        M = M1 - V1*x - w1*x**2/2 - x**3*(-w1 + w2)/(6*L)
+        # M(x) = M1 - V1*x - w1*x^2/2 - x^3*(-w1+w2)/(6L)
+        x2 = x * x
+        x3 = x2 * x
+        M = M1 - V1*x - w1*x2/2 - x3*(-w1 + w2)/(6*L)
 
-        # # Include the P-Delta moment if a P-Delta analysis was run
-        if P_delta == True:
+        if P_delta:
+            P1 = self.P1
             delta_1 = self.delta1
-            delta_x = self.deflection(x)
-            M += P1*(delta_x - delta_1)
+            delta_x = self.deflection(x, P_delta=False)  # Avoid recursion
+            M = M + P1*(delta_x - delta_1)
 
-        # Return the computed moment
         return M
 
-    # Returns the axial force at a location on the segment
-    def axial(self, x: float) -> float:
+    def axial(self, x: Union[float, ndarray]) -> Union[float, ndarray]:
+        """
+        Returns the axial force at location(s) on the segment.
+        Vectorized: accepts scalar or numpy array.
 
+        Parameters
+        ----------
+        x : float or ndarray
+            Location(s) relative to start of segment
+
+        Returns
+        -------
+        float or ndarray
+            Axial force(s) at the location(s)
+        """
         P1 = self.P1
         p1 = self.p1
         p2 = self.p2
         L = self.Length()
 
-        return P1 + (p2 - p1)/(2*L)*x**2 + p1*x
+        # P(x) = P1 + (p2-p1)/(2L)*x^2 + p1*x
+        return P1 + (p2 - p1)/(2*L)*x*x + p1*x
 
-    def Torsion(self, x: float | List[float] = 0) -> float | None | NDArray[Any]:
+    def Torsion(self, x: Union[float, ndarray] = 0) -> Union[float, ndarray]:
         """
         Returns the torsional moment in the segment.
-        """
+        Vectorized: accepts scalar or numpy array.
 
+        Parameters
+        ----------
+        x : float or ndarray
+            Location(s) relative to start of segment (unused, for interface consistency)
+
+        Returns
+        -------
+        float or ndarray
+            Torsional moment(s) - constant along segment
+        """
         # The torsional moment is constant across the segment
-        # This can be updated in the future for distributed torsional forces
+        if isinstance(x, ndarray):
+            return full(x.shape, self.T1)
+        return self.T1
 
-        # As the return value is not calculated as a function of x (for now), we need to check whether x is an array, and if so, return a results array of the same length
-        if isinstance(x, (int, float)):
-            return self.T1
-        else:
-            return full(len(x), self.T1)
-
-    def slope(self, x: float, P_delta: bool = False) -> float:
-        """Returns the slope of the elastic curve at any point `x` along the segment.
-
-        :param x: Location (relative to start of segment) where slope is to be calculated.
-        :type x: float
-        :param P_delta: Indicates whether P-little-delta effects should be included in the calculation. Generally only used when a P-Delta analysis has been run. Defaults to False.
-        :type P_delta: bool, optional
-        :return: The slope of the elastic curve (radians) at location `x`.
-        :rtype: float
+    def slope(self, x: Union[float, ndarray], P_delta: bool = False) -> Union[float, ndarray]:
         """
+        Returns the slope of the elastic curve at location(s) along the segment.
+        Vectorized: accepts scalar or numpy array.
 
+        Parameters
+        ----------
+        x : float or ndarray
+            Location(s) relative to start of segment where slope is to be calculated.
+        P_delta : bool, optional
+            Include P-little-delta effects. Defaults to False.
+
+        Returns
+        -------
+        float or ndarray
+            Slope(s) of the elastic curve (radians) at location(s).
+        """
         V1 = self.V1
         M1 = self.M1
-        P1 = self.P1
         w1 = self.w1
         w2 = self.w2
         theta_1 = self.theta1
         L = self.Length()
         EI = self.EI
 
-        if P_delta == True:
+        x2 = x * x
+        x3 = x2 * x
+        x4 = x3 * x
+
+        if P_delta:
+            P1 = self.P1
             delta_1 = self.delta1
             delta_x = self.deflection(x, P_delta)
-            theta_x = theta_1 - (-V1*x**2/2 - w1*x**3/6 + x*(M1 - P1*delta_1 + P1*delta_x) + x**4*(w1 - w2)/(24*L))/EI
+            theta_x = theta_1 - (-V1*x2/2 - w1*x3/6 + x*(M1 - P1*delta_1 + P1*delta_x) + x4*(w1 - w2)/(24*L))/EI
         else:
-            theta_x = theta_1 - (-V1*x**2/2 - w1*x**3/6 + x*M1 + x**4*(w1 - w2)/(24*L))/EI
+            theta_x = theta_1 - (-V1*x2/2 - w1*x3/6 + x*M1 + x4*(w1 - w2)/(24*L))/EI
 
-        # Return the calculated slope
         return theta_x
 
-    # Returns the deflection at a location on the segment
-    def deflection(self, x: float, P_delta: bool = False) -> float:
+    def deflection(self, x: Union[float, ndarray], P_delta: bool = False) -> Union[float, ndarray]:
+        """
+        Returns the deflection at location(s) on the segment.
+        Vectorized: accepts scalar or numpy array.
 
+        Parameters
+        ----------
+        x : float or ndarray
+            Location(s) relative to start of segment
+        P_delta : bool
+            Include P-Delta effects
+
+        Returns
+        -------
+        float or ndarray
+            Deflection(s) at the location(s)
+        """
         V1 = self.V1
         M1 = self.M1
         P1 = self.P1
@@ -195,19 +263,35 @@ class BeamSegZ():
         L = self.Length()
         EI = self.EI
 
-        # Check if a P-delta solution is requested
-        if P_delta == True:
+        x2 = x * x
+        x3 = x2 * x
+        x4 = x3 * x
+        x5 = x4 * x
 
+        if P_delta:
             # Return the calculated deflection, amplified for P-delta effects
-            return (delta_1 + theta_1*x + V1*x**3/(6*EI) + w1*x**4/(24*EI) + x**2*(-M1 + P1*delta_1)/(2*EI) + x**5*(-w1 + w2)/(120*EI*L))/(1 + P1*x**2/(2*EI))
-
+            numerator = delta_1 + theta_1*x + V1*x3/(6*EI) + w1*x4/(24*EI) + x2*(-M1 + P1*delta_1)/(2*EI) + x5*(-w1 + w2)/(120*EI*L)
+            denominator = 1 + P1*x2/(2*EI)
+            return numerator / denominator
         else:
+            # Return the calculated deflection
+            return delta_1 + theta_1*x + V1*x3/(6*EI) + w1*x4/(24*EI) + x2*(-M1)/(2*EI) + x5*(-w1 + w2)/(120*EI*L)
 
-            # Return the calcuated deflection
-            return delta_1 + theta_1*x + V1*x**3/(6*EI) + w1*x**4/(24*EI) + x**2*(-M1)/(2*EI) + x**5*(-w1 + w2)/(120*EI*L)
+    def axial_deflection(self, x: Union[float, ndarray]) -> Union[float, ndarray]:
+        """
+        Returns the axial deflection at location(s) on the segment.
+        Vectorized: accepts scalar or numpy array.
 
-    def axial_deflection(self, x: float) -> float:
+        Parameters
+        ----------
+        x : float or ndarray
+            Location(s) relative to start of segment
 
+        Returns
+        -------
+        float or ndarray
+            Axial deflection(s) at the location(s)
+        """
         delta_x1 = self.delta_x1
         P1 = self.P1
         p1 = self.p1
@@ -215,65 +299,59 @@ class BeamSegZ():
         L = self.Length()
         EA = self.EA
 
-        return delta_x1 - 1/EA*(P1*x + p1*x**2/2 + (p2 - p1)*x**3/(6*L))
+        x2 = x * x
+        x3 = x2 * x
 
-    # Returns the maximum shear in the segment
+        return delta_x1 - 1/EA*(P1*x + p1*x2/2 + (p2 - p1)*x3/(6*L))
+
     def max_shear(self) -> float:
-
+        """
+        Returns the maximum shear in the segment.
+        """
         w1 = self.w1
         w2 = self.w2
         L = self.Length()
 
         # Determine possible locations of maximum shear
-        if w1-w2 == 0:
-            x1 = 0
+        if w1 - w2 == 0:
+            x1 = 0.0
         else:
             x1 = w1*L/(w1-w2)
 
-        if round(x1, 10) < 0 or round(x1, 10) > round(L, 10):
-            x1 = 0
+        if x1 < 0 or x1 > L:
+            x1 = 0.0
 
-        x2 = 0
-        x3 = L
+        # Evaluate at critical points
+        x_vals = np.array([x1, 0.0, L])
+        V_vals = self.Shear(x_vals)
+        return float(np.max(V_vals))
 
-        # Find the shear at each location of interest
-        V1 = self.Shear(x1)
-        V2 = self.Shear(x2)
-        V3 = self.Shear(x3)
-
-        # Return the maximum shear
-        return max(V1, V2, V3)
-
-    # Returns the minimum shear in the segment
     def min_shear(self) -> float:
-
+        """
+        Returns the minimum shear in the segment.
+        """
         w1 = self.w1
         w2 = self.w2
         L = self.Length()
 
         # Determine possible locations of minimum shear
-        if w1-w2 == 0:
-            x1 = 0
+        if w1 - w2 == 0:
+            x1 = 0.0
         else:
             x1 = w1*L/(w1-w2)
 
-        if round(x1, 10) < 0 or round(x1, 10) > round(L, 10):
-            x1 = 0
+        if x1 < 0 or x1 > L:
+            x1 = 0.0
 
-        x2 = 0
-        x3 = L
+        # Evaluate at critical points
+        x_vals = np.array([x1, 0.0, L])
+        V_vals = self.Shear(x_vals)
+        return float(np.min(V_vals))
 
-        # Find the shear at each location of interest
-        V1 = self.Shear(x1)
-        V2 = self.Shear(x2)
-        V3 = self.Shear(x3)
-
-        # Return the minimum shear
-        return min(V1, V2, V3)
-
-    # Returns the maximum moment in the segment
     def max_moment(self, P_delta: bool = False) -> float:
-
+        """
+        Returns the maximum moment in the segment.
+        """
         w1 = self.w1
         w2 = self.w2
         V1 = self.V1
@@ -285,40 +363,33 @@ class BeamSegZ():
         c = -V1
 
         # Determine possible locations of maximum moment
+        x_list = [0.0, L]
+
         if a == 0:
             if b != 0:
-                x1 = -c/b
-            else:
-                x1 = 0
-            x2 = 0
-        elif b**2-4*a*c < 0:
-            x1 = 0
-            x2 = 0
+                x_crit = -c/b
+                if 0 <= x_crit <= L:
+                    x_list.append(x_crit)
         else:
-            x1 = (-b+(b**2-4*a*c)**0.5)/(2*a)
-            x2 = (-b-(b**2-4*a*c)**0.5)/(2*a)
+            discriminant = b*b - 4*a*c
+            if discriminant >= 0:
+                sqrt_disc = discriminant**0.5
+                x1 = (-b + sqrt_disc)/(2*a)
+                x2 = (-b - sqrt_disc)/(2*a)
+                if 0 <= x1 <= L:
+                    x_list.append(x1)
+                if 0 <= x2 <= L:
+                    x_list.append(x2)
 
-        x3 = 0
-        x4 = L
+        # Evaluate at critical points
+        x_vals = np.array(x_list)
+        M_vals = self.moment(x_vals, P_delta)
+        return float(np.max(M_vals))
 
-        if round(x1, 10) < 0 or round(x1, 10) > round(L, 10):
-            x1 = 0
-
-        if round(x2, 10) < 0 or round(x2, 10) > round(L, 10):
-            x2 = 0
-
-        # Find the moment at each location of interest
-        M1 = self.moment(x1, P_delta)
-        M2 = self.moment(x2, P_delta)
-        M3 = self.moment(x3, P_delta)
-        M4 = self.moment(x4, P_delta)
-
-        # Return the maximum moment
-        return max(M1, M2, M3, M4)
-
-    # Returns the minimum moment in the segment
     def min_moment(self, P_delta: bool = False) -> float:
-
+        """
+        Returns the minimum moment in the segment.
+        """
         w1 = self.w1
         w2 = self.w2
         V1 = self.V1
@@ -330,107 +401,79 @@ class BeamSegZ():
         c = -V1
 
         # Determine possible locations of minimum moment
+        x_list = [0.0, L]
+
         if a == 0:
             if b != 0:
-                x1 = -c/b
-            else:
-                x1 = 0
-            x2 = 0
-        elif b**2-4*a*c < 0:
-            x1 = 0
-            x2 = 0
+                x_crit = -c/b
+                if 0 <= x_crit <= L:
+                    x_list.append(x_crit)
         else:
-            x1 = (-b+(b**2-4*a*c)**0.5)/(2*a)
-            x2 = (-b-(b**2-4*a*c)**0.5)/(2*a)
+            discriminant = b*b - 4*a*c
+            if discriminant >= 0:
+                sqrt_disc = discriminant**0.5
+                x1 = (-b + sqrt_disc)/(2*a)
+                x2 = (-b - sqrt_disc)/(2*a)
+                if 0 <= x1 <= L:
+                    x_list.append(x1)
+                if 0 <= x2 <= L:
+                    x_list.append(x2)
 
-        x3 = 0
-        x4 = L
+        # Evaluate at critical points
+        x_vals = np.array(x_list)
+        M_vals = self.moment(x_vals, P_delta)
+        return float(np.min(M_vals))
 
-        if round(x1, 10) < 0 or round(x1, 10) > round(L, 10):
-            x1 = 0
-
-        if round(x2, 10) < 0 or round(x2, 10) > round(L, 10):
-            x2 = 0
-
-        # Find the moment at each location of interest
-        M1 = self.moment(x1, P_delta)
-        M2 = self.moment(x2, P_delta)
-        M3 = self.moment(x3, P_delta)
-        M4 = self.moment(x4, P_delta)
-
-        # Return the minimum moment
-        return min(M1, M2, M3, M4)
-
-    # Returns the maximum axial force in the segment
     def max_axial(self) -> float:
-
+        """
+        Returns the maximum axial force in the segment.
+        """
         p1 = self.p1
         p2 = self.p2
         L = self.Length()
 
         # Determine possible locations of maximum axial force
-        if p1-p2 != 0:
+        x_list = [0.0, L]
+
+        if p1 - p2 != 0:
             x1 = L*p1/(p1-p2)
-        else:
-            x1 = 0
+            if 0 <= x1 <= L:
+                x_list.append(x1)
 
-        if round(x1, 10) < 0 or round(x1, 10) > round(L, 10):
-            x1 = 0
+        # Evaluate at critical points
+        x_vals = np.array(x_list)
+        P_vals = self.axial(x_vals)
+        return float(np.max(P_vals))
 
-        x2 = 0
-        x3 = L
-
-        # Find the axial force at each location of interest
-        P1 = self.axial(x1)
-        P2 = self.axial(x2)
-        P3 = self.axial(x3)
-
-        # Return the maximum axial force
-        return max(P1, P2, P3)
-
-    # Returns the minimum axial force in the segment
     def min_axial(self) -> float:
-
+        """
+        Returns the minimum axial force in the segment.
+        """
         p1 = self.p1
-        p2 = self. p2
+        p2 = self.p2
         L = self.Length()
 
         # Determine possible locations of minimum axial force
-        if p1-p2 != 0:
+        x_list = [0.0, L]
+
+        if p1 - p2 != 0:
             x1 = L*p1/(p1-p2)
-        else:
-            x1 = 0
+            if 0 <= x1 <= L:
+                x_list.append(x1)
 
-        if round(x1, 10) < 0 or round(x1, 10) > round(L, 10):
-            x1 = 0
-
-        x2 = 0
-        x3 = L
-
-        # Find the axial force at each location of interest
-        P1 = self.axial(x1)
-        P2 = self.axial(x2)
-        P3 = self.axial(x3)
-
-        # Return the minimum axial force
-        return min(P1, P2, P3)
+        # Evaluate at critical points
+        x_vals = np.array(x_list)
+        P_vals = self.axial(x_vals)
+        return float(np.min(P_vals))
 
     def MaxTorsion(self) -> float:
         """
         Returns the maximum torsional moment in the segment.
         """
-
-        # Return the maximum torsional moment
-        # Since the torsional moment is constant on the segment, the maximum torsional moment is T1
-        # This can be updated in the future for distributed torsional forces
         return self.T1
 
     def MinTorsion(self) -> float:
         """
         Returns the minimum torsional moment in the segment.
         """
-
-        # Return the minimum torsional moment
-        # Since the torsional moment is constant on the segment, the minimum torsional moment is T1
-        # This can be updated in the future for distributed torsional forces
         return self.T1
