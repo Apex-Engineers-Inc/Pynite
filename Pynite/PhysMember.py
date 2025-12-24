@@ -1000,7 +1000,7 @@ class PhysMember(Member3D):
         else:
             raise ValueError(f"Location x={x} does not lie on this member")
 
-    def get_all_forces_array(self, combo_names: List[str], n_points: int = 20) -> Dict[str, NDArray[float64]]:
+    def get_all_forces_array(self, combo_names: List[str], n_points: int = 20, x_array=None) -> Dict[str, NDArray[float64]]:
         """
         Extracts all primary forces (shear_y, moment_z, axial, torque) for multiple combos
         and returns them as stacked arrays for vectorized processing.
@@ -1012,7 +1012,11 @@ class PhysMember(Member3D):
         combo_names : List[str]
             List of load combination names
         n_points : int
-            Number of points per array (default 20)
+            Number of points per array (default 20). Ignored if x_array is provided.
+        x_array : array = None
+            A custom array of x values that may be provided by the user, otherwise an array
+            is generated. Values must be provided in local member coordinates (between 0 and L)
+            and be in ascending order.
 
         Returns
         -------
@@ -1032,18 +1036,23 @@ class PhysMember(Member3D):
             # Single sub-member case - check if it can use fast path
             subm = sub_members_list[0]
             if hasattr(subm, '_can_use_fast_path') and subm._can_use_fast_path():
-                return subm._fast_forces_all_combos(combo_names, n_points)
+                return subm._fast_forces_all_combos(combo_names, n_points, x_array)
 
         # Standard path: allocate arrays
         L = self.L()
-        x_array = linspace(0, L, n_points)
+        if x_array is None:
+            x_array = linspace(0, L, n_points)
+        else:
+            if any(x_array < 0) or any(x_array > L):
+                raise ValueError(f"All x values must be in the range 0 to {L}")
+        n_pts = len(x_array)
         n_combos = len(combo_names)
 
         # Pre-allocate output arrays
-        shear_y = empty((n_combos, n_points))
-        moment_z = empty((n_combos, n_points))
-        axial_arr = empty((n_combos, n_points))
-        torque_arr = empty((n_combos, n_points))
+        shear_y = empty((n_combos, n_pts))
+        moment_z = empty((n_combos, n_pts))
+        axial_arr = empty((n_combos, n_pts))
+        torque_arr = empty((n_combos, n_pts))
 
         # Pre-compute submember boundaries and slice indices (geometry-only, combo-independent)
         # This avoids recomputing boolean masks for every combo

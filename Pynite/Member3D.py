@@ -234,15 +234,31 @@ class Member3D():
 
         return f_all
 
-    def _fast_forces_all_combos(self, combo_names: List[str], n_points: int = 20) -> Dict[str, NDArray[float64]]:
+    def _fast_forces_all_combos(self, combo_names: List[str], n_points: int = 20, x_array=None) -> Dict[str, NDArray[float64]]:
         """
         Ultra-fast force extraction for simple members (no intermediate loads).
         Computes all forces for all combos in a single vectorized pass.
 
         This method is 10-20x faster than the segment-based approach for simple members.
+
+        Parameters
+        ----------
+        combo_names : List[str]
+            List of load combination names
+        n_points : int
+            Number of points per array (default 20). Ignored if x_array is provided.
+        x_array : array = None
+            A custom array of x values that may be provided by the user, otherwise an array
+            is generated. Values must be provided in local member coordinates (between 0 and L)
+            and be in ascending order.
         """
         L = self.L()
-        x = linspace(0, L, n_points)
+        if x_array is None:
+            x = linspace(0, L, n_points)
+        else:
+            if any(x_array < 0) or any(x_array > L):
+                raise ValueError(f"All x values must be in the range 0 to {L}")
+            x = x_array
         n_combos = len(combo_names)
 
         # Pre-compute powers of x once
@@ -330,18 +346,20 @@ class Member3D():
         else:
             # No distributed loads - simpler computation
             # Shear is constant (V1)
-            shear_y = empty((n_combos, n_points))
+            n_pts = len(x)
+            shear_y = empty((n_combos, n_pts))
             shear_y[:] = V1_all[:, None]
 
             # Moment varies linearly: M(x) = M1 - V1*x
             moment_z = M1_all[:, None] - V1_all[:, None] * x
 
             # Axial is constant (P1)
-            axial_arr = empty((n_combos, n_points))
+            axial_arr = empty((n_combos, n_pts))
             axial_arr[:] = P1_all[:, None]
 
         # Torque: constant along member
-        torque_arr = empty((n_combos, n_points))
+        n_pts = len(x)
+        torque_arr = empty((n_combos, n_pts))
         torque_arr[:] = T1_all[:, None]
 
         # Handle inactive members by zeroing their results
@@ -2970,7 +2988,7 @@ class Member3D():
 
         return results
 
-    def get_all_forces_array(self, combo_names: List[str], n_points: int = 20) -> Dict[str, NDArray[float64]]:
+    def get_all_forces_array(self, combo_names: List[str], n_points: int = 20, x_array=None) -> Dict[str, NDArray[float64]]:
         """
         Extracts all primary forces (shear_y, moment_z, axial, torque) for multiple combos
         and returns them as stacked arrays for vectorized processing.
@@ -2982,7 +3000,11 @@ class Member3D():
         combo_names : List[str]
             List of load combination names
         n_points : int
-            Number of points per array (default 20)
+            Number of points per array (default 20). Ignored if x_array is provided.
+        x_array : array = None
+            A custom array of x values that may be provided by the user, otherwise an array
+            is generated. Values must be provided in local member coordinates (between 0 and L)
+            and be in ascending order.
 
         Returns
         -------
@@ -2993,18 +3015,23 @@ class Member3D():
         """
         # Use ultra-fast path for simple members
         if self._can_use_fast_path() and self.model.solution != 'P-Delta' and self.model.solution != 'Pushover':
-            return self._fast_forces_all_combos(combo_names, n_points)
+            return self._fast_forces_all_combos(combo_names, n_points, x_array)
 
         # Fall back to segment-based approach for complex members
         L = self.L()
-        x_array = linspace(0, L, n_points)
+        if x_array is None:
+            x_array = linspace(0, L, n_points)
+        else:
+            if any(x_array < 0) or any(x_array > L):
+                raise ValueError(f"All x values must be in the range 0 to {L}")
+        n_pts = len(x_array)
         n_combos = len(combo_names)
 
         # Pre-allocate output arrays
-        shear_y = empty((n_combos, n_points))
-        moment_z = empty((n_combos, n_points))
-        axial_arr = empty((n_combos, n_points))
-        torque_arr = empty((n_combos, n_points))
+        shear_y = empty((n_combos, n_pts))
+        moment_z = empty((n_combos, n_pts))
+        axial_arr = empty((n_combos, n_pts))
+        torque_arr = empty((n_combos, n_pts))
 
         P_delta = self.model.solution == 'P-Delta' or self.model.solution == 'Pushover'
 
