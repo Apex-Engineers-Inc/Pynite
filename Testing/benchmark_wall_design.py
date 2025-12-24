@@ -153,10 +153,10 @@ def benchmark_traditional_extraction(model, n_points=20):
             axial = member.axial_array(n_points, combo_name)
             torque = member.torque_array(n_points, combo_name)
 
-            combo_results['shear_y'] = shear_y
-            combo_results['moment_z'] = moment_z
-            combo_results['axial'] = axial
-            combo_results['torque'] = torque
+            combo_results['Fy'] = shear_y
+            combo_results['Mz'] = moment_z
+            combo_results['Fx'] = axial
+            combo_results['Mx'] = torque
 
             member_results[combo_name] = combo_results
         results[member_name] = member_results
@@ -262,22 +262,22 @@ def test_correctness():
             trad_torque = member.torque_array(n_points, combo_name)
 
             # Check shear
-            if not np.allclose(trad_shear[1], bulk_results['shear_y'][i], rtol=1e-10):
+            if not np.allclose(trad_shear[1], bulk_results['Fy'][i], rtol=1e-10):
                 print(f"  MISMATCH: {member_name} - {combo_name} - shear_y")
                 return False
 
             # Check moment
-            if not np.allclose(trad_moment[1], bulk_results['moment_z'][i], rtol=1e-10):
+            if not np.allclose(trad_moment[1], bulk_results['Mz'][i], rtol=1e-10):
                 print(f"  MISMATCH: {member_name} - {combo_name} - moment_z")
                 return False
 
             # Check axial
-            if not np.allclose(trad_axial[1], bulk_results['axial'][i], rtol=1e-10):
+            if not np.allclose(trad_axial[1], bulk_results['Fx'][i], rtol=1e-10):
                 print(f"  MISMATCH: {member_name} - {combo_name} - axial")
                 return False
 
             # Check torque
-            if not np.allclose(trad_torque[1], bulk_results['torque'][i], rtol=1e-10):
+            if not np.allclose(trad_torque[1], bulk_results['Mx'][i], rtol=1e-10):
                 print(f"  MISMATCH: {member_name} - {combo_name} - torque")
                 return False
 
