@@ -2664,17 +2664,24 @@ class FEModel3D():
         Returns
         -------
         Dict[str, Dict[str, NDArray[float64]]]
-            Nested dictionary: {member_name: {'x': array, 'Fy': array, ...}}
-            Each inner dict has keys: 'x' plus requested force types.
-            Arrays have shape (n_combos, n_points) except 'x' which is (n_points,)
+            Nested dictionary: {member_name: {'x': array, 'Fx': array, ...}}
+            Each inner dict has keys:
+            - 'x': position array of shape (n_points,)
+            - 'Fx': axial force, shape (n_combos, n_points)
+            - 'Fy': shear y, shape (n_combos, n_points)
+            - 'Fz': shear z, shape (n_combos, n_points)
+            - 'Mx': torque, shape (n_combos, n_points)
+            - 'My': moment y, shape (n_combos, n_points)
+            - 'Mz': moment z, shape (n_combos, n_points)
+            - 'dx': axial deflection, shape (n_combos, n_points)
+            - 'dy': deflection y, shape (n_combos, n_points)
+            - 'dz': deflection z, shape (n_combos, n_points)
 
         Examples
         --------
         >>> model.analyze()
         >>> forces = model.get_all_member_forces(['1.2D+1.6L'], n_points=20)
         >>> stud_moment = forces['Stud_1']['Mz']  # shape: (1, 20)
-        >>> # Extract only shear and moment for memory efficiency:
-        >>> forces = model.get_all_member_forces(include_axial=False, include_torque=False)
 
         Notes
         -----
@@ -2764,19 +2771,9 @@ class FEModel3D():
             n_members = len(group_members)
 
             if n_members == 1:
-                # Single member - use standard extraction and filter
+                # Single member - use standard extraction
                 member = group_members[0]
-                full_results = member.get_all_forces_array(combo_names, n_points)
-                filtered = {'x': full_results['x']}
-                if include_shear:
-                    filtered['Fy'] = full_results['Fy']
-                if include_moment:
-                    filtered['Mz'] = full_results['Mz']
-                if include_axial:
-                    filtered['Fx'] = full_results['Fx']
-                if include_torque:
-                    filtered['Mx'] = full_results['Mx']
-                results[member.name] = filtered
+                results[member.name] = member.get_all_forces_array(combo_names, n_points)
                 continue
 
             # Get shared matrices from first member (all members in group have same k, T)
@@ -2842,11 +2839,13 @@ class FEModel3D():
                 # Extract end forces for this member: shape (12, n_combos)
                 f_member = f_batch[:, m_idx, :]
 
-                # End forces: P1 (axial), V1 (shear), M1 (moment), T1 (torque)
+                # End forces: P1 (axial), V1y/V1z (shear), M1y/M1z (moment), T1 (torque)
                 P1_all = f_member[0, :]  # shape (n_combos,)
-                V1_all = f_member[1, :]
-                M1_all = f_member[5, :]
-                T1_all = f_member[3, :]
+                V1y_all = f_member[1, :]  # Shear in local y direction
+                V1z_all = f_member[2, :]  # Shear in local z direction
+                T1_all = f_member[3, :]   # Torque
+                M1y_all = f_member[4, :]  # Moment about local y axis
+                M1z_all = f_member[5, :]  # Moment about local z axis
 
                 # Check for distributed loads
                 dist_loads = member.DistLoads
@@ -2856,18 +2855,22 @@ class FEModel3D():
                 # Use x.copy() to prevent aliasing bugs if downstream code mutates the array
                 member_results: Dict[str, NDArray[float64]] = {'x': x.copy()}
 
-                # Pre-allocate force arrays based on include_* flags
-                # These will be overwritten in the branches below
-                shear_y: NDArray[float64] = empty((n_combos, n_points)) if include_shear else empty((0, 0))
-                moment_z: NDArray[float64] = empty((n_combos, n_points)) if include_moment else empty((0, 0))
-                axial_arr: NDArray[float64] = empty((n_combos, n_points)) if include_axial else empty((0, 0))
-                torque_arr: NDArray[float64] = empty((n_combos, n_points)) if include_torque else empty((0, 0))
+                # Pre-allocate force arrays
+                shear_y: NDArray[float64] = empty((n_combos, n_points))
+                shear_z: NDArray[float64] = empty((n_combos, n_points))
+                moment_z: NDArray[float64] = empty((n_combos, n_points))
+                moment_y: NDArray[float64] = empty((n_combos, n_points))
+                axial_arr: NDArray[float64] = empty((n_combos, n_points))
+                torque_arr: NDArray[float64] = empty((n_combos, n_points))
 
                 if has_dist_loads:
                     # Build load vectors for vectorized combo factor multiplication
                     # Each vector has shape (n_cases,) and we multiply by combo_matrix
+                    # w = load in y direction, wz = load in z direction, p = axial load
                     w1_vec = zeros(n_cases)
                     w2_vec = zeros(n_cases)
+                    wz1_vec = zeros(n_cases)
+                    wz2_vec = zeros(n_cases)
                     p1_vec = zeros(n_cases)
                     p2_vec = zeros(n_cases)
 
@@ -2884,6 +2887,9 @@ class FEModel3D():
                         if direction == 'Fy':
                             w1_vec[case_idx] += w1_raw
                             w2_vec[case_idx] += w2_raw
+                        elif direction == 'Fz':
+                            wz1_vec[case_idx] += w1_raw
+                            wz2_vec[case_idx] += w2_raw
                         elif direction == 'Fx':
                             p1_vec[case_idx] += w1_raw
                             p2_vec[case_idx] += w2_raw
@@ -2898,61 +2904,63 @@ class FEModel3D():
                             p2_vec[case_idx] += f2_local[0]
                             w1_vec[case_idx] += f1_local[1]
                             w2_vec[case_idx] += f2_local[1]
+                            wz1_vec[case_idx] += f1_local[2]
+                            wz2_vec[case_idx] += f2_local[2]
 
                     # Vectorized combo factor multiplication: totals = load_vec @ combo_matrix
                     # Result shape: (n_combos,) - one total per combo
                     w1_totals = w1_vec @ combo_matrix
                     w2_totals = w2_vec @ combo_matrix
+                    wz1_totals = wz1_vec @ combo_matrix
+                    wz2_totals = wz2_vec @ combo_matrix
                     p1_totals = p1_vec @ combo_matrix
                     p2_totals = p2_vec @ combo_matrix
 
                     dw = w2_totals - w1_totals
+                    dwz = wz2_totals - wz1_totals
                     dp = p2_totals - p1_totals
 
-                    if include_shear:
-                        shear_y = V1_all[:, None] + w1_totals[:, None] * x + dw[:, None] * x2 * inv_2L
-                    if include_moment:
-                        moment_z = M1_all[:, None] - V1_all[:, None] * x - w1_totals[:, None] * x2 * 0.5 - dw[:, None] * x3 * inv_6L
-                    if include_axial:
-                        axial_arr = P1_all[:, None] + p1_totals[:, None] * x + dp[:, None] * inv_2L * x2
+                    shear_y = V1y_all[:, None] + w1_totals[:, None] * x + dw[:, None] * x2 * inv_2L
+                    shear_z = V1z_all[:, None] + wz1_totals[:, None] * x + dwz[:, None] * x2 * inv_2L
+                    moment_z = M1z_all[:, None] - V1y_all[:, None] * x - w1_totals[:, None] * x2 * 0.5 - dw[:, None] * x3 * inv_6L
+                    moment_y = M1y_all[:, None] + V1z_all[:, None] * x + wz1_totals[:, None] * x2 * 0.5 + dwz[:, None] * x3 * inv_6L
+                    axial_arr = P1_all[:, None] + p1_totals[:, None] * x + dp[:, None] * inv_2L * x2
                 else:
                     # No distributed loads
-                    if include_shear:
-                        shear_y = empty((n_combos, n_points))
-                        shear_y[:] = V1_all[:, None]
-                    if include_moment:
-                        moment_z = M1_all[:, None] - V1_all[:, None] * x
-                    if include_axial:
-                        axial_arr = empty((n_combos, n_points))
-                        axial_arr[:] = P1_all[:, None]
+                    shear_y[:] = V1y_all[:, None]
+                    shear_z[:] = V1z_all[:, None]
+                    moment_z = M1z_all[:, None] - V1y_all[:, None] * x
+                    moment_y = M1y_all[:, None] + V1z_all[:, None] * x
+                    axial_arr[:] = P1_all[:, None]
 
-                # Torque is constant (only compute if requested)
-                if include_torque:
-                    torque_arr = empty((n_combos, n_points))
-                    torque_arr[:] = T1_all[:, None]
+                # Torque is constant
+                torque_arr[:] = T1_all[:, None]
 
                 # Zero out forces for inactive members (tension/compression-only)
                 is_active = member.active
                 for c_idx, combo_name in enumerate(combo_names):
                     if not is_active.get(combo_name, True):
-                        if include_shear:
-                            shear_y[c_idx, :] = 0.0
-                        if include_moment:
-                            moment_z[c_idx, :] = 0.0
-                        if include_axial:
-                            axial_arr[c_idx, :] = 0.0
-                        if include_torque:
-                            torque_arr[c_idx, :] = 0.0
+                        shear_y[c_idx, :] = 0.0
+                        shear_z[c_idx, :] = 0.0
+                        moment_z[c_idx, :] = 0.0
+                        moment_y[c_idx, :] = 0.0
+                        axial_arr[c_idx, :] = 0.0
+                        torque_arr[c_idx, :] = 0.0
 
-                # Build result dict with only requested force types
-                if include_shear:
-                    member_results['Fy'] = shear_y
-                if include_moment:
-                    member_results['Mz'] = moment_z
-                if include_axial:
-                    member_results['Fx'] = axial_arr
-                if include_torque:
-                    member_results['Mx'] = torque_arr
+                # Build result dict with all force types
+                member_results['Fx'] = axial_arr
+                member_results['Fy'] = shear_y
+                member_results['Fz'] = shear_z
+                member_results['Mx'] = torque_arr
+                member_results['My'] = moment_y
+                member_results['Mz'] = moment_z
+
+                # For deflections in the batched path, fall back to per-member extraction
+                # since deflection computation requires segment integration
+                full_results = member.get_all_forces_array(combo_names, n_points)
+                member_results['dx'] = full_results['dx']
+                member_results['dy'] = full_results['dy']
+                member_results['dz'] = full_results['dz']
 
                 results[member.name] = member_results
 
@@ -2986,10 +2994,15 @@ class FEModel3D():
             - 'member_names': List[str] of member names (for indexing)
             - 'combo_names': List[str] of combo names (for indexing)
             - 'x': array of shape (n_members, n_points) - positions along each member
-            - 'Fy': array of shape (n_members, n_combos, n_points)
-            - 'Mz': array of shape (n_members, n_combos, n_points)
-            - 'Fx': array of shape (n_members, n_combos, n_points)
-            - 'Mx': array of shape (n_members, n_combos, n_points)
+            - 'Fx': array of shape (n_members, n_combos, n_points) - axial force
+            - 'Fy': array of shape (n_members, n_combos, n_points) - shear y
+            - 'Fz': array of shape (n_members, n_combos, n_points) - shear z
+            - 'Mx': array of shape (n_members, n_combos, n_points) - torque
+            - 'My': array of shape (n_members, n_combos, n_points) - moment y
+            - 'Mz': array of shape (n_members, n_combos, n_points) - moment z
+            - 'dx': array of shape (n_members, n_combos, n_points) - axial deflection
+            - 'dy': array of shape (n_members, n_combos, n_points) - deflection y
+            - 'dz': array of shape (n_members, n_combos, n_points) - deflection z
 
         Examples
         --------
@@ -3022,28 +3035,43 @@ class FEModel3D():
 
         # Pre-allocate output arrays
         x_all = empty((n_members, n_points))
-        shear_y_all = empty((n_members, n_combos, n_points))
-        moment_z_all = empty((n_members, n_combos, n_points))
-        axial_all = empty((n_members, n_combos, n_points))
-        torque_all = empty((n_members, n_combos, n_points))
+        Fx_all = empty((n_members, n_combos, n_points))
+        Fy_all = empty((n_members, n_combos, n_points))
+        Fz_all = empty((n_members, n_combos, n_points))
+        Mx_all = empty((n_members, n_combos, n_points))
+        My_all = empty((n_members, n_combos, n_points))
+        Mz_all = empty((n_members, n_combos, n_points))
+        dx_all = empty((n_members, n_combos, n_points))
+        dy_all = empty((n_members, n_combos, n_points))
+        dz_all = empty((n_members, n_combos, n_points))
 
         # Stack results into contiguous arrays
         for i, member_name in enumerate(member_names):
             forces = forces_dict[member_name]
             x_all[i, :] = forces['x']
-            shear_y_all[i, :, :] = forces['Fy']
-            moment_z_all[i, :, :] = forces['Mz']
-            axial_all[i, :, :] = forces['Fx']
-            torque_all[i, :, :] = forces['Mx']
+            Fx_all[i, :, :] = forces['Fx']
+            Fy_all[i, :, :] = forces['Fy']
+            Fz_all[i, :, :] = forces['Fz']
+            Mx_all[i, :, :] = forces['Mx']
+            My_all[i, :, :] = forces['My']
+            Mz_all[i, :, :] = forces['Mz']
+            dx_all[i, :, :] = forces['dx']
+            dy_all[i, :, :] = forces['dy']
+            dz_all[i, :, :] = forces['dz']
 
         return {
             'member_names': member_names,
             'combo_names': combo_names,
             'x': x_all,
-            'Fy': shear_y_all,
-            'Mz': moment_z_all,
-            'Fx': axial_all,
-            'Mx': torque_all,
+            'Fx': Fx_all,
+            'Fy': Fy_all,
+            'Fz': Fz_all,
+            'Mx': Mx_all,
+            'My': My_all,
+            'Mz': Mz_all,
+            'dx': dx_all,
+            'dy': dy_all,
+            'dz': dz_all,
         }
 
     def unique_name(self, dictionary, prefix):

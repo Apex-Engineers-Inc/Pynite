@@ -1697,8 +1697,8 @@ class TestTensionCompressionOnlyMembers:
 class TestIncludeSwitches:
     """Test the include_* switches for selective force extraction."""
 
-    def test_include_only_moment(self):
-        """Test extracting only moment data."""
+    def test_all_forces_always_included(self):
+        """Test that all force types are always included in the output."""
         model = FEModel3D()
         L = 10.0
 
@@ -1716,80 +1716,23 @@ class TestIncludeSwitches:
         model.add_load_combo('1.0D', {'D': 1.0})
         model.analyze()
 
-        # Extract only moment
-        forces = model.get_all_member_forces(
-            ['1.0D'], n_points=20,
-            include_shear=False, include_moment=True,
-            include_axial=False, include_torque=False
-        )
-
-        # Should have x and moment_z but not others
-        assert 'x' in forces['M1']
-        assert 'Mz' in forces['M1']
-        assert 'Fy' not in forces['M1']
-        assert 'Fx' not in forces['M1']
-        assert 'Mx' not in forces['M1']
-
-    def test_include_shear_and_moment(self):
-        """Test extracting shear and moment together."""
-        model = FEModel3D()
-        L = 10.0
-
-        model.add_node('N1', 0, 0, 0)
-        model.add_node('N2', L, 0, 0)
-
-        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
-        model.add_section('W10', 10, 100, 100, 200)
-        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
-
-        model.def_support('N1', True, True, True, True, True, False)
-        model.def_support('N2', True, True, True, True, True, False)
-
-        model.add_member_dist_load('M1', 'Fy', -1.0, -1.0, 0, L, 'D')
-        model.add_load_combo('1.0D', {'D': 1.0})
-        model.analyze()
-
-        forces = model.get_all_member_forces(
-            ['1.0D'], n_points=20,
-            include_shear=True, include_moment=True,
-            include_axial=False, include_torque=False
-        )
-
-        assert 'Fy' in forces['M1']
-        assert 'Mz' in forces['M1']
-        assert 'Fx' not in forces['M1']
-        assert 'Mx' not in forces['M1']
-
-    def test_include_all_default(self):
-        """Test that all forces are included by default."""
-        model = FEModel3D()
-        L = 10.0
-
-        model.add_node('N1', 0, 0, 0)
-        model.add_node('N2', L, 0, 0)
-
-        model.add_material('Steel', 29000, 11200, 0.490/12**3, 0.490/12**3)
-        model.add_section('W10', 10, 100, 100, 200)
-        model.add_member('M1', 'N1', 'N2', 'Steel', 'W10')
-
-        model.def_support('N1', True, True, True, True, True, False)
-        model.def_support('N2', True, True, True, True, True, False)
-
-        model.add_member_dist_load('M1', 'Fy', -1.0, -1.0, 0, L, 'D')
-        model.add_load_combo('1.0D', {'D': 1.0})
-        model.analyze()
-
-        # Default should include all
+        # All force types should always be included
         forces = model.get_all_member_forces(['1.0D'], n_points=20)
 
+        # Check all keys are present
         assert 'x' in forces['M1']
-        assert 'Fy' in forces['M1']
-        assert 'Mz' in forces['M1']
         assert 'Fx' in forces['M1']
+        assert 'Fy' in forces['M1']
+        assert 'Fz' in forces['M1']
         assert 'Mx' in forces['M1']
+        assert 'My' in forces['M1']
+        assert 'Mz' in forces['M1']
+        assert 'dx' in forces['M1']
+        assert 'dy' in forces['M1']
+        assert 'dz' in forces['M1']
 
-    def test_include_switches_batched_path(self):
-        """Test include switches with batched extraction (multiple similar members)."""
+    def test_all_forces_batched_path(self):
+        """Test that all force types are included with batched extraction (multiple similar members)."""
         model = FEModel3D()
         L = 10.0
 
@@ -1810,16 +1753,16 @@ class TestIncludeSwitches:
         model.add_load_combo('1.0D', {'D': 1.0})
         model.analyze()
 
-        # Extract only axial
-        forces = model.get_all_member_forces(
-            ['1.0D'], n_points=20,
-            include_shear=False, include_moment=False,
-            include_axial=True, include_torque=False
-        )
+        forces = model.get_all_member_forces(['1.0D'], n_points=20)
 
         for i in range(3):
             assert 'x' in forces[f'M{i}']
             assert 'Fx' in forces[f'M{i}']
-            assert 'Fy' not in forces[f'M{i}']
-            assert 'Mz' not in forces[f'M{i}']
-            assert 'Mx' not in forces[f'M{i}']
+            assert 'Fy' in forces[f'M{i}']
+            assert 'Fz' in forces[f'M{i}']
+            assert 'Mx' in forces[f'M{i}']
+            assert 'My' in forces[f'M{i}']
+            assert 'Mz' in forces[f'M{i}']
+            assert 'dx' in forces[f'M{i}']
+            assert 'dy' in forces[f'M{i}']
+            assert 'dz' in forces[f'M{i}']
