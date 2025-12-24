@@ -70,8 +70,8 @@ class TestSimplySupportedBeams:
         n_points = 41
         forces = member.get_all_forces_array(['1.0D'], n_points)
         x = forces['x']
-        shear = forces['shear_y'][0, :]
-        moment = forces['moment_z'][0, :]
+        shear = forces['Fy'][0, :]
+        moment = forces['Mz'][0, :]
 
         # Verify shear varies linearly and passes through zero at midspan
         assert abs(shear[n_points//2]) == pytest.approx(0, abs=1e-6)
@@ -305,8 +305,8 @@ class TestCantileverBeams:
         n_points = 21
         forces = member.get_all_forces_array(['1.0D'], n_points)
         x = forces['x']
-        shear = forces['shear_y'][0, :]
-        moment = forces['moment_z'][0, :]
+        shear = forces['Fy'][0, :]
+        moment = forces['Mz'][0, :]
 
         # Shear should be constant with magnitude |P|
         assert_allclose(np.abs(shear), abs(P) * np.ones(n_points), rtol=1e-4,
@@ -348,8 +348,8 @@ class TestCantileverBeams:
         n_points = 21
         forces = member.get_all_forces_array(['1.0D'], n_points)
         x = forces['x']
-        shear = forces['shear_y'][0, :]
-        moment = forces['moment_z'][0, :]
+        shear = forces['Fy'][0, :]
+        moment = forces['Mz'][0, :]
 
         # Shear magnitude: |V(x)| = |w|(L - x)
         shear_mag_analytical = abs(w) * (L - x)
@@ -421,8 +421,8 @@ class TestCantileverBeams:
         member = model.members['M1']
         n_points = 11
         forces = member.get_all_forces_array(['1.0D'], n_points)
-        shear = forces['shear_y'][0, :]
-        moment = forces['moment_z'][0, :]
+        shear = forces['Fy'][0, :]
+        moment = forces['Mz'][0, :]
 
         # Shear should be zero
         assert_allclose(shear, np.zeros(n_points), atol=1e-6)
@@ -925,8 +925,8 @@ class TestBulkExtractionAccuracy:
         # Bulk extraction
         forces = member.get_all_forces_array(['1.0D'], n_points)
         x_bulk = forces['x']
-        shear_bulk = forces['shear_y'][0, :]
-        moment_bulk = forces['moment_z'][0, :]
+        shear_bulk = forces['Fy'][0, :]
+        moment_bulk = forces['Mz'][0, :]
 
         # Individual queries
         for i in range(n_points):
@@ -969,8 +969,8 @@ class TestBulkExtractionAccuracy:
 
             forces = member.get_all_forces_array(['1.0D'], n_points)
             x_bulk = forces['x']
-            shear_bulk = forces['shear_y'][0, :]
-            moment_bulk = forces['moment_z'][0, :]
+            shear_bulk = forces['Fy'][0, :]
+            moment_bulk = forces['Mz'][0, :]
 
             for i in range(n_points):
                 x = x_bulk[i]
@@ -1029,10 +1029,10 @@ class TestModelLevelExtractionAccuracy:
             model_level = all_forces[stud_name]
 
             assert_allclose(model_level['x'], individual['x'], rtol=1e-10)
-            assert_allclose(model_level['shear_y'], individual['shear_y'], rtol=1e-6)
-            assert_allclose(model_level['moment_z'], individual['moment_z'], rtol=1e-6)
-            assert_allclose(model_level['axial'], individual['axial'], rtol=1e-6)
-            assert_allclose(model_level['torque'], individual['torque'], rtol=1e-6)
+            assert_allclose(model_level['Fy'], individual['Fy'], rtol=1e-6)
+            assert_allclose(model_level['Mz'], individual['Mz'], rtol=1e-6)
+            assert_allclose(model_level['Fx'], individual['Fx'], rtol=1e-6)
+            assert_allclose(model_level['Mx'], individual['Mx'], rtol=1e-6)
 
 
 if __name__ == '__main__':

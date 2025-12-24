@@ -2664,7 +2664,7 @@ class FEModel3D():
         Returns
         -------
         Dict[str, Dict[str, NDArray[float64]]]
-            Nested dictionary: {member_name: {'x': array, 'shear_y': array, ...}}
+            Nested dictionary: {member_name: {'x': array, 'Fy': array, ...}}
             Each inner dict has keys: 'x' plus requested force types.
             Arrays have shape (n_combos, n_points) except 'x' which is (n_points,)
 
@@ -2672,7 +2672,7 @@ class FEModel3D():
         --------
         >>> model.analyze()
         >>> forces = model.get_all_member_forces(['1.2D+1.6L'], n_points=20)
-        >>> stud_moment = forces['Stud_1']['moment_z']  # shape: (1, 20)
+        >>> stud_moment = forces['Stud_1']['Mz']  # shape: (1, 20)
         >>> # Extract only shear and moment for memory efficiency:
         >>> forces = model.get_all_member_forces(include_axial=False, include_torque=False)
 
@@ -2769,13 +2769,13 @@ class FEModel3D():
                 full_results = member.get_all_forces_array(combo_names, n_points)
                 filtered = {'x': full_results['x']}
                 if include_shear:
-                    filtered['shear_y'] = full_results['shear_y']
+                    filtered['Fy'] = full_results['Fy']
                 if include_moment:
-                    filtered['moment_z'] = full_results['moment_z']
+                    filtered['Mz'] = full_results['Mz']
                 if include_axial:
-                    filtered['axial'] = full_results['axial']
+                    filtered['Fx'] = full_results['Fx']
                 if include_torque:
-                    filtered['torque'] = full_results['torque']
+                    filtered['Mx'] = full_results['Mx']
                 results[member.name] = filtered
                 continue
 
@@ -2946,13 +2946,13 @@ class FEModel3D():
 
                 # Build result dict with only requested force types
                 if include_shear:
-                    member_results['shear_y'] = shear_y
+                    member_results['Fy'] = shear_y
                 if include_moment:
-                    member_results['moment_z'] = moment_z
+                    member_results['Mz'] = moment_z
                 if include_axial:
-                    member_results['axial'] = axial_arr
+                    member_results['Fx'] = axial_arr
                 if include_torque:
-                    member_results['torque'] = torque_arr
+                    member_results['Mx'] = torque_arr
 
                 results[member.name] = member_results
 
@@ -2986,20 +2986,20 @@ class FEModel3D():
             - 'member_names': List[str] of member names (for indexing)
             - 'combo_names': List[str] of combo names (for indexing)
             - 'x': array of shape (n_members, n_points) - positions along each member
-            - 'shear_y': array of shape (n_members, n_combos, n_points)
-            - 'moment_z': array of shape (n_members, n_combos, n_points)
-            - 'axial': array of shape (n_members, n_combos, n_points)
-            - 'torque': array of shape (n_members, n_combos, n_points)
+            - 'Fy': array of shape (n_members, n_combos, n_points)
+            - 'Mz': array of shape (n_members, n_combos, n_points)
+            - 'Fx': array of shape (n_members, n_combos, n_points)
+            - 'Mx': array of shape (n_members, n_combos, n_points)
 
         Examples
         --------
         >>> model.analyze()
         >>> forces = model.get_all_member_forces_array(n_points=20)
         >>> # Get max moment across all members and combos
-        >>> max_moment = np.max(np.abs(forces['moment_z']))
+        >>> max_moment = np.max(np.abs(forces['Mz']))
         >>> # Get forces for specific member by index
         >>> idx = forces['member_names'].index('Stud_5')
-        >>> stud5_shear = forces['shear_y'][idx, :, :]
+        >>> stud5_shear = forces['Fy'][idx, :, :]
 
         Notes
         -----
@@ -3031,19 +3031,19 @@ class FEModel3D():
         for i, member_name in enumerate(member_names):
             forces = forces_dict[member_name]
             x_all[i, :] = forces['x']
-            shear_y_all[i, :, :] = forces['shear_y']
-            moment_z_all[i, :, :] = forces['moment_z']
-            axial_all[i, :, :] = forces['axial']
-            torque_all[i, :, :] = forces['torque']
+            shear_y_all[i, :, :] = forces['Fy']
+            moment_z_all[i, :, :] = forces['Mz']
+            axial_all[i, :, :] = forces['Fx']
+            torque_all[i, :, :] = forces['Mx']
 
         return {
             'member_names': member_names,
             'combo_names': combo_names,
             'x': x_all,
-            'shear_y': shear_y_all,
-            'moment_z': moment_z_all,
-            'axial': axial_all,
-            'torque': torque_all,
+            'Fy': shear_y_all,
+            'Mz': moment_z_all,
+            'Fx': axial_all,
+            'Mx': torque_all,
         }
 
     def unique_name(self, dictionary, prefix):

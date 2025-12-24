@@ -1002,10 +1002,8 @@ class PhysMember(Member3D):
 
     def get_all_forces_array(self, combo_names: List[str], n_points: int = 20, x_array=None) -> Dict[str, NDArray[float64]]:
         """
-        Extracts all primary forces (shear_y, moment_z, axial, torque) for multiple combos
+        Extracts all forces, moments, and deflections for multiple combos
         and returns them as stacked arrays for vectorized processing.
-
-        HIGHLY OPTIMIZED: Uses fast path for simple members (10-20x faster).
 
         Parameters
         ----------
@@ -1021,22 +1019,23 @@ class PhysMember(Member3D):
         Returns
         -------
         Dict[str, NDArray[float64]]
-            Dictionary with keys 'x', 'shear_y', 'moment_z', 'axial', 'torque'
-            Each value array has shape (n_combos, n_points)
-            'x' array has shape (n_points,) as it's the same for all combos
+            Dictionary with keys 'x', 'Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz', 'dx', 'dy', 'dz'
+            - 'x': x-coordinates along the member, shape (n_points,)
+            - 'Fx': axial force, shape (n_combos, n_points)
+            - 'Fy': shear force in local y-axis, shape (n_combos, n_points)
+            - 'Fz': shear force in local z-axis, shape (n_combos, n_points)
+            - 'Mx': torsional moment (torque), shape (n_combos, n_points)
+            - 'My': bending moment about local y-axis, shape (n_combos, n_points)
+            - 'Mz': bending moment about local z-axis, shape (n_combos, n_points)
+            - 'dx': axial deflection, shape (n_combos, n_points)
+            - 'dy': deflection in local y-axis, shape (n_combos, n_points)
+            - 'dz': deflection in local z-axis, shape (n_combos, n_points)
         """
-        from numpy import empty, zeros, concatenate
+        from numpy import empty
 
         P_delta = self.model.solution == 'P-Delta' or self.model.solution == 'Pushover'
         sub_members_list = list(self.sub_members.values())
         n_sub = len(sub_members_list)
-
-        # Check if we can use fast path for all submembers (check BEFORE allocating arrays)
-        if not P_delta and n_sub == 1:
-            # Single sub-member case - check if it can use fast path
-            subm = sub_members_list[0]
-            if hasattr(subm, '_can_use_fast_path') and subm._can_use_fast_path():
-                return subm._fast_forces_all_combos(combo_names, n_points, x_array)
 
         # Standard path: allocate arrays
         L = self.L()
@@ -1048,11 +1047,16 @@ class PhysMember(Member3D):
         n_pts = len(x_array)
         n_combos = len(combo_names)
 
-        # Pre-allocate output arrays
-        shear_y = empty((n_combos, n_pts))
-        moment_z = empty((n_combos, n_pts))
-        axial_arr = empty((n_combos, n_pts))
-        torque_arr = empty((n_combos, n_pts))
+        # Pre-allocate output arrays for all forces, moments, and deflections
+        Fx = empty((n_combos, n_pts))
+        Fy = empty((n_combos, n_pts))
+        Fz = empty((n_combos, n_pts))
+        Mx = empty((n_combos, n_pts))
+        My = empty((n_combos, n_pts))
+        Mz = empty((n_combos, n_pts))
+        dx = empty((n_combos, n_pts))
+        dy = empty((n_combos, n_pts))
+        dz = empty((n_combos, n_pts))
 
         # Pre-compute submember boundaries and slice indices (geometry-only, combo-independent)
         # This avoids recomputing boolean masks for every combo
@@ -1082,10 +1086,15 @@ class PhysMember(Member3D):
 
         for combo_idx, combo_name in enumerate(combo_names):
             if not self.active.get(combo_name, True):
-                shear_y[combo_idx, :] = 0.0
-                moment_z[combo_idx, :] = 0.0
-                axial_arr[combo_idx, :] = 0.0
-                torque_arr[combo_idx, :] = 0.0
+                Fx[combo_idx, :] = 0.0
+                Fy[combo_idx, :] = 0.0
+                Fz[combo_idx, :] = 0.0
+                Mx[combo_idx, :] = 0.0
+                My[combo_idx, :] = 0.0
+                Mz[combo_idx, :] = 0.0
+                dx[combo_idx, :] = 0.0
+                dy[combo_idx, :] = 0.0
+                dz[combo_idx, :] = 0.0
                 continue
 
             for submember, x_local, out_slice in sub_slices:
@@ -1093,10 +1102,15 @@ class PhysMember(Member3D):
                 # (sub-members are Member3D instances with their own active flags for T/C behavior)
                 if not submember.active.get(combo_name, True):
                     # Inactive sub-member contributes zero forces
-                    shear_y[combo_idx, out_slice] = 0.0
-                    moment_z[combo_idx, out_slice] = 0.0
-                    axial_arr[combo_idx, out_slice] = 0.0
-                    torque_arr[combo_idx, out_slice] = 0.0
+                    Fx[combo_idx, out_slice] = 0.0
+                    Fy[combo_idx, out_slice] = 0.0
+                    Fz[combo_idx, out_slice] = 0.0
+                    Mx[combo_idx, out_slice] = 0.0
+                    My[combo_idx, out_slice] = 0.0
+                    Mz[combo_idx, out_slice] = 0.0
+                    dx[combo_idx, out_slice] = 0.0
+                    dy[combo_idx, out_slice] = 0.0
+                    dz[combo_idx, out_slice] = 0.0
                     continue
 
                 # Segment submember if needed
@@ -1104,22 +1118,31 @@ class PhysMember(Member3D):
                     submember._segment_member(combo_name)
                     submember._solved_combo = self.model.load_combos[combo_name]
 
-                # Extract all forces in one pass using vectorized segment methods
-                shear_res = submember._extract_vector_results(submember.SegmentsZ, x_local, 'shear')
-                moment_res = submember._extract_vector_results(submember.SegmentsZ, x_local, 'moment', P_delta)
-                axial_res = submember._extract_vector_results(submember.SegmentsZ, x_local, 'axial')
-                torque_res = submember._extract_vector_results(submember.SegmentsX, x_local, 'torque')
+                # Extract all forces, moments, and deflections using vectorized segment methods
+                # Forces
+                Fx[combo_idx, out_slice] = submember._extract_vector_results(submember.SegmentsZ, x_local, 'axial')[1]
+                Fy[combo_idx, out_slice] = submember._extract_vector_results(submember.SegmentsZ, x_local, 'shear')[1]
+                Fz[combo_idx, out_slice] = submember._extract_vector_results(submember.SegmentsY, x_local, 'shear')[1]
 
-                # Write directly to output arrays using precomputed slice
-                shear_y[combo_idx, out_slice] = shear_res[1]
-                moment_z[combo_idx, out_slice] = moment_res[1]
-                axial_arr[combo_idx, out_slice] = axial_res[1]
-                torque_arr[combo_idx, out_slice] = torque_res[1]
+                # Moments
+                Mx[combo_idx, out_slice] = submember._extract_vector_results(submember.SegmentsX, x_local, 'torque')[1]
+                My[combo_idx, out_slice] = submember._extract_vector_results(submember.SegmentsY, x_local, 'moment', P_delta)[1]
+                Mz[combo_idx, out_slice] = submember._extract_vector_results(submember.SegmentsZ, x_local, 'moment', P_delta)[1]
+
+                # Deflections
+                dx[combo_idx, out_slice] = submember._extract_vector_results(submember.SegmentsZ, x_local, 'axial_deflection')[1]
+                dy[combo_idx, out_slice] = submember._extract_vector_results(submember.SegmentsZ, x_local, 'deflection')[1]
+                dz[combo_idx, out_slice] = submember._extract_vector_results(submember.SegmentsY, x_local, 'deflection')[1]
 
         return {
             'x': x_array,
-            'shear_y': shear_y,
-            'moment_z': moment_z,
-            'axial': axial_arr,
-            'torque': torque_arr
+            'Fx': Fx,
+            'Fy': Fy,
+            'Fz': Fz,
+            'Mx': Mx,
+            'My': My,
+            'Mz': Mz,
+            'dx': dx,
+            'dy': dy,
+            'dz': dz
         }

@@ -2990,10 +2990,8 @@ class Member3D():
 
     def get_all_forces_array(self, combo_names: List[str], n_points: int = 20, x_array=None) -> Dict[str, NDArray[float64]]:
         """
-        Extracts all primary forces (shear_y, moment_z, axial, torque) for multiple combos
+        Extracts all forces, moments, and deflections for multiple combos
         and returns them as stacked arrays for vectorized processing.
-
-        Uses fast path for simple members (no intermediate loads) which is 10-20x faster.
 
         Parameters
         ----------
@@ -3009,14 +3007,18 @@ class Member3D():
         Returns
         -------
         Dict[str, NDArray[float64]]
-            Dictionary with keys 'x', 'shear_y', 'moment_z', 'axial', 'torque'
-            Each value array has shape (n_combos, n_points)
-            'x' array has shape (n_points,) as it's the same for all combos
+            Dictionary with keys 'x', 'Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz', 'dx', 'dy', 'dz'
+            - 'x': x-coordinates along the member, shape (n_points,)
+            - 'Fx': axial force, shape (n_combos, n_points)
+            - 'Fy': shear force in local y-axis, shape (n_combos, n_points)
+            - 'Fz': shear force in local z-axis, shape (n_combos, n_points)
+            - 'Mx': torsional moment (torque), shape (n_combos, n_points)
+            - 'My': bending moment about local y-axis, shape (n_combos, n_points)
+            - 'Mz': bending moment about local z-axis, shape (n_combos, n_points)
+            - 'dx': axial deflection, shape (n_combos, n_points)
+            - 'dy': deflection in local y-axis, shape (n_combos, n_points)
+            - 'dz': deflection in local z-axis, shape (n_combos, n_points)
         """
-        # Use ultra-fast path for simple members
-        if self._can_use_fast_path() and self.model.solution != 'P-Delta' and self.model.solution != 'Pushover':
-            return self._fast_forces_all_combos(combo_names, n_points, x_array)
-
         # Fall back to segment-based approach for complex members
         L = self.L()
         if x_array is None:
@@ -3027,20 +3029,30 @@ class Member3D():
         n_pts = len(x_array)
         n_combos = len(combo_names)
 
-        # Pre-allocate output arrays
-        shear_y = empty((n_combos, n_pts))
-        moment_z = empty((n_combos, n_pts))
-        axial_arr = empty((n_combos, n_pts))
-        torque_arr = empty((n_combos, n_pts))
+        # Pre-allocate output arrays for all forces, moments, and deflections
+        Fx = empty((n_combos, n_pts))
+        Fy = empty((n_combos, n_pts))
+        Fz = empty((n_combos, n_pts))
+        Mx = empty((n_combos, n_pts))
+        My = empty((n_combos, n_pts))
+        Mz = empty((n_combos, n_pts))
+        dx = empty((n_combos, n_pts))
+        dy = empty((n_combos, n_pts))
+        dz = empty((n_combos, n_pts))
 
         P_delta = self.model.solution == 'P-Delta' or self.model.solution == 'Pushover'
 
         for i, combo_name in enumerate(combo_names):
             if not self.active.get(combo_name, True):
-                shear_y[i, :] = 0.0
-                moment_z[i, :] = 0.0
-                axial_arr[i, :] = 0.0
-                torque_arr[i, :] = 0.0
+                Fx[i, :] = 0.0
+                Fy[i, :] = 0.0
+                Fz[i, :] = 0.0
+                Mx[i, :] = 0.0
+                My[i, :] = 0.0
+                Mz[i, :] = 0.0
+                dx[i, :] = 0.0
+                dy[i, :] = 0.0
+                dz[i, :] = 0.0
                 continue
 
             # Segment member if needed
@@ -3048,16 +3060,31 @@ class Member3D():
                 self._segment_member(combo_name)
                 self._solved_combo = self.model.load_combos[combo_name]
 
-            # Extract forces - the [1] index gets just the values, not the x coordinates
-            shear_y[i, :] = self._extract_vector_results(self.SegmentsZ, x_array, 'shear')[1]
-            moment_z[i, :] = self._extract_vector_results(self.SegmentsZ, x_array, 'moment', P_delta)[1]
-            axial_arr[i, :] = self._extract_vector_results(self.SegmentsZ, x_array, 'axial')[1]
-            torque_arr[i, :] = self._extract_vector_results(self.SegmentsX, x_array, 'torque')[1]
+            # Extract all forces, moments, and deflections
+            # Forces
+            Fx[i, :] = self._extract_vector_results(self.SegmentsZ, x_array, 'axial')[1]
+            Fy[i, :] = self._extract_vector_results(self.SegmentsZ, x_array, 'shear')[1]
+            Fz[i, :] = self._extract_vector_results(self.SegmentsY, x_array, 'shear')[1]
+
+            # Moments
+            Mx[i, :] = self._extract_vector_results(self.SegmentsX, x_array, 'torque')[1]
+            My[i, :] = self._extract_vector_results(self.SegmentsY, x_array, 'moment', P_delta)[1]
+            Mz[i, :] = self._extract_vector_results(self.SegmentsZ, x_array, 'moment', P_delta)[1]
+
+            # Deflections
+            dx[i, :] = self._extract_vector_results(self.SegmentsZ, x_array, 'axial_deflection')[1]
+            dy[i, :] = self._extract_vector_results(self.SegmentsZ, x_array, 'deflection')[1]
+            dz[i, :] = self._extract_vector_results(self.SegmentsY, x_array, 'deflection')[1]
 
         return {
             'x': x_array,
-            'shear_y': shear_y,
-            'moment_z': moment_z,
-            'axial': axial_arr,
-            'torque': torque_arr
+            'Fx': Fx,
+            'Fy': Fy,
+            'Fz': Fz,
+            'Mx': Mx,
+            'My': My,
+            'Mz': Mz,
+            'dx': dx,
+            'dy': dy,
+            'dz': dz
         }

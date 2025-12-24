@@ -63,8 +63,8 @@ class TestSimplySuportedBeamAnalytical:
         # Get bulk results
         bulk_results = member.get_all_forces_array(combo_names, n_points)
 
-        shear = bulk_results['shear_y'][0, :]
-        moment = bulk_results['moment_z'][0, :]
+        shear = bulk_results['Fy'][0, :]
+        moment = bulk_results['Mz'][0, :]
 
         # Verify bulk matches traditional (the authoritative comparison)
         trad_shear = member.shear_array('Fy', n_points, '1.0D')
@@ -125,14 +125,14 @@ class TestSimplySuportedBeamAnalytical:
         bulk_results = member.get_all_forces_array(['1.0D'], 21)
 
         # Verify bulk matches traditional
-        assert_allclose(bulk_results['shear_y'][0, :], trad_shear[1], rtol=1e-6,
+        assert_allclose(bulk_results['Fy'][0, :], trad_shear[1], rtol=1e-6,
                        err_msg="Bulk shear does not match traditional")
-        assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-6,
+        assert_allclose(bulk_results['Mz'][0, :], trad_moment[1], rtol=1e-6,
                        err_msg="Bulk moment does not match traditional")
 
         # Verify max moment magnitude = |P|*L/4
         M_max_analytical = abs(P) * L / 4
-        M_max_computed = np.max(np.abs(bulk_results['moment_z'][0, :]))
+        M_max_computed = np.max(np.abs(bulk_results['Mz'][0, :]))
         assert M_max_computed == pytest.approx(M_max_analytical, rel=1e-3)
 
     def test_cantilever_with_end_load(self):
@@ -168,8 +168,8 @@ class TestSimplySuportedBeamAnalytical:
         member = model.members['M1']
         bulk_results = member.get_all_forces_array(['1.0D'], 21)
 
-        shear = bulk_results['shear_y'][0, :]
-        moment = bulk_results['moment_z'][0, :]
+        shear = bulk_results['Fy'][0, :]
+        moment = bulk_results['Mz'][0, :]
 
         trad_shear = member.shear_array('Fy', 21, '1.0D')
         trad_moment = member.moment_array('Mz', 21, '1.0D')
@@ -228,13 +228,13 @@ class TestBulkVsTraditionalExtraction:
             trad_axial = member.axial_array(n_points, combo_name)
             trad_torque = member.torque_array(n_points, combo_name)
 
-            assert_allclose(bulk_results['shear_y'][i, :], trad_shear[1], rtol=1e-6,
+            assert_allclose(bulk_results['Fy'][i, :], trad_shear[1], rtol=1e-6,
                            err_msg=f"Shear mismatch for {combo_name}")
-            assert_allclose(bulk_results['moment_z'][i, :], trad_moment[1], rtol=1e-6,
+            assert_allclose(bulk_results['Mz'][i, :], trad_moment[1], rtol=1e-6,
                            err_msg=f"Moment mismatch for {combo_name}")
-            assert_allclose(bulk_results['axial'][i, :], trad_axial[1], rtol=1e-6,
+            assert_allclose(bulk_results['Fx'][i, :], trad_axial[1], rtol=1e-6,
                            err_msg=f"Axial mismatch for {combo_name}")
-            assert_allclose(bulk_results['torque'][i, :], trad_torque[1], rtol=1e-6,
+            assert_allclose(bulk_results['Mx'][i, :], trad_torque[1], rtol=1e-6,
                            err_msg=f"Torque mismatch for {combo_name}")
 
     def test_triangular_distributed_load(self):
@@ -267,9 +267,9 @@ class TestBulkVsTraditionalExtraction:
         trad_shear = member.shear_array('Fy', n_points, '1.0D')
         trad_moment = member.moment_array('Mz', n_points, '1.0D')
 
-        assert_allclose(bulk_results['shear_y'][0, :], trad_shear[1], rtol=1e-5,
+        assert_allclose(bulk_results['Fy'][0, :], trad_shear[1], rtol=1e-5,
                        err_msg="Shear mismatch for triangular load")
-        assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-5,
+        assert_allclose(bulk_results['Mz'][0, :], trad_moment[1], rtol=1e-5,
                        err_msg="Moment mismatch for triangular load")
 
     def test_axial_load(self):
@@ -303,7 +303,7 @@ class TestBulkVsTraditionalExtraction:
         bulk_results = member.get_all_forces_array(['D+P'], n_points)
         trad_axial = member.axial_array(n_points, 'D+P')
 
-        assert_allclose(bulk_results['axial'][0, :], trad_axial[1], rtol=1e-5,
+        assert_allclose(bulk_results['Fx'][0, :], trad_axial[1], rtol=1e-5,
                        err_msg="Axial force mismatch")
 
     def test_torsional_load(self):
@@ -334,7 +334,7 @@ class TestBulkVsTraditionalExtraction:
         bulk_results = member.get_all_forces_array(['1.0T'], n_points)
         trad_torque = member.torque_array(n_points, '1.0T')
 
-        assert_allclose(bulk_results['torque'][0, :], trad_torque[1], rtol=1e-5,
+        assert_allclose(bulk_results['Mx'][0, :], trad_torque[1], rtol=1e-5,
                        err_msg="Torque mismatch")
 
 
@@ -400,11 +400,11 @@ class TestWallDesignScenario:
             trad_moment = member.moment_array('Mz', n_points, combo_name)
             trad_axial = member.axial_array(n_points, combo_name)
 
-            assert_allclose(bulk_results['shear_y'][i, :], trad_shear[1], rtol=1e-5,
+            assert_allclose(bulk_results['Fy'][i, :], trad_shear[1], rtol=1e-5,
                            err_msg=f"Shear mismatch for {combo_name}")
-            assert_allclose(bulk_results['moment_z'][i, :], trad_moment[1], rtol=1e-5,
+            assert_allclose(bulk_results['Mz'][i, :], trad_moment[1], rtol=1e-5,
                            err_msg=f"Moment mismatch for {combo_name}")
-            assert_allclose(bulk_results['axial'][i, :], trad_axial[1], rtol=1e-5,
+            assert_allclose(bulk_results['Fx'][i, :], trad_axial[1], rtol=1e-5,
                            err_msg=f"Axial mismatch for {combo_name}")
 
     def test_full_wall_extraction(self):
@@ -467,13 +467,13 @@ class TestWallDesignScenario:
                 trad_axial = member.axial_array(n_points, combo_name)
                 trad_torque = member.torque_array(n_points, combo_name)
 
-                assert_allclose(bulk_results['shear_y'][i, :], trad_shear[1], rtol=1e-4,
+                assert_allclose(bulk_results['Fy'][i, :], trad_shear[1], rtol=1e-4,
                                err_msg=f"Shear mismatch for {member_name} - {combo_name}")
-                assert_allclose(bulk_results['moment_z'][i, :], trad_moment[1], rtol=1e-4,
+                assert_allclose(bulk_results['Mz'][i, :], trad_moment[1], rtol=1e-4,
                                err_msg=f"Moment mismatch for {member_name} - {combo_name}")
-                assert_allclose(bulk_results['axial'][i, :], trad_axial[1], rtol=1e-4,
+                assert_allclose(bulk_results['Fx'][i, :], trad_axial[1], rtol=1e-4,
                                err_msg=f"Axial mismatch for {member_name} - {combo_name}")
-                assert_allclose(bulk_results['torque'][i, :], trad_torque[1], rtol=1e-4,
+                assert_allclose(bulk_results['Mx'][i, :], trad_torque[1], rtol=1e-4,
                                err_msg=f"Torque mismatch for {member_name} - {combo_name}")
 
 
@@ -507,10 +507,10 @@ class TestEdgeCases:
         bulk_results = member.get_all_forces_array(['Empty'], 11)
 
         # All forces should be essentially zero
-        assert_allclose(bulk_results['shear_y'][0, :], 0, atol=1e-10)
-        assert_allclose(bulk_results['moment_z'][0, :], 0, atol=1e-10)
-        assert_allclose(bulk_results['axial'][0, :], 0, atol=1e-10)
-        assert_allclose(bulk_results['torque'][0, :], 0, atol=1e-10)
+        assert_allclose(bulk_results['Fy'][0, :], 0, atol=1e-10)
+        assert_allclose(bulk_results['Mz'][0, :], 0, atol=1e-10)
+        assert_allclose(bulk_results['Fx'][0, :], 0, atol=1e-10)
+        assert_allclose(bulk_results['Mx'][0, :], 0, atol=1e-10)
 
     def test_single_point(self):
         """Test extraction with a single point."""
@@ -536,8 +536,8 @@ class TestEdgeCases:
         bulk_results = member.get_all_forces_array(['1.0D'], 1)
 
         # Should have exactly 1 point
-        assert bulk_results['shear_y'].shape == (1, 1)
-        assert bulk_results['moment_z'].shape == (1, 1)
+        assert bulk_results['Fy'].shape == (1, 1)
+        assert bulk_results['Mz'].shape == (1, 1)
 
     def test_many_points(self):
         """Test extraction with many points."""
@@ -565,7 +565,7 @@ class TestEdgeCases:
 
         trad_shear = member.shear_array('Fy', n_points, '1.0D')
 
-        assert_allclose(bulk_results['shear_y'][0, :], trad_shear[1], rtol=1e-5)
+        assert_allclose(bulk_results['Fy'][0, :], trad_shear[1], rtol=1e-5)
 
     def test_global_direction_loads(self):
         """Test with loads in global directions (FX, FY, FZ)."""
@@ -597,8 +597,8 @@ class TestEdgeCases:
         trad_shear = member.shear_array('Fy', n_points, '1.0D')
         trad_moment = member.moment_array('Mz', n_points, '1.0D')
 
-        assert_allclose(bulk_results['shear_y'][0, :], trad_shear[1], rtol=1e-4)
-        assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-4)
+        assert_allclose(bulk_results['Fy'][0, :], trad_shear[1], rtol=1e-4)
+        assert_allclose(bulk_results['Mz'][0, :], trad_moment[1], rtol=1e-4)
 
 
 # =============================================================================
@@ -662,18 +662,18 @@ class TestContinuousBeams:
         trad_shear1 = member1.shear_array('Fy', n_points, '1.0D')
 
         # Verify bulk matches traditional
-        assert_allclose(bulk_results1['moment_z'][0, :], trad_moment1[1], rtol=1e-6,
+        assert_allclose(bulk_results1['Mz'][0, :], trad_moment1[1], rtol=1e-6,
                        err_msg="Bulk moment does not match traditional for span 1")
-        assert_allclose(bulk_results1['shear_y'][0, :], trad_shear1[1], rtol=1e-6,
+        assert_allclose(bulk_results1['Fy'][0, :], trad_shear1[1], rtol=1e-6,
                        err_msg="Bulk shear does not match traditional for span 1")
 
         # Verify moment magnitude at interior support (end of M1)
-        moment_at_support = bulk_results1['moment_z'][0, -1]
+        moment_at_support = bulk_results1['Mz'][0, -1]
         assert abs(moment_at_support) == pytest.approx(M_middle_support_mag, rel=0.01), \
             f"Moment magnitude at interior support: expected {M_middle_support_mag}, got {abs(moment_at_support)}"
 
         # Verify max span moment has opposite sign from support moment (sagging vs hogging)
-        moment_array = bulk_results1['moment_z'][0, :]
+        moment_array = bulk_results1['Mz'][0, :]
         max_idx = np.argmax(np.abs(moment_array[:-5]))  # Exclude near-support points
         min_idx = np.argmin(moment_array)
         # Moment should change sign between mid-span and support
@@ -681,7 +681,7 @@ class TestContinuousBeams:
             "Moment should change sign along span (sagging in middle, hogging at support)"
 
         # Verify shear magnitude at end support
-        shear_at_start = abs(bulk_results1['shear_y'][0, 0])
+        shear_at_start = abs(bulk_results1['Fy'][0, 0])
         assert shear_at_start == pytest.approx(R_end, rel=0.01), \
             f"Shear at end support: expected {R_end}, got {shear_at_start}"
 
@@ -690,11 +690,11 @@ class TestContinuousBeams:
         bulk_results2 = member2.get_all_forces_array(['1.0D'], n_points)
         trad_moment2 = member2.moment_array('Mz', n_points, '1.0D')
 
-        assert_allclose(bulk_results2['moment_z'][0, :], trad_moment2[1], rtol=1e-6,
+        assert_allclose(bulk_results2['Mz'][0, :], trad_moment2[1], rtol=1e-6,
                        err_msg="Bulk moment does not match traditional for span 2")
 
         # Moment magnitude at start of M2 should match moment at end of M1 (continuity)
-        moment_at_support2 = bulk_results2['moment_z'][0, 0]
+        moment_at_support2 = bulk_results2['Mz'][0, 0]
         assert abs(moment_at_support2) == pytest.approx(abs(moment_at_support), rel=0.01), \
             f"Moment continuity at interior support: {moment_at_support} vs {moment_at_support2}"
 
@@ -745,19 +745,19 @@ class TestContinuousBeams:
         trad_shear = member1.shear_array('Fy', n_points, '1.0D')
 
         # Verify bulk matches traditional
-        assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-6,
+        assert_allclose(bulk_results['Mz'][0, :], trad_moment[1], rtol=1e-6,
                        err_msg="Bulk moment does not match traditional")
-        assert_allclose(bulk_results['shear_y'][0, :], trad_shear[1], rtol=1e-6,
+        assert_allclose(bulk_results['Fy'][0, :], trad_shear[1], rtol=1e-6,
                        err_msg="Bulk shear does not match traditional")
 
         # Verify moment magnitude at interior support
-        moment_at_support = bulk_results['moment_z'][0, -1]
+        moment_at_support = bulk_results['Mz'][0, -1]
         assert abs(moment_at_support) == pytest.approx(M_middle_support_mag, rel=0.02), \
             f"Moment magnitude at interior support: expected {M_middle_support_mag}, got {abs(moment_at_support)}"
 
         # Verify moment magnitude under load (at midpoint)
         midpoint_idx = n_points // 2
-        moment_under_load = bulk_results['moment_z'][0, midpoint_idx]
+        moment_under_load = bulk_results['Mz'][0, midpoint_idx]
         assert abs(moment_under_load) == pytest.approx(M_under_load_mag, rel=0.02), \
             f"Moment magnitude under load: expected {M_under_load_mag}, got {abs(moment_under_load)}"
 
@@ -766,11 +766,11 @@ class TestContinuousBeams:
         bulk_results2 = member2.get_all_forces_array(['1.0D'], n_points)
         trad_moment2 = member2.moment_array('Mz', n_points, '1.0D')
 
-        assert_allclose(bulk_results2['moment_z'][0, :], trad_moment2[1], rtol=1e-6)
+        assert_allclose(bulk_results2['Mz'][0, :], trad_moment2[1], rtol=1e-6)
 
         # Moment should vary linearly from support moment to ~0 in span 2
-        assert abs(bulk_results2['moment_z'][0, 0]) == pytest.approx(M_middle_support_mag, rel=0.02)
-        assert abs(bulk_results2['moment_z'][0, -1]) == pytest.approx(0, abs=0.1)
+        assert abs(bulk_results2['Mz'][0, 0]) == pytest.approx(M_middle_support_mag, rel=0.02)
+        assert abs(bulk_results2['Mz'][0, -1]) == pytest.approx(0, abs=0.1)
 
     def test_three_span_uniform_load(self):
         """
@@ -827,27 +827,27 @@ class TestContinuousBeams:
             trad_shear = member.shear_array('Fy', n_points, '1.0D')
 
             # Verify bulk matches traditional
-            assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-6,
+            assert_allclose(bulk_results['Mz'][0, :], trad_moment[1], rtol=1e-6,
                            err_msg=f"Bulk moment does not match traditional for {member_name}")
-            assert_allclose(bulk_results['shear_y'][0, :], trad_shear[1], rtol=1e-6,
+            assert_allclose(bulk_results['Fy'][0, :], trad_shear[1], rtol=1e-6,
                            err_msg=f"Bulk shear does not match traditional for {member_name}")
 
         # Verify interior support moment magnitude for first span (end = interior support)
         member1 = model.members['M1']
         bulk_results1 = member1.get_all_forces_array(['1.0D'], n_points)
-        moment_at_first_interior = bulk_results1['moment_z'][0, -1]
+        moment_at_first_interior = bulk_results1['Mz'][0, -1]
         assert abs(moment_at_first_interior) == pytest.approx(M_interior_support_mag, rel=0.02), \
             f"Moment magnitude at first interior support: expected {M_interior_support_mag}, got {abs(moment_at_first_interior)}"
 
         # Verify center span moments magnitude (both ends should be at interior supports)
         member2 = model.members['M2']
         bulk_results2 = member2.get_all_forces_array(['1.0D'], n_points)
-        assert abs(bulk_results2['moment_z'][0, 0]) == pytest.approx(M_interior_support_mag, rel=0.02)
-        assert abs(bulk_results2['moment_z'][0, -1]) == pytest.approx(M_interior_support_mag, rel=0.02)
+        assert abs(bulk_results2['Mz'][0, 0]) == pytest.approx(M_interior_support_mag, rel=0.02)
+        assert abs(bulk_results2['Mz'][0, -1]) == pytest.approx(M_interior_support_mag, rel=0.02)
 
         # Center span moment should have opposite sign from support moments
-        center_span_midpoint = bulk_results2['moment_z'][0, n_points // 2]
-        support_moment_sign = np.sign(bulk_results2['moment_z'][0, 0])
+        center_span_midpoint = bulk_results2['Mz'][0, n_points // 2]
+        support_moment_sign = np.sign(bulk_results2['Mz'][0, 0])
         assert np.sign(center_span_midpoint) != support_moment_sign, \
             "Center span midpoint moment should have opposite sign from support moments"
 
@@ -895,11 +895,11 @@ class TestContinuousBeams:
             trad_shear = member.shear_array('Fy', n_points, '1.0D')
             trad_axial = member.axial_array(n_points, '1.0D')
 
-            assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-6,
+            assert_allclose(bulk_results['Mz'][0, :], trad_moment[1], rtol=1e-6,
                            err_msg=f"Moment mismatch for {member_name}")
-            assert_allclose(bulk_results['shear_y'][0, :], trad_shear[1], rtol=1e-6,
+            assert_allclose(bulk_results['Fy'][0, :], trad_shear[1], rtol=1e-6,
                            err_msg=f"Shear mismatch for {member_name}")
-            assert_allclose(bulk_results['axial'][0, :], trad_axial[1], rtol=1e-6,
+            assert_allclose(bulk_results['Fx'][0, :], trad_axial[1], rtol=1e-6,
                            err_msg=f"Axial mismatch for {member_name}")
 
         # Verify continuity at interior support
@@ -909,8 +909,8 @@ class TestContinuousBeams:
         bulk2 = member2.get_all_forces_array(['1.0D'], n_points)
 
         # Moments should be continuous at interior support
-        moment_end_span1 = bulk1['moment_z'][0, -1]
-        moment_start_span2 = bulk2['moment_z'][0, 0]
+        moment_end_span1 = bulk1['Mz'][0, -1]
+        moment_start_span2 = bulk2['Mz'][0, 0]
         assert moment_end_span1 == pytest.approx(moment_start_span2, rel=0.001), \
             f"Moment discontinuity at interior support: {moment_end_span1} vs {moment_start_span2}"
 
@@ -964,26 +964,26 @@ class TestContinuousBeams:
         trad_shear = member.shear_array('Fy', n_points, '1.0D')
 
         # Verify bulk matches traditional
-        assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-6)
-        assert_allclose(bulk_results['shear_y'][0, :], trad_shear[1], rtol=1e-6)
+        assert_allclose(bulk_results['Mz'][0, :], trad_moment[1], rtol=1e-6)
+        assert_allclose(bulk_results['Fy'][0, :], trad_shear[1], rtol=1e-6)
 
         # Verify moment magnitude at fixed end
-        moment_at_fixed = bulk_results['moment_z'][0, 0]
+        moment_at_fixed = bulk_results['Mz'][0, 0]
         assert abs(moment_at_fixed) == pytest.approx(M_fixed_end_mag, rel=0.01), \
             f"Moment magnitude at fixed end: expected {M_fixed_end_mag}, got {abs(moment_at_fixed)}"
 
         # Verify moment at pinned end is zero
-        moment_at_pinned = bulk_results['moment_z'][0, -1]
+        moment_at_pinned = bulk_results['Mz'][0, -1]
         assert abs(moment_at_pinned) == pytest.approx(0, abs=0.01), \
             f"Moment at pinned end should be zero, got {moment_at_pinned}"
 
         # Verify shear magnitude at pinned end (reaction)
-        shear_at_pinned = abs(bulk_results['shear_y'][0, -1])
+        shear_at_pinned = abs(bulk_results['Fy'][0, -1])
         assert shear_at_pinned == pytest.approx(R_pinned, rel=0.01), \
             f"Shear at pinned end: expected {R_pinned}, got {shear_at_pinned}"
 
         # Verify moment changes sign along the span (fixed end vs mid-span)
-        moment_array = bulk_results['moment_z'][0, :]
+        moment_array = bulk_results['Mz'][0, :]
         # The moment at fixed end and max moment in span should have opposite signs
         fixed_sign = np.sign(moment_at_fixed)
         mid_region = moment_array[n_points//3:2*n_points//3]
@@ -1034,9 +1034,9 @@ class TestEndReleases:
             trad_shear = member.shear_array('Fy', n_points, '1.0D')
             trad_moment = member.moment_array('Mz', n_points, '1.0D')
 
-            assert_allclose(bulk_results['shear_y'][0, :], trad_shear[1], rtol=1e-4,
+            assert_allclose(bulk_results['Fy'][0, :], trad_shear[1], rtol=1e-4,
                            err_msg=f"Shear mismatch for {member_name}")
-            assert_allclose(bulk_results['moment_z'][0, :], trad_moment[1], rtol=1e-4,
+            assert_allclose(bulk_results['Mz'][0, :], trad_moment[1], rtol=1e-4,
                            err_msg=f"Moment mismatch for {member_name}")
 
 
@@ -1077,15 +1077,15 @@ class TestModelLevelExtraction:
         assert 'M1' in all_forces
         assert 'M2' in all_forces
         assert 'x' in all_forces['M1']
-        assert 'shear_y' in all_forces['M1']
-        assert 'moment_z' in all_forces['M1']
-        assert 'axial' in all_forces['M1']
-        assert 'torque' in all_forces['M1']
+        assert 'Fy' in all_forces['M1']
+        assert 'Mz' in all_forces['M1']
+        assert 'Fx' in all_forces['M1']
+        assert 'Mx' in all_forces['M1']
 
         # Check shapes
         assert all_forces['M1']['x'].shape == (21,)
-        assert all_forces['M1']['shear_y'].shape == (1, 21)
-        assert all_forces['M1']['moment_z'].shape == (1, 21)
+        assert all_forces['M1']['Fy'].shape == (1, 21)
+        assert all_forces['M1']['Mz'].shape == (1, 21)
 
     def test_get_all_member_forces_matches_individual(self):
         """Test that model-level extraction matches individual member extraction."""
@@ -1131,13 +1131,13 @@ class TestModelLevelExtraction:
 
             assert_allclose(all_forces[member_name]['x'], individual['x'], rtol=1e-10,
                            err_msg=f"x mismatch for {member_name}")
-            assert_allclose(all_forces[member_name]['shear_y'], individual['shear_y'], rtol=1e-10,
+            assert_allclose(all_forces[member_name]['Fy'], individual['Fy'], rtol=1e-10,
                            err_msg=f"shear_y mismatch for {member_name}")
-            assert_allclose(all_forces[member_name]['moment_z'], individual['moment_z'], rtol=1e-10,
+            assert_allclose(all_forces[member_name]['Mz'], individual['Mz'], rtol=1e-10,
                            err_msg=f"moment_z mismatch for {member_name}")
-            assert_allclose(all_forces[member_name]['axial'], individual['axial'], rtol=1e-10,
+            assert_allclose(all_forces[member_name]['Fx'], individual['Fx'], rtol=1e-10,
                            err_msg=f"axial mismatch for {member_name}")
-            assert_allclose(all_forces[member_name]['torque'], individual['torque'], rtol=1e-10,
+            assert_allclose(all_forces[member_name]['Mx'], individual['Mx'], rtol=1e-10,
                            err_msg=f"torque mismatch for {member_name}")
 
     def test_get_all_member_forces_array_structure(self):
@@ -1176,10 +1176,10 @@ class TestModelLevelExtraction:
 
         # Check array shapes: (n_members, n_combos, n_points)
         assert forces['x'].shape == (2, 15)  # x is (n_members, n_points)
-        assert forces['shear_y'].shape == (2, 2, 15)
-        assert forces['moment_z'].shape == (2, 2, 15)
-        assert forces['axial'].shape == (2, 2, 15)
-        assert forces['torque'].shape == (2, 2, 15)
+        assert forces['Fy'].shape == (2, 2, 15)
+        assert forces['Mz'].shape == (2, 2, 15)
+        assert forces['Fx'].shape == (2, 2, 15)
+        assert forces['Mx'].shape == (2, 2, 15)
 
     def test_get_all_member_forces_array_values(self):
         """Test that array-based extraction values match individual extraction."""
@@ -1224,13 +1224,13 @@ class TestModelLevelExtraction:
 
             assert_allclose(forces['x'][i, :], individual['x'], rtol=1e-10,
                            err_msg=f"x mismatch for {member_name}")
-            assert_allclose(forces['shear_y'][i, :, :], individual['shear_y'], rtol=1e-10,
+            assert_allclose(forces['Fy'][i, :, :], individual['Fy'], rtol=1e-10,
                            err_msg=f"shear_y mismatch for {member_name}")
-            assert_allclose(forces['moment_z'][i, :, :], individual['moment_z'], rtol=1e-10,
+            assert_allclose(forces['Mz'][i, :, :], individual['Mz'], rtol=1e-10,
                            err_msg=f"moment_z mismatch for {member_name}")
-            assert_allclose(forces['axial'][i, :, :], individual['axial'], rtol=1e-10,
+            assert_allclose(forces['Fx'][i, :, :], individual['Fx'], rtol=1e-10,
                            err_msg=f"axial mismatch for {member_name}")
-            assert_allclose(forces['torque'][i, :, :], individual['torque'], rtol=1e-10,
+            assert_allclose(forces['Mx'][i, :, :], individual['Mx'], rtol=1e-10,
                            err_msg=f"torque mismatch for {member_name}")
 
     def test_default_parameters(self):
@@ -1263,8 +1263,8 @@ class TestModelLevelExtraction:
         assert len(forces_dict) == 1
 
         # Should have all combos
-        assert forces_dict['M1']['shear_y'].shape[0] == 2
-        assert forces_array['shear_y'].shape[1] == 2
+        assert forces_dict['M1']['Fy'].shape[0] == 2
+        assert forces_array['Fy'].shape[1] == 2
 
     def test_subset_of_members(self):
         """Test extraction for a subset of members."""
@@ -1297,7 +1297,7 @@ class TestModelLevelExtraction:
         assert 'M0' not in forces
 
         assert forces_arr['member_names'] == subset
-        assert forces_arr['shear_y'].shape[0] == 2
+        assert forces_arr['Fy'].shape[0] == 2
 
     def test_wall_design_scenario(self):
         """Test model-level extraction on a realistic wall design scenario."""
@@ -1353,14 +1353,14 @@ class TestModelLevelExtraction:
         # Verify array shapes
         n_members = len(model.members)
         n_combos = len(combo_names)
-        assert all_forces_arr['shear_y'].shape == (n_members, n_combos, n_points)
+        assert all_forces_arr['Fy'].shape == (n_members, n_combos, n_points)
 
         # Verify studs have expected properties (axial loading)
         for i in range(n_studs):
             stud_name = f'Stud_{i}'
             # Studs should have significant axial force from gravity loads
             # Sign convention may vary based on member orientation
-            axial = all_forces[stud_name]['axial']
+            axial = all_forces[stud_name]['Fx']
             assert np.any(np.abs(axial) > 100), f"{stud_name} should have significant axial force"
 
 
@@ -1419,16 +1419,16 @@ class TestEndReleaseGrouping:
         m2_individual = model.members['M2'].get_all_forces_array(['1.0D'], 21)
 
         # Model-level should match individual for both members
-        assert_allclose(all_forces['M1']['moment_z'], m1_individual['moment_z'], rtol=1e-6,
+        assert_allclose(all_forces['M1']['Mz'], m1_individual['Mz'], rtol=1e-6,
                        err_msg="M1 model-level does not match individual")
-        assert_allclose(all_forces['M2']['moment_z'], m2_individual['moment_z'], rtol=1e-6,
+        assert_allclose(all_forces['M2']['Mz'], m2_individual['Mz'], rtol=1e-6,
                        err_msg="M2 model-level does not match individual")
 
         # The two members should have DIFFERENT moment diagrams because of the end release
         # M1: fixed-fixed with moment at both ends
         # M2: pinned-fixed with zero moment at i-end
-        m1_moment_at_i = all_forces['M1']['moment_z'][0, 0]
-        m2_moment_at_i = all_forces['M2']['moment_z'][0, 0]
+        m1_moment_at_i = all_forces['M1']['Mz'][0, 0]
+        m2_moment_at_i = all_forces['M2']['Mz'][0, 0]
 
         # M1 should have significant moment at i-end (fixed-fixed: wL²/12)
         assert abs(m1_moment_at_i) > 0.5, f"M1 should have moment at i-end, got {m1_moment_at_i}"
@@ -1472,13 +1472,13 @@ class TestEndReleaseGrouping:
         # Each member should match its individual extraction
         for member_name in ['M1', 'M2', 'M3']:
             individual = model.members[member_name].get_all_forces_array(['1.0D'], 21)
-            assert_allclose(all_forces[member_name]['moment_z'], individual['moment_z'], rtol=1e-6,
+            assert_allclose(all_forces[member_name]['Mz'], individual['Mz'], rtol=1e-6,
                            err_msg=f"{member_name} model-level does not match individual")
-            assert_allclose(all_forces[member_name]['shear_y'], individual['shear_y'], rtol=1e-6)
+            assert_allclose(all_forces[member_name]['Fy'], individual['Fy'], rtol=1e-6)
 
         # M3 (both ends pinned) should have zero moments at both ends
         # but max moment at midspan (wL²/8 for simply supported)
-        m3_moment = all_forces['M3']['moment_z'][0, :]
+        m3_moment = all_forces['M3']['Mz'][0, :]
         assert abs(m3_moment[0]) < 0.1, "M3 should have ~zero moment at i-end"
         assert abs(m3_moment[-1]) < 0.1, "M3 should have ~zero moment at j-end"
         assert abs(m3_moment[10]) > 1.0, "M3 should have max moment at midspan"
@@ -1538,10 +1538,10 @@ class TestTensionCompressionOnlyMembers:
         # Model-level extraction should show zero forces for M1
         all_forces = model.get_all_member_forces(['1.0D'], n_points=10)
 
-        axial = all_forces['M1']['axial'][0, :]
-        shear = all_forces['M1']['shear_y'][0, :]
-        moment = all_forces['M1']['moment_z'][0, :]
-        torque = all_forces['M1']['torque'][0, :]
+        axial = all_forces['M1']['Fx'][0, :]
+        shear = all_forces['M1']['Fy'][0, :]
+        moment = all_forces['M1']['Mz'][0, :]
+        torque = all_forces['M1']['Mx'][0, :]
 
         assert_allclose(axial, 0.0, atol=1e-10, err_msg="Inactive member should have zero axial")
         assert_allclose(shear, 0.0, atol=1e-10, err_msg="Inactive member should have zero shear")
@@ -1549,7 +1549,7 @@ class TestTensionCompressionOnlyMembers:
         assert_allclose(torque, 0.0, atol=1e-10, err_msg="Inactive member should have zero torque")
 
         # M2 should be active and carrying load
-        m2_axial = all_forces['M2']['axial'][0, :]
+        m2_axial = all_forces['M2']['Fx'][0, :]
         assert np.any(np.abs(m2_axial) > 0.1), "Regular member should carry load"
 
     def test_compression_only_inactive(self):
@@ -1594,7 +1594,7 @@ class TestTensionCompressionOnlyMembers:
         # Model-level extraction should show zero forces for M1
         all_forces = model.get_all_member_forces(['1.0D'], n_points=10)
 
-        axial = all_forces['M1']['axial'][0, :]
+        axial = all_forces['M1']['Fx'][0, :]
         assert_allclose(axial, 0.0, atol=1e-10, err_msg="Inactive member should have zero axial")
 
     def test_tension_only_active(self):
@@ -1630,10 +1630,10 @@ class TestTensionCompressionOnlyMembers:
         individual = model.members['M1'].get_all_forces_array(['1.0D'], 10)
 
         # Should match individual extraction
-        assert_allclose(all_forces['M1']['axial'], individual['axial'], rtol=1e-6)
+        assert_allclose(all_forces['M1']['Fx'], individual['Fx'], rtol=1e-6)
 
         # Should have non-zero axial
-        axial = all_forces['M1']['axial'][0, :]
+        axial = all_forces['M1']['Fx'][0, :]
         assert np.all(np.abs(axial) > 1.0), "Active tension member should have axial force"
 
     def test_mixed_active_inactive_per_combo(self):
@@ -1683,13 +1683,13 @@ class TestTensionCompressionOnlyMembers:
         # Tension combo: M1 should be active
         assert model.members['M1'].active.get('TensionCombo', True), \
             "Tension-only member should be active under tension"
-        tension_axial = all_forces['M1']['axial'][0, :]  # First combo
+        tension_axial = all_forces['M1']['Fx'][0, :]  # First combo
         assert np.any(np.abs(tension_axial) > 0.1), "Tension combo should have axial force in M1"
 
         # Compression combo: M1 should be inactive
         assert not model.members['M1'].active.get('CompressionCombo', True), \
             "Tension-only member should be inactive under compression"
-        compression_axial = all_forces['M1']['axial'][1, :]  # Second combo
+        compression_axial = all_forces['M1']['Fx'][1, :]  # Second combo
         assert_allclose(compression_axial, 0.0, atol=1e-10,
                        err_msg="Compression combo should have zero axial for tension-only member")
 
@@ -1725,10 +1725,10 @@ class TestIncludeSwitches:
 
         # Should have x and moment_z but not others
         assert 'x' in forces['M1']
-        assert 'moment_z' in forces['M1']
-        assert 'shear_y' not in forces['M1']
-        assert 'axial' not in forces['M1']
-        assert 'torque' not in forces['M1']
+        assert 'Mz' in forces['M1']
+        assert 'Fy' not in forces['M1']
+        assert 'Fx' not in forces['M1']
+        assert 'Mx' not in forces['M1']
 
     def test_include_shear_and_moment(self):
         """Test extracting shear and moment together."""
@@ -1755,10 +1755,10 @@ class TestIncludeSwitches:
             include_axial=False, include_torque=False
         )
 
-        assert 'shear_y' in forces['M1']
-        assert 'moment_z' in forces['M1']
-        assert 'axial' not in forces['M1']
-        assert 'torque' not in forces['M1']
+        assert 'Fy' in forces['M1']
+        assert 'Mz' in forces['M1']
+        assert 'Fx' not in forces['M1']
+        assert 'Mx' not in forces['M1']
 
     def test_include_all_default(self):
         """Test that all forces are included by default."""
@@ -1783,10 +1783,10 @@ class TestIncludeSwitches:
         forces = model.get_all_member_forces(['1.0D'], n_points=20)
 
         assert 'x' in forces['M1']
-        assert 'shear_y' in forces['M1']
-        assert 'moment_z' in forces['M1']
-        assert 'axial' in forces['M1']
-        assert 'torque' in forces['M1']
+        assert 'Fy' in forces['M1']
+        assert 'Mz' in forces['M1']
+        assert 'Fx' in forces['M1']
+        assert 'Mx' in forces['M1']
 
     def test_include_switches_batched_path(self):
         """Test include switches with batched extraction (multiple similar members)."""
@@ -1819,7 +1819,7 @@ class TestIncludeSwitches:
 
         for i in range(3):
             assert 'x' in forces[f'M{i}']
-            assert 'axial' in forces[f'M{i}']
-            assert 'shear_y' not in forces[f'M{i}']
-            assert 'moment_z' not in forces[f'M{i}']
-            assert 'torque' not in forces[f'M{i}']
+            assert 'Fx' in forces[f'M{i}']
+            assert 'Fy' not in forces[f'M{i}']
+            assert 'Mz' not in forces[f'M{i}']
+            assert 'Mx' not in forces[f'M{i}']
