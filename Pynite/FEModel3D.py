@@ -766,7 +766,7 @@ class FEModel3D():
         # Add the wall to the model
         self.shear_walls[name] = new_shear_wall
 
-    def merge_duplicate_nodes(self, tolerance:float = 0.001) -> list:
+    def merge_duplicate_nodes(self, tolerance:float = 0.001) -> list[tuple[str, str]]:
         """Removes duplicate nodes from the model and returns a list of tuples showing which nodes were merged.
 
         :param tolerance: The maximum distance between two nodes in order to consider them duplicates. Defaults to 0.001.
