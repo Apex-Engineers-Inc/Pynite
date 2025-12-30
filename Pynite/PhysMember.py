@@ -1031,56 +1031,62 @@ class PhysMember(Member3D):
             - 'dy': deflection in local y-axis, shape (n_combos, n_points)
             - 'dz': deflection in local z-axis, shape (n_combos, n_points)
         """
-        from numpy import empty
+        import numpy as np
 
         P_delta = self.model.solution == 'P-Delta' or self.model.solution == 'Pushover'
-        sub_members_list = list(self.sub_members.values())
+        sub_members_list = list(self.sub_members.values()) 
         n_sub = len(sub_members_list)
 
         # Standard path: allocate arrays
         L = self.L()
         if x_array is None:
-            x_array = linspace(0, L, n_points)
+            x_array = np.linspace(0.0, L, n_points, dtype=float)
         else:
+            x_array = np.asarray(x_array, dtype=float)
             if any(x_array < 0) or any(x_array > L):
                 raise ValueError(f"All x values must be in the range 0 to {L}")
         n_pts = len(x_array)
         n_combos = len(combo_names)
 
         # Pre-allocate output arrays for all forces, moments, and deflections
-        Fx = empty((n_combos, n_pts))
-        Fy = empty((n_combos, n_pts))
-        Fz = empty((n_combos, n_pts))
-        Mx = empty((n_combos, n_pts))
-        My = empty((n_combos, n_pts))
-        Mz = empty((n_combos, n_pts))
-        dx = empty((n_combos, n_pts))
-        dy = empty((n_combos, n_pts))
-        dz = empty((n_combos, n_pts))
+        # Use NaN initialization to ensure we never return uninitialized garbage if any point isn't filled.
+        Fx = np.full((n_combos, n_pts), np.nan, dtype=float)
+        Fy = np.full((n_combos, n_pts), np.nan, dtype=float)
+        Fz = np.full((n_combos, n_pts), np.nan, dtype=float)
+        Mx = np.full((n_combos, n_pts), np.nan, dtype=float)
+        My = np.full((n_combos, n_pts), np.nan, dtype=float)
+        Mz = np.full((n_combos, n_pts), np.nan, dtype=float)
+        dx = np.full((n_combos, n_pts), np.nan, dtype=float)
+        dy = np.full((n_combos, n_pts), np.nan, dtype=float)
+        dz = np.full((n_combos, n_pts), np.nan, dtype=float)
 
-        # Pre-compute submember boundaries and slice indices (geometry-only, combo-independent)
-        # This avoids recomputing boolean masks for every combo
-        sub_slices = []  # List of (submember, x_local, output_slice) tuples
-        x_o = 0.0
+        # Pre-compute submember boundaries and contiguous slice indices (geometry-only, combo-independent).
+        # Important: do NOT rely on boolean masks derived from accumulated lengths (can leave "holes" from
+        # floating-point drift). Instead, assign every x to exactly one submember via searchsorted.
+        boundaries = np.empty(n_sub + 1, dtype=float)
+        boundaries[0] = 0.0
         for i, subm in enumerate(sub_members_list):
-            x_start = x_o
-            x_o += subm.L()
-            x_end = x_o
+            boundaries[i + 1] = boundaries[i] + float(subm.L())
+        # Anchor the end exactly to the parent length, then enforce non-decreasing boundaries.
+        boundaries[-1] = float(L)
+        boundaries = np.maximum.accumulate(boundaries)
+        boundaries[0] = 0.0
+        boundaries[-1] = float(L)
 
-            # Compute mask once (depends only on geometry)
-            if i == n_sub - 1:
-                mask = (x_array >= x_start) & (x_array <= x_end)
-            else:
-                mask = (x_array >= x_start) & (x_array < x_end)
+        sub_idx = np.searchsorted(boundaries, x_array, side="right") - 1
+        sub_idx = np.clip(sub_idx, 0, n_sub - 1)
 
-            # Find the contiguous slice indices for this submember's points
-            indices = mask.nonzero()[0]
-            if len(indices) == 0:
+        sub_slices = []  # List of (submember, x_local, output_slice) tuples
+        for i, subm in enumerate(sub_members_list):
+            mask = sub_idx == i
+            if not mask.any():
                 continue
 
-            # Convert to slice for efficient array indexing
-            i_start, i_end = indices[0], indices[-1] + 1
-            x_local = x_array[i_start:i_end] - x_start
+            indices = np.nonzero(mask)[0]
+            i_start, i_end = int(indices[0]), int(indices[-1] + 1)
+            x_local = x_array[i_start:i_end] - boundaries[i]
+            # Clip to protect against tiny numerical drift at boundaries (e.g., x_local ~ -1e-15 or L+1e-15)
+            x_local = np.clip(x_local, 0.0, float(subm.L()))
 
             sub_slices.append((subm, x_local, slice(i_start, i_end)))
 
@@ -1133,6 +1139,16 @@ class PhysMember(Member3D):
                 dx[combo_idx, out_slice] = submember._extract_vector_results(submember.SegmentsZ, x_local, 'axial_deflection')[1]
                 dy[combo_idx, out_slice] = submember._extract_vector_results(submember.SegmentsZ, x_local, 'deflection')[1]
                 dz[combo_idx, out_slice] = submember._extract_vector_results(submember.SegmentsY, x_local, 'deflection')[1]
+
+        # Safety check: if anything remains unfilled, fail loudly instead of returning garbage values.
+        missing_pts = np.isnan(Fx).any(axis=0)
+        if missing_pts.any():
+            missing_x = x_array[missing_pts]
+            member_name = getattr(self, "name", "<unknown>")
+            raise ValueError(
+                f"Unfilled results detected in get_all_forces_array for member={member_name}. "
+                f"First missing x={float(missing_x[0])} (total missing={int(missing_x.size)})."
+            )
 
         return {
             'x': x_array,
