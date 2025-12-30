@@ -2545,7 +2545,9 @@ class Member3D():
         combo = self.model.load_combos[combo_name]
 
         # Create a list of discontinuity locations
-        disconts = [0, L]  # Member ends
+        # NOTE: These are floating-point values. Near-duplicates can produce extremely short segments
+        # (e.g., ~1e-14) which can blow up deflection/moment formulas that divide by segment length.
+        disconts = [0.0, float(L)]  # Member ends
 
         for load in self.PtLoads:
             disconts.append(load[2])  # Point load locations
@@ -2554,8 +2556,27 @@ class Member3D():
             disconts.append(load[3])  # Distributed load start locations
             disconts.append(load[4])  # Distributed load end locations
 
-        # Sort the list and eliminate duplicate values
+        # Sort the list and eliminate duplicate/near-duplicate values using rounding.
+        # Many other locations in the codebase use `round(x, 10)` when comparing load positions;
+        # applying the same rule here prevents creating nearly-zero-length segments.
+        disconts = [float(round(x, 10)) for x in disconts]
         disconts = sorted(set(disconts))
+
+        # Clamp to [0, L] and ensure both ends exist exactly
+        disconts = [x for x in disconts if 0.0 <= x <= float(L)]
+        if not disconts or disconts[0] != 0.0:
+            disconts.insert(0, 0.0)
+        if disconts[-1] != float(L):
+            disconts.append(float(L))
+
+        # Ensure strict increase (remove any duplicates that may remain after clamping)
+        disconts_strict = [disconts[0]]
+        for x in disconts[1:]:
+            if x > disconts_strict[-1]:
+                disconts_strict.append(x)
+        # Always anchor the last point to the exact member length
+        disconts_strict[-1] = float(L)
+        disconts = disconts_strict
 
         # Clear out old data from any previous analyses
         SegmentsZ.clear()
@@ -2810,7 +2831,7 @@ class Member3D():
 
                                 SegmentsY[i].V1 += (f1[2] + f2[2])/2*(x2 - x1)
                                 SegmentsY[i].M1 += (x1 - x2)*(2*f1[2]*x1 - 3*f1[2]*x + f1[2]*x2 + f2[2]*x1 - 3*f2[2]*x + 2*f2[2]*x2)/6
-
+                                
     def _extract_vector_results(self, segments: List, x_array: NDArray[float64], result_name: Literal['moment', 'shear', 'axial', 'torque', 'deflection', 'axial_deflection'], P_delta: bool = False) -> NDArray[float64]:
         """
         Extracts result values at specified locations along a structural member using efficient, 
