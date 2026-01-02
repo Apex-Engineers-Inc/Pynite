@@ -5,7 +5,23 @@ import warnings
 from IPython.display import Image
 from numpy import array, empty, append, cross
 from numpy.linalg import norm
-import vtk
+
+# Lazy loading for vtk - only import when actually needed
+_vtk = None
+
+def _get_vtk():
+    """Lazily load vtk module when needed."""
+    global _vtk
+    if _vtk is None:
+        try:
+            import vtk
+            _vtk = vtk
+        except ImportError:
+            raise ImportError(
+                "vtk is required for visualization features. "
+                "Install it with: pip install vtk"
+            )
+    return _vtk
 
 class Renderer():
     """Used to render finite element models.
@@ -32,8 +48,8 @@ class Renderer():
         self.theme = 'default'
 
         # Initialize VTK objects
-        self.renderer = vtk.vtkRenderer()
-        self.window = vtk.vtkRenderWindow()
+        self.renderer = _get_vtk().vtkRenderer()
+        self.window = _get_vtk().vtkRenderWindow()
         self.window.SetWindowName('Pynite - Simple Finite Element Analysis in Python')
         self.window.AddRenderer(self.renderer)
 
@@ -122,8 +138,8 @@ class Renderer():
 
             # Set up an interactor. The interactor style determines how user interactions affect the
             # view. The trackball camera style behaves much like popular commercial CAD programs.
-            interactor = vtk.vtkRenderWindowInteractor()
-            style = vtk.vtkInteractorStyleTrackballCamera()
+            interactor = _get_vtk().vtkRenderWindowInteractor()
+            style = _get_vtk().vtkInteractorStyleTrackballCamera()
             interactor.SetInteractorStyle(style)
             interactor.SetRenderWindow(self.window)
 
@@ -159,7 +175,7 @@ class Renderer():
         window = self.render_model(interact, reset_camera)
 
         # Screenshot code
-        w2if = vtk.vtkWindowToImageFilter()
+        w2if = _get_vtk().vtkWindowToImageFilter()
         w2if.SetInput(window)
         w2if.SetInputBufferTypeToRGB()
         w2if.ReadFrontBufferOff()
@@ -170,7 +186,7 @@ class Renderer():
         # w2if.Update()
         # w2if.Modified()
 
-        writer = vtk.vtkPNGWriter()
+        writer = _get_vtk().vtkPNGWriter()
         writer.SetInputConnection(w2if.GetOutputPort())
 
         if filepath == 'console' or filepath == 'BytesIO':
@@ -272,7 +288,7 @@ class Renderer():
             # Combine the polydata from each node
 
             # Create an append filter for combining node polydata
-            node_polydata = vtk.vtkAppendPolyData()
+            node_polydata = _get_vtk().vtkAppendPolyData()
 
             for vis_node in vis_nodes:
 
@@ -297,9 +313,9 @@ class Renderer():
             node_polydata.Update()
 
             # Create a mapper and actor for the nodes
-            node_mapper = vtk.vtkPolyDataMapper()
+            node_mapper = _get_vtk().vtkPolyDataMapper()
             node_mapper.SetInputConnection(node_polydata.GetOutputPort())
-            node_actor = vtk.vtkActor()
+            node_actor = _get_vtk().vtkActor()
             node_actor.SetMapper(node_mapper)
 
             # Adjust the color of all the nodes.
@@ -340,7 +356,7 @@ class VisNode():
     def __init__(self, node, annotation_size=5):
 
         # Create an append filter to append all the sources related to the node into a single 'PolyData' object
-        self.polydata = vtk.vtkAppendPolyData()
+        self.polydata = _get_vtk().vtkAppendPolyData()
 
         # Get the node's position
         X = node.X  # Global X coordinate
@@ -348,22 +364,22 @@ class VisNode():
         Z = node.Z  # Global Z coordinate
 
         # Generate a sphere source for the node
-        sphere = vtk.vtkSphereSource()
+        sphere = _get_vtk().vtkSphereSource()
         sphere.SetCenter(X, Y, Z)
         sphere.SetRadius(0.6*annotation_size)
         sphere.Update()
         self.polydata.AddInputData(sphere.GetOutput())
 
         # Create the text for the node label
-        label = vtk.vtkVectorText()
+        label = _get_vtk().vtkVectorText()
         label.SetText(node.name)
 
         # Set up a mapper for the node label
-        lblMapper = vtk.vtkPolyDataMapper()
+        lblMapper = _get_vtk().vtkPolyDataMapper()
         lblMapper.SetInputConnection(label.GetOutputPort())
 
         # Set up an actor for the node label
-        self.lblActor = vtk.vtkFollower()
+        self.lblActor = _get_vtk().vtkFollower()
         self.lblActor.SetMapper(lblMapper)
         self.lblActor.SetScale(annotation_size, annotation_size, annotation_size)
         self.lblActor.SetPosition(X + 0.6*annotation_size, Y + 0.6*annotation_size, Z)
@@ -373,7 +389,7 @@ class VisNode():
         if (node.support_DX == True and node.support_DY == True and node.support_DZ == True and node.support_RX == True and node.support_RY == True and node.support_RZ == True):
 
             # Create the fixed support
-            support = vtk.vtkCubeSource()
+            support = _get_vtk().vtkCubeSource()
             support.SetCenter(node.X, node.Y, node.Z)
             support.SetXLength(annotation_size*1.2)
             support.SetYLength(annotation_size*1.2)
@@ -388,7 +404,7 @@ class VisNode():
         and node.support_RX == False and node.support_RY == False and node.support_RZ == False:
 
             # Create the pinned support
-            support = vtk.vtkConeSource()
+            support = _get_vtk().vtkConeSource()
             support.SetCenter(node.X, node.Y-0.6*annotation_size, node.Z)
             support.SetDirection((0, 1, 0))
             support.SetHeight(annotation_size*1.2)
@@ -405,7 +421,7 @@ class VisNode():
             if node.support_DX == True:
 
                 # Create the support
-                support1 = vtk.vtkLineSource()  # The line showing the support direction
+                support1 = _get_vtk().vtkLineSource()  # The line showing the support direction
                 support1.SetPoint1(node.X-annotation_size, node.Y, node.Z)
                 support1.SetPoint2(node.X+annotation_size, node.Y, node.Z)
 
@@ -413,7 +429,7 @@ class VisNode():
                 support1.Update()
                 self.polydata.AddInputData(support1.GetOutput())
 
-                support2 = vtk.vtkConeSource()
+                support2 = _get_vtk().vtkConeSource()
                 support2.SetCenter(node.X-annotation_size, node.Y, node.Z)
                 support2.SetDirection((1, 0, 0))
                 support2.SetHeight(annotation_size*0.6)
@@ -423,7 +439,7 @@ class VisNode():
                 support2.Update()
                 self.polydata.AddInputData(support2.GetOutput())
 
-                support3 = vtk.vtkConeSource()
+                support3 = _get_vtk().vtkConeSource()
                 support3.SetCenter(node.X+annotation_size, node.Y, node.Z)
                 support3.SetDirection((-1, 0, 0))
                 support3.SetHeight(annotation_size*0.6)
@@ -437,7 +453,7 @@ class VisNode():
             if node.support_DY == True:
 
                 # Create the support
-                support1 = vtk.vtkLineSource()  # The line showing the support direction
+                support1 = _get_vtk().vtkLineSource()  # The line showing the support direction
                 support1.SetPoint1(node.X, node.Y-annotation_size, node.Z)
                 support1.SetPoint2(node.X, node.Y+annotation_size, node.Z)
 
@@ -445,7 +461,7 @@ class VisNode():
                 support1.Update()
                 self.polydata.AddInputData(support1.GetOutput())
 
-                support2 = vtk.vtkConeSource()
+                support2 = _get_vtk().vtkConeSource()
                 support2.SetCenter(node.X, node.Y-annotation_size, node.Z)
                 support2.SetDirection((0, 1, 0))
                 support2.SetHeight(annotation_size*0.6)
@@ -455,7 +471,7 @@ class VisNode():
                 support2.Update()
                 self.polydata.AddInputData(support2.GetOutput())
 
-                support3 = vtk.vtkConeSource()
+                support3 = _get_vtk().vtkConeSource()
                 support3.SetCenter(node.X, node.Y+annotation_size, node.Z)
                 support3.SetDirection((0, -1, 0))
                 support3.SetHeight(annotation_size*0.6)
@@ -469,7 +485,7 @@ class VisNode():
             if node.support_DZ == True:
 
                 # Create the support
-                support1 = vtk.vtkLineSource()  # The line showing the support direction
+                support1 = _get_vtk().vtkLineSource()  # The line showing the support direction
                 support1.SetPoint1(node.X, node.Y, node.Z-annotation_size)
                 support1.SetPoint2(node.X, node.Y, node.Z+annotation_size)
 
@@ -477,7 +493,7 @@ class VisNode():
                 support1.Update()
                 self.polydata.AddInputData(support1.GetOutput())
 
-                support2 = vtk.vtkConeSource()
+                support2 = _get_vtk().vtkConeSource()
                 support2.SetCenter(node.X, node.Y, node.Z-annotation_size)
                 support2.SetDirection((0, 0, 1))
                 support2.SetHeight(annotation_size*0.6)
@@ -487,7 +503,7 @@ class VisNode():
                 support2.Update()
                 self.polydata.AddInputData(support2.GetOutput())
 
-                support3 = vtk.vtkConeSource()
+                support3 = _get_vtk().vtkConeSource()
                 support3.SetCenter(node.X, node.Y, node.Z+annotation_size)
                 support3.SetDirection((0, 0, -1))
                 support3.SetHeight(annotation_size*0.6)
@@ -501,7 +517,7 @@ class VisNode():
             if node.support_RX == True:
 
                 # Create the support
-                support1 = vtk.vtkLineSource()  # The line showing the support direction
+                support1 = _get_vtk().vtkLineSource()  # The line showing the support direction
                 support1.SetPoint1(node.X-1.6*annotation_size, node.Y, node.Z)
                 support1.SetPoint2(node.X+1.6*annotation_size, node.Y, node.Z)
 
@@ -509,7 +525,7 @@ class VisNode():
                 support1.Update()
                 self.polydata.AddInputData(support1.GetOutput())
 
-                support2 = vtk.vtkCubeSource()
+                support2 = _get_vtk().vtkCubeSource()
                 support2.SetCenter(node.X-1.9*annotation_size, node.Y, node.Z)
                 support2.SetXLength(annotation_size*0.6)
                 support2.SetYLength(annotation_size*0.6)
@@ -519,7 +535,7 @@ class VisNode():
                 support2.Update()
                 self.polydata.AddInputData(support2.GetOutput())
 
-                support3 = vtk.vtkCubeSource()
+                support3 = _get_vtk().vtkCubeSource()
                 support3.SetCenter(node.X+1.9*annotation_size, node.Y, node.Z)
                 support3.SetXLength(annotation_size*0.6)
                 support3.SetYLength(annotation_size*0.6)
@@ -533,7 +549,7 @@ class VisNode():
             if node.support_RY == True:
 
                 # Create the support
-                support1 = vtk.vtkLineSource()  # The line showing the support direction
+                support1 = _get_vtk().vtkLineSource()  # The line showing the support direction
                 support1.SetPoint1(node.X, node.Y-1.6*annotation_size, node.Z)
                 support1.SetPoint2(node.X, node.Y+1.6*annotation_size, node.Z)
 
@@ -541,7 +557,7 @@ class VisNode():
                 support1.Update()
                 self.polydata.AddInputData(support1.GetOutput())
 
-                support2 = vtk.vtkCubeSource()
+                support2 = _get_vtk().vtkCubeSource()
                 support2.SetCenter(node.X, node.Y-1.9*annotation_size, node.Z)
                 support2.SetXLength(annotation_size*0.6)
                 support2.SetYLength(annotation_size*0.6)
@@ -551,7 +567,7 @@ class VisNode():
                 support2.Update()
                 self.polydata.AddInputData(support2.GetOutput())
 
-                support3 = vtk.vtkCubeSource()
+                support3 = _get_vtk().vtkCubeSource()
                 support3.SetCenter(node.X, node.Y+1.9*annotation_size, node.Z)
                 support3.SetXLength(annotation_size*0.6)
                 support3.SetYLength(annotation_size*0.6)
@@ -565,7 +581,7 @@ class VisNode():
             if node.support_RZ == True:
 
                 # Create the support
-                support1 = vtk.vtkLineSource()  # The line showing the support direction
+                support1 = _get_vtk().vtkLineSource()  # The line showing the support direction
                 support1.SetPoint1(node.X, node.Y, node.Z-1.6*annotation_size)
                 support1.SetPoint2(node.X, node.Y, node.Z+1.6*annotation_size)
 
@@ -573,7 +589,7 @@ class VisNode():
                 support1.Update()
                 self.polydata.AddInputData(support1.GetOutput())
 
-                support2 = vtk.vtkCubeSource()
+                support2 = _get_vtk().vtkCubeSource()
                 support2.SetCenter(node.X, node.Y, node.Z-1.9*annotation_size)
                 support2.SetXLength(annotation_size*0.6)
                 support2.SetYLength(annotation_size*0.6)
@@ -583,7 +599,7 @@ class VisNode():
                 support2.Update()
                 self.polydata.AddInputData(support2.GetOutput())
 
-                support3 = vtk.vtkCubeSource()
+                support3 = _get_vtk().vtkCubeSource()
                 support3.SetCenter(node.X, node.Y, node.Z+1.9*annotation_size)
                 support3.SetXLength(annotation_size*0.6)
                 support3.SetYLength(annotation_size*0.6)
@@ -597,9 +613,9 @@ class VisNode():
         self.polydata.Update()
 
         # Create a mapper and actor
-        mapper = vtk.vtkPolyDataMapper()
+        mapper = _get_vtk().vtkPolyDataMapper()
         mapper.SetInputConnection(self.polydata.GetOutputPort())
-        self.actor = vtk.vtkActor()
+        self.actor = _get_vtk().vtkActor()
 
         # Set the mapper for the node's actor
         self.actor.SetMapper(mapper)
@@ -609,7 +625,7 @@ class VisSpring():
     def __init__(self, spring, nodes, annotation_size=5, color=None):
 
         # Generate a line source for the spring
-        line = vtk.vtkLineSource()
+        line = _get_vtk().vtkLineSource()
 
         # Step through each node in the model and find the position of the
         # i-node and j-node
@@ -630,23 +646,23 @@ class VisSpring():
                 line.SetPoint2(Xj, Yj, Zj)
 
         # Set up a mapper for the spring
-        mapper = vtk.vtkPolyDataMapper()
+        mapper = _get_vtk().vtkPolyDataMapper()
         mapper.SetInputConnection(line.GetOutputPort())
 
         # Set up an actor and a mapper for the spring
-        self.actor = vtk.vtkActor()
+        self.actor = _get_vtk().vtkActor()
         self.actor.SetMapper(mapper)
 
         # Create the text for the spring label
-        label = vtk.vtkVectorText()
+        label = _get_vtk().vtkVectorText()
         label.SetText(spring.name)
 
         # Set up a mapper for the spring label
-        lblMapper = vtk.vtkPolyDataMapper()
+        lblMapper = _get_vtk().vtkPolyDataMapper()
         lblMapper.SetInputConnection(label.GetOutputPort())
 
         # Set up an actor for the spring label
-        self.lblActor = vtk.vtkFollower()
+        self.lblActor = _get_vtk().vtkFollower()
         self.lblActor.SetMapper(lblMapper)
         self.lblActor.SetScale(annotation_size, annotation_size, annotation_size)
         self.lblActor.SetPosition((Xi+Xj)/2, (Yi+Yj)/2, (Zi+Zj)/2)
@@ -666,7 +682,7 @@ class VisMember():
     def __init__(self, member, nodes, annotation_size=5, theme='default'):
     
         # Generate a line for the member
-        line = vtk.vtkLineSource()
+        line = _get_vtk().vtkLineSource()
       
         # Step through each node in the model and find the position of the i-node and j-node
         for node in nodes.values():
@@ -686,23 +702,23 @@ class VisMember():
                 line.SetPoint2(Xj, Yj, Zj)
         
         # Set up a mapper for the member
-        mapper = vtk.vtkPolyDataMapper()
+        mapper = _get_vtk().vtkPolyDataMapper()
         mapper.SetInputConnection(line.GetOutputPort())
       
         # Set up an actor for the member
-        self.actor = vtk.vtkActor()
+        self.actor = _get_vtk().vtkActor()
         self.actor.SetMapper(mapper)
       
         # Create the text for the member label
-        label = vtk.vtkVectorText()
+        label = _get_vtk().vtkVectorText()
         label.SetText(member.name)
       
         # Set up a mapper for the member label
-        lblMapper = vtk.vtkPolyDataMapper()
+        lblMapper = _get_vtk().vtkPolyDataMapper()
         lblMapper.SetInputConnection(label.GetOutputPort())
       
         # Set up an actor for the member label
-        self.lblActor = vtk.vtkFollower()
+        self.lblActor = _get_vtk().vtkFollower()
         self.lblActor.SetMapper(lblMapper)
         self.lblActor.SetScale(annotation_size, annotation_size, annotation_size)
         self.lblActor.SetPosition((Xi+Xj)/2, (Yi+Yj)/2, (Zi+Zj)/2)
@@ -723,7 +739,7 @@ class VisDeformedNode():
         newZ = node.Z + scale_factor*(node.DZ[combo_name])
             
         # Generate a sphere source for the node in its deformed position
-        self.source = vtk.vtkSphereSource()
+        self.source = _get_vtk().vtkSphereSource()
         self.source.SetCenter(newX, newY, newZ)
         self.source.SetRadius(0.6*annotation_size)
         self.source.Update()
@@ -789,21 +805,21 @@ class VisDeformedMember():
         D_plot = DY_plot + DZ_plot + DX_plot
       
         # Generate vtk points
-        points = vtk.vtkPoints()
+        points = _get_vtk().vtkPoints()
         points.SetNumberOfPoints(len(D_plot))
       
         for i in range(len(D_plot)):
             points.SetPoint(i, D_plot[i, 0], D_plot[i, 1], D_plot[i, 2])
       
         # Generate vtk lines
-        lines = vtk.vtkCellArray()
+        lines = _get_vtk().vtkCellArray()
         lines.InsertNextCell(len(D_plot))
       
         for i in range(len(D_plot)):
             lines.InsertCellPoint(i)
       
         # Create a polyline source from the defined points and lines
-        self.source = vtk.vtkPolyData()
+        self.source = _get_vtk().vtkPolyData()
         self.source.SetPoints(points)
         self.source.SetLines(lines)   
                                   
@@ -815,7 +831,7 @@ class VisDeformedSpring():
         self.active = spring.active
         
         # Generate a line source for the spring
-        self.source = vtk.vtkLineSource()
+        self.source = _get_vtk().vtkLineSource()
         
         # Find the deformed position of the local i-node
         # Step through each node
@@ -864,7 +880,7 @@ class VisPtLoad():
         unitVector = direction/norm(direction)
       
         # Create a 'vtkAppendPolyData' filter to append the tip and shaft together into a single dataset
-        self.polydata = vtk.vtkAppendPolyData()
+        self.polydata = _get_vtk().vtkAppendPolyData()
       
         # Determine if the load is positive or negative
         if length == 0:
@@ -875,7 +891,7 @@ class VisPtLoad():
         # Generate the tip of the load arrow
         tip_length = abs(length)/4
         radius = abs(length)/16
-        tip = vtk.vtkConeSource()
+        tip = _get_vtk().vtkConeSource()
         tip.SetCenter(position[0] - tip_length*sign*0.5*unitVector[0], \
                       position[1] - tip_length*sign*0.5*unitVector[1], \
                       position[2] - tip_length*sign*0.5*unitVector[2])
@@ -888,7 +904,7 @@ class VisPtLoad():
         self.polydata.AddInputData(tip.GetOutput())
         
         # Create the shaft
-        shaft = vtk.vtkLineSource()
+        shaft = _get_vtk().vtkLineSource()
         shaft.SetPoint1(position)
         shaft.SetPoint2((position[0]-length*unitVector[0], position[1]-length*unitVector[1], position[2]-length*unitVector[2]))
         shaft.Update()
@@ -898,9 +914,9 @@ class VisPtLoad():
         self.polydata.Update()
       
         # Create a mapper and actor
-        mapper = vtk.vtkPolyDataMapper()
+        mapper = _get_vtk().vtkPolyDataMapper()
         mapper.SetInputConnection(self.polydata.GetOutputPort())
-        self.actor = vtk.vtkActor()
+        self.actor = _get_vtk().vtkActor()
 
         # Set the colors to match the theme
         if theme == 'default':
@@ -914,15 +930,15 @@ class VisPtLoad():
         if label_text != None:
       
             # Create the label and set its text
-            self.label = vtk.vtkVectorText()
+            self.label = _get_vtk().vtkVectorText()
             self.label.SetText(label_text)
         
             # Set up a mapper for the label
-            lblMapper = vtk.vtkPolyDataMapper()
+            lblMapper = _get_vtk().vtkPolyDataMapper()
             lblMapper.SetInputConnection(self.label.GetOutputPort())
 
             # Set up an actor for the label
-            self.lblActor = vtk.vtkFollower()
+            self.lblActor = _get_vtk().vtkFollower()
             self.lblActor.SetMapper(lblMapper)
             self.lblActor.SetScale(annotation_size, annotation_size, annotation_size)
             self.lblActor.SetPosition(position[0] - (length - 0.6*annotation_size)*unitVector[0], \
@@ -980,12 +996,12 @@ class VisDistLoad():
             ptLoads.append(VisPtLoad(position, direction, length, label_text, annotation_size, theme))
           
         # Draw a line between the first and last load arrow's tails
-        tail_line = vtk.vtkLineSource()
+        tail_line = _get_vtk().vtkLineSource()
         tail_line.SetPoint1((position1[0] - length1*dirDirCos[0], position1[1] - length1*dirDirCos[1], position1[2] - length1*dirDirCos[2]))
         tail_line.SetPoint2((position2[0] - length2*dirDirCos[0], position2[1] - length2*dirDirCos[1], position2[2] - length2*dirDirCos[2]))
       
         # Combine all the geometry into one 'vtkPolyData' object
-        self.polydata = vtk.vtkAppendPolyData()
+        self.polydata = _get_vtk().vtkAppendPolyData()
         for arrow in ptLoads:
             arrow.polydata.Update()
             self.polydata.AddInputData(arrow.polydata.GetOutput())
@@ -995,9 +1011,9 @@ class VisDistLoad():
         self.polydata.Update()
       
         # Create a mapper and actor for the geometry
-        mapper = vtk.vtkPolyDataMapper()
+        mapper = _get_vtk().vtkPolyDataMapper()
         mapper.SetInputConnection(self.polydata.GetOutputPort())
-        self.actor = vtk.vtkActor()
+        self.actor = _get_vtk().vtkActor()
 
         # Set the color
         if theme == 'default':
@@ -1034,7 +1050,7 @@ class VisMoment():
         '''
 
         # Create an append filter to store load polydata in
-        self.polydata = vtk.vtkAppendPolyData()
+        self.polydata = _get_vtk().vtkAppendPolyData()
 
         # Find a vector perpendicular to the directional unit vector
         v1 = direction/norm(direction)  # v1 = The directional unit vector for the moment
@@ -1044,7 +1060,7 @@ class VisMoment():
 
         # Generate an arc for the moment
         Xc, Yc, Zc = center
-        arc = vtk.vtkArcSource()
+        arc = _get_vtk().vtkArcSource()
         arc.SetCenter(Xc, Yc, Zc)
         arc.SetPoint1(Xc + v2[0]*radius, Yc + v2[1]*radius, Zc + v2[2]*radius)
         arc.SetPoint2(Xc + v3[0]*radius, Yc + v3[1]*radius, Zc + v3[2]*radius)
@@ -1056,7 +1072,7 @@ class VisMoment():
         # Generate the arrow tip at the end of the arc
         tip_length = radius/2
         cone_radius = radius/8
-        tip = vtk.vtkConeSource()
+        tip = _get_vtk().vtkConeSource()
         tip.SetCenter(arc.GetPoint1()[0], arc.GetPoint1()[1], arc.GetPoint1()[2])
         tip.SetDirection(cross(v1, v2))
         tip.SetHeight(tip_length)
@@ -1068,11 +1084,11 @@ class VisMoment():
         self.polydata.Update()
 
         # Create the text label
-        label = vtk.vtkVectorText()
+        label = _get_vtk().vtkVectorText()
         label.SetText(label_text)
-        lblMapper = vtk.vtkPolyDataMapper()
+        lblMapper = _get_vtk().vtkPolyDataMapper()
         lblMapper.SetInputConnection(label.GetOutputPort())
-        self.lblActor = vtk.vtkFollower()
+        self.lblActor = _get_vtk().vtkFollower()
         self.lblActor.SetMapper(lblMapper)
         self.lblActor.SetScale(annotation_size, annotation_size, annotation_size)
         self.lblActor.SetPosition(Xc + v3[0]*(radius + 0.25*annotation_size), \
@@ -1108,7 +1124,7 @@ class VisAreaLoad():
         self.p3 = position3 - dirDirCos*length
 
         # Combine all geometry into one 'vtkPolyData' object
-        self.polydata = vtk.vtkAppendPolyData()
+        self.polydata = _get_vtk().vtkAppendPolyData()
         for arrow in ptLoads:
             self.polydata.AddInputData(arrow.polydata.GetOutput())
         self.polydata.Update()
@@ -1245,7 +1261,7 @@ def _DeformedShape(model, vtk_renderer, scale_factor, annotation_size, combo_nam
     ----------
     model : FEModel3D
         Finite element model to be rendered.
-    renderer : vtk.vtkRenderer
+    renderer : _get_vtk().vtkRenderer
         The VTK renderer object that will render the model.
     scale_factor : number
         The scale factor to apply to the model deformations.
@@ -1262,7 +1278,7 @@ def _DeformedShape(model, vtk_renderer, scale_factor, annotation_size, combo_nam
     '''
     
     # Create an append filter to add all the shape polydata to
-    append_filter = vtk.vtkAppendPolyData()
+    append_filter = _get_vtk().vtkAppendPolyData()
     
     # Check if nodes are to be rendered
     if render_nodes == True:
@@ -1292,9 +1308,9 @@ def _DeformedShape(model, vtk_renderer, scale_factor, annotation_size, combo_nam
             append_filter.AddInputData(vis_member.source)
             
     # Create a mapper and actor for the append filter
-    mapper = vtk.vtkPolyDataMapper()
+    mapper = _get_vtk().vtkPolyDataMapper()
     mapper.SetInputConnection(append_filter.GetOutputPort())
-    actor = vtk.vtkActor()
+    actor = _get_vtk().vtkActor()
     actor.SetMapper(mapper)
 
     # Adjust the color
@@ -1311,14 +1327,14 @@ def _RenderLoads(model, renderer, annotation_size, combo_name, case, theme='defa
     # Create an append filter to store all the polydata in. This will allow us to use fewer actors to
     # display all the loads, which will greatly improve rendering speed as the user interacts. VTK
     # becomes very slow when a large number of actors are used.
-    polydata = vtk.vtkAppendPolyData()
+    polydata = _get_vtk().vtkAppendPolyData()
 
     # Polygons are treated as cells in VTK. Create a cell array to store all the area load polygons
     # in. We'll also create a list of points to store the polygon points in. The polydata for these
     # polygons will be stored separately from the other load data.
-    polygons = vtk.vtkCellArray()
-    polygon_points = vtk.vtkPoints()
-    polygon_polydata = vtk.vtkPolyData()
+    polygons = _get_vtk().vtkCellArray()
+    polygon_points = _get_vtk().vtkPoints()
+    polygon_polydata = _get_vtk().vtkPolyData()
 
     # Get the maximum load magnitudes that will be used to normalize the display scale
     max_pt_load, max_moment, max_dist_load, max_area_load = _MaxLoads(model, combo_name, case)
@@ -1499,7 +1515,7 @@ def _RenderLoads(model, renderer, annotation_size, combo_name, case, theme='defa
                 # Create a polygon based on the four points we just defined.
                 # The 1st number in `SetId()` is the local point id
                 # The 2nd number in `SetId()` is the global point id
-                polygon = vtk.vtkPolygon()
+                polygon = _get_vtk().vtkPolygon()
                 polygon.GetPointIds().SetNumberOfIds(4)
                 polygon.GetPointIds().SetId(0, i*4)
                 polygon.GetPointIds().SetId(1, i*4 + 1)
@@ -1524,9 +1540,9 @@ def _RenderLoads(model, renderer, annotation_size, combo_name, case, theme='defa
                 polygon_polydata.SetPolys(polygons)
 
     # Set up an actor and mapper for the loads
-    load_mapper = vtk.vtkPolyDataMapper()
+    load_mapper = _get_vtk().vtkPolyDataMapper()
     load_mapper.SetInputConnection(polydata.GetOutputPort())
-    load_actor = vtk.vtkActor()
+    load_actor = _get_vtk().vtkActor()
     load_actor.SetMapper(load_mapper)
 
     # Colorize the loads
@@ -1539,9 +1555,9 @@ def _RenderLoads(model, renderer, annotation_size, combo_name, case, theme='defa
     renderer.AddActor(load_actor)
 
     # Set up an actor and a mapper for the area load polygons
-    polygon_mapper = vtk.vtkPolyDataMapper()
+    polygon_mapper = _get_vtk().vtkPolyDataMapper()
     polygon_mapper.SetInputData(polygon_polydata)
-    polygon_actor = vtk.vtkActor()
+    polygon_actor = _get_vtk().vtkActor()
 
     # polygon_actor.GetProperty().SetOpacity(0.5)      # 50% opacity
     polygon_actor.SetMapper(polygon_mapper)
@@ -1556,16 +1572,16 @@ def _RenderLoads(model, renderer, annotation_size, combo_name, case, theme='defa
 def _RenderContours(model, renderer, deformed_shape, deformed_scale, color_map, scalar_bar, scalar_bar_text_size, combo_name, theme='default'):
 
     # Create a new `vtkCellArray` object to store the elements
-    plates = vtk.vtkCellArray()
+    plates = _get_vtk().vtkCellArray()
 
     # Create a `vtkPoints` object to store the coordinates of the corners of the elements
-    plate_points = vtk.vtkPoints()
+    plate_points = _get_vtk().vtkPoints()
 
     # Create 2 lists to store plate result
     # `results` will store the results in a Python iterable list
     # `plate_results` will store the results in a `vtkDoubleArray` for VTK
     results = []
-    plate_results = vtk.vtkDoubleArray()
+    plate_results = _get_vtk().vtkDoubleArray()
     plate_results.SetNumberOfComponents(1)
 
     # Each element will be assigned a unique element number `i` beginning at 0
@@ -1606,7 +1622,7 @@ def _RenderContours(model, renderer, deformed_shape, deformed_scale, color_map, 
         # Create a `vtkQuad` based on the four points we just defined
         # The 1st number in `SetId()` is the local point id
         # The 2nd number in `SetId()` is the global point id
-        quad = vtk.vtkQuad()
+        quad = _get_vtk().vtkQuad()
         quad.GetPointIds().SetId(0, i*4)
         quad.GetPointIds().SetId(1, i*4 + 1)
         quad.GetPointIds().SetId(2, i*4 + 2)
@@ -1639,16 +1655,16 @@ def _RenderContours(model, renderer, deformed_shape, deformed_scale, color_map, 
         i += 1
 
     # Create a `vtkPolyData` object to store plate data in
-    plate_polydata = vtk.vtkPolyData()
+    plate_polydata = _get_vtk().vtkPolyData()
 
     # Add the points and plates to the dataset
     plate_polydata.SetPoints(plate_points)
     plate_polydata.SetPolys(plates)
 
     # Setup actor and mapper for the plates
-    plate_mapper = vtk.vtkPolyDataMapper()
+    plate_mapper = _get_vtk().vtkPolyDataMapper()
     plate_mapper.SetInputData(plate_polydata)
-    plate_actor = vtk.vtkActor()
+    plate_actor = _get_vtk().vtkActor()
     plate_actor.SetMapper(plate_mapper)
 
     # Map the results to the plates
@@ -1657,11 +1673,11 @@ def _RenderContours(model, renderer, deformed_shape, deformed_scale, color_map, 
         plate_polydata.GetPointData().SetScalars(plate_results)
 
         # Create a `vtkLookupTable` for the colors used to map results
-        lut = vtk.vtkLookupTable()
+        lut = _get_vtk().vtkLookupTable()
         lut.SetTableRange(min(results), max(results))
         lut.SetNumberOfColors(256) 
         # The commented code below can be uncommented and modified to change the color scheme
-        # ctf = vtk.vtkColorTransferFunction()
+        # ctf = _get_vtk().vtkColorTransferFunction()
         # ctf.SetColorSpaceToDiverging()
         # ctf.AddRGBPoint(min(results), 255, 0, 255)  # Purple
         # ctf.AddRGBPoint(max(results), 255, 0, 0)    # Red
@@ -1678,13 +1694,13 @@ def _RenderContours(model, renderer, deformed_shape, deformed_scale, color_map, 
         if scalar_bar:
 
             if Renderer.scalar == None:
-                Renderer.scalar = vtk.vtkScalarBarActor()
+                Renderer.scalar = _get_vtk().vtkScalarBarActor()
 
             scalar = Renderer.scalar
 
             # This next group of lines controls the font on the scalar bar
             scalar.SetUnconstrainedFontSize(1)
-            scalar_text = vtk.vtkTextProperty()
+            scalar_text = _get_vtk().vtkTextProperty()
             scalar_text.SetFontSize(max(int(scalar_bar_text_size), 1))
             scalar_text.SetBold(1)
 
