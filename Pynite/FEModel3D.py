@@ -2157,8 +2157,27 @@ class FEModel3D():
                     K11_factored = lu_factor(K11)
             except Exception as e:
                 # Diagnose the root cause of the singular matrix
-                error_msg = Analysis._diagnose_singularity(self, K11, D1_indices, sparse)
-                raise Exception(error_msg) from e
+                from Pynite.Diagnostics import ModelDiagnostics
+                print('')
+                print('=' * 60)
+                print('ANALYSIS FAILED - Singular Stiffness Matrix')
+                print('=' * 60)
+                print('')
+                print('The stiffness matrix could not be factored, which means the')
+                print('structure has one or more rigid body modes (it can move freely).')
+                print('')
+                print('Running diagnostics to identify root cause...')
+                print('')
+
+                diagnostics = ModelDiagnostics(self)
+                report = diagnostics.run_full_diagnosis()
+                diagnostic_text = report.format(verbose=True)
+                print(diagnostic_text)
+
+                raise Analysis.AnalysisError(
+                    'The stiffness matrix is singular (structure is unstable)',
+                    diagnostic_text
+                ) from e
 
         # Step through each load combination
         for combo in combo_list:
