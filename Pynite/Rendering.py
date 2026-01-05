@@ -3,9 +3,7 @@ from json import load
 import warnings
 from typing import TYPE_CHECKING, Callable, List, Any
 
-from IPython.display import Image
 import numpy as np
-import pyvista as pv
 import math
 
 # For type checking only - these imports are only used during type checking
@@ -15,14 +13,31 @@ if TYPE_CHECKING:
     from Pynite.Member3D import Member3D
     from Pynite.Spring3D import Spring3D
     from Pynite.FEModel3D import FEModel3D
+    import pyvista as pv
 
-# Allow for 3D interaction within jupyter notebook using trame
-try:
-    pv.global_theme.trame.jupyter_extension_enabled = True
-except:
-    # Ignore the exception that is produced if we are not running the code via jupyter
-    pass
-pv.set_jupyter_backend('trame')
+# Lazy loading for pyvista - only import when actually needed
+_pv = None
+
+def _get_pv():
+    """Lazily load pyvista module when needed."""
+    global _pv
+    if _pv is None:
+        try:
+            import pyvista as pv
+            # Allow for 3D interaction within jupyter notebook using trame
+            try:
+                pv.global_theme.trame.jupyter_extension_enabled = True
+            except:
+                # Ignore the exception that is produced if we are not running the code via jupyter
+                pass
+            pv.set_jupyter_backend('trame')
+            _pv = pv
+        except ImportError:
+            raise ImportError(
+                "pyvista is required for visualization features. "
+                "Install it with: pip install pyvista"
+            )
+    return _pv
 
 class Renderer:
     """Used to render finite element models.
@@ -50,11 +65,11 @@ class Renderer:
 
         # Callback list for post-update customization:
         # This is added because `self.update()` clears the plotter, removing user self.plotter configurations.
-        # Functions in this list run after Pynite adds actors, allowing further PyVista customizations 
+        # Functions in this list run after Pynite adds actors, allowing further PyVista customizations
         # (e.g., grid, axes) before render. Each func in this list must accept a `pyvista.Plotter` argument.
         self.post_update_callbacks: List[Callable[[pv.Plotter], None]] = []
 
-        self.plotter: pv.Plotter = pv.Plotter()
+        self.plotter: pv.Plotter = _get_pv().Plotter()
         self.plotter.set_background('white')  # Setting background color
         # self.plotter.add_logo_widget('./Resources/Full Logo No Buffer - Transparent.png')
         # self.plotter.view_isometric()
@@ -360,7 +375,7 @@ class Renderer:
         if node.support_DX and node.support_DY and node.support_DZ and node.support_RX and node.support_RY and node.support_RZ:
             
             # Create a cube using PyVista
-            self.plotter.add_mesh(pv.Cube(center=(node.X, node.Y, node.Z),
+            self.plotter.add_mesh(_get_pv().Cube(center=(node.X, node.Y, node.Z),
                                           x_length=self.annotation_size*2,
                                           y_length=self.annotation_size*2,
                                           z_length=self.annotation_size*2),
@@ -370,7 +385,7 @@ class Renderer:
         elif node.support_DX and node.support_DY and node.support_DZ and not node.support_RX and not node.support_RY and not node.support_RZ:
             
             # Create a cone using PyVista's Cone function
-            self.plotter.add_mesh(pv.Cone(center=(node.X, node.Y - self.annotation_size, node.Z),
+            self.plotter.add_mesh(_get_pv().Cone(center=(node.X, node.Y - self.annotation_size, node.Z),
                                           direction=(0, 1, 0),
                                           height=self.annotation_size*2,
                                           radius=self.annotation_size*2),
@@ -380,24 +395,24 @@ class Renderer:
         else:
 
             # Generate a sphere for the node
-            # sphere = pv.Sphere(center=(X, Y, Z), radius=0.4*self.annotation_size)
+            # sphere = _get_pv().Sphere(center=(X, Y, Z), radius=0.4*self.annotation_size)
             # self.plotter.add_mesh(sphere, name='Node: '+ node.name, color=color)
             
             # Restrained against X translation
             if node.support_DX:
 
                 # Line showing support direction
-                self.plotter.add_mesh(pv.Line((node.X - self.annotation_size, node.Y, node.Z),
+                self.plotter.add_mesh(_get_pv().Line((node.X - self.annotation_size, node.Y, node.Z),
                                               (node.X + self.annotation_size, node.Y, node.Z)),
                                       color=color)
 
                 # Cones at both ends
-                self.plotter.add_mesh(pv.Cone(center=(node.X - self.annotation_size, node.Y,
+                self.plotter.add_mesh(_get_pv().Cone(center=(node.X - self.annotation_size, node.Y,
                                                       node.Z),
                                               direction=(1, 0, 0), height=self.annotation_size*0.6,
                                               radius=self.annotation_size*0.3),
                                       color=color)
-                self.plotter.add_mesh(pv.Cone(center=(node.X + self.annotation_size, node.Y,
+                self.plotter.add_mesh(_get_pv().Cone(center=(node.X + self.annotation_size, node.Y,
                                                       node.Z),
                                               direction=(-1, 0, 0),
                                               height=self.annotation_size*0.6,
@@ -408,17 +423,17 @@ class Renderer:
             if node.support_DY:
 
                 # Line showing support direction
-                self.plotter.add_mesh(pv.Line((node.X, node.Y - self.annotation_size, node.Z),
+                self.plotter.add_mesh(_get_pv().Line((node.X, node.Y - self.annotation_size, node.Z),
                                               (node.X, node.Y + self.annotation_size, node.Z)),
                                       color=color)
 
                 # Cones at both ends
-                self.plotter.add_mesh(pv.Cone(center=(node.X, node.Y - self.annotation_size,
+                self.plotter.add_mesh(_get_pv().Cone(center=(node.X, node.Y - self.annotation_size,
                                                       node.Z), direction=(0, 1, 0),
                                                       height=self.annotation_size*0.6,
                                                       radius=self.annotation_size*0.3),
                                       color=color)
-                self.plotter.add_mesh(pv.Cone(center=(node.X, node.Y + self.annotation_size,
+                self.plotter.add_mesh(_get_pv().Cone(center=(node.X, node.Y + self.annotation_size,
                                                       node.Z),
                                                       direction=(0, -1, 0),
                                                       height=self.annotation_size*0.6,
@@ -429,17 +444,17 @@ class Renderer:
             if node.support_DZ:
 
                 # Line showing support direction
-                self.plotter.add_mesh(pv.Line((node.X, node.Y, node.Z-self.annotation_size),
+                self.plotter.add_mesh(_get_pv().Line((node.X, node.Y, node.Z-self.annotation_size),
                                               (node.X, node.Y, node.Z+self.annotation_size)),
                                       color=color)
 
                 # Cones at both ends
-                self.plotter.add_mesh(pv.Cone(center=(node.X, node.Y, node.Z-self.annotation_size),
+                self.plotter.add_mesh(_get_pv().Cone(center=(node.X, node.Y, node.Z-self.annotation_size),
                                               direction=(0, 0, 1),
                                               height=self.annotation_size*0.6,
                                               radius=self.annotation_size*0.3),
                                       color=color)
-                self.plotter.add_mesh(pv.Cone(center=(node.X, node.Y, node.Z+self.annotation_size),
+                self.plotter.add_mesh(_get_pv().Cone(center=(node.X, node.Y, node.Z+self.annotation_size),
                                               direction=(0, 0, -1),
                                               height=self.annotation_size*0.6,
                                               radius=self.annotation_size*0.3),
@@ -449,18 +464,18 @@ class Renderer:
             if node.support_RX:
 
                 # Line showing support direction
-                self.plotter.add_mesh(pv.Line((node.X-1.6*self.annotation_size, node.Y, node.Z),
+                self.plotter.add_mesh(_get_pv().Line((node.X-1.6*self.annotation_size, node.Y, node.Z),
                                               (node.X+1.6*self.annotation_size, node.Y, node.Z)),
                                       color=color)
 
                 # Cubes at both ends
-                self.plotter.add_mesh(pv.Cube(center=(node.X-1.9*self.annotation_size, node.Y,
+                self.plotter.add_mesh(_get_pv().Cube(center=(node.X-1.9*self.annotation_size, node.Y,
                                                       node.Z),
                                               x_length=self.annotation_size*0.6,
                                               y_length=self.annotation_size*0.6,
                                               z_length=self.annotation_size*0.6),
                                       color=color)
-                self.plotter.add_mesh(pv.Cube(center=(node.X+1.9 *self.annotation_size, node.Y,
+                self.plotter.add_mesh(_get_pv().Cube(center=(node.X+1.9 *self.annotation_size, node.Y,
                                                       node.Z),
                                               x_length=self.annotation_size*0.6,
                                               y_length=self.annotation_size*0.6,
@@ -471,18 +486,18 @@ class Renderer:
             if node.support_RY:
 
                 # Line showing support direction
-                self.plotter.add_mesh(pv.Line((node.X, node.Y-1.6*self.annotation_size, node.Z),
+                self.plotter.add_mesh(_get_pv().Line((node.X, node.Y-1.6*self.annotation_size, node.Z),
                                               (node.X, node.Y+1.6*self.annotation_size, node.Z)),
                                       color=color)
 
                 # Cubes at both ends
-                self.plotter.add_mesh(pv.Cube(center=(node.X, node.Y-1.9*self.annotation_size,
+                self.plotter.add_mesh(_get_pv().Cube(center=(node.X, node.Y-1.9*self.annotation_size,
                                                       node.Z),
                                               x_length=self.annotation_size*0.6,
                                               y_length=self.annotation_size*0.6,
                                               z_length=self.annotation_size*0.6),
                                       color=color)
-                self.plotter.add_mesh(pv.Cube(center=(node.X, node.Y+1.9*self.annotation_size,
+                self.plotter.add_mesh(_get_pv().Cube(center=(node.X, node.Y+1.9*self.annotation_size,
                                                       node.Z),
                                               x_length=self.annotation_size*0.6,
                                               y_length=self.annotation_size*0.6,
@@ -493,18 +508,18 @@ class Renderer:
             if node.support_RZ:
 
                 # Line showing support direction
-                self.plotter.add_mesh(pv.Line((node.X, node.Y, node.Z-1.6*self.annotation_size),
+                self.plotter.add_mesh(_get_pv().Line((node.X, node.Y, node.Z-1.6*self.annotation_size),
                                               (node.X, node.Y, node.Z+1.6*self.annotation_size)),
                                       color=color)
 
                 # Cubes at both ends
-                self.plotter.add_mesh(pv.Cube(center=(node.X, node.Y,
+                self.plotter.add_mesh(_get_pv().Cube(center=(node.X, node.Y,
                                                       node.Z-1.9*self.annotation_size),
                                               x_length=self.annotation_size*0.6,
                                               y_length=self.annotation_size*0.6,
                                               z_length=self.annotation_size*0.6),
                                       color=color)
-                self.plotter.add_mesh(pv.Cube(center=(node.X, node.Y,
+                self.plotter.add_mesh(_get_pv().Cube(center=(node.X, node.Y,
                                                       node.Z+1.9*self.annotation_size),
                                               x_length=self.annotation_size*0.6,
                                               y_length=self.annotation_size*0.6,
@@ -524,7 +539,7 @@ class Renderer:
         """
     
         # Generate a line for the member
-        line = pv.Line()
+        line = _get_pv().Line()
 
         Xi = member.i_node.X
         Yi = member.i_node.Y
@@ -611,7 +626,7 @@ class Renderer:
         lines[:, 2] = np.arange(1, num_points, dtype=int)
 
         # Create a PolyData object for the zig-zag line
-        zigzag_line = pv.PolyData(points, lines=lines)
+        zigzag_line = _get_pv().PolyData(points, lines=lines)
 
         # Create a plotter and add the zig-zag line
         self.plotter.add_mesh(zigzag_line, color=color, line_width=2)
@@ -691,7 +706,7 @@ class Renderer:
         plate_faces = np.array(plate_faces)
 
         # Create a new PyVista dataset to store plate data
-        plate_polydata = pv.PolyData(plate_vertices, plate_faces)
+        plate_polydata = _get_pv().PolyData(plate_vertices, plate_faces)
 
         # Add the results as point data to the PyVista dataset
         if color_map:
@@ -716,7 +731,7 @@ class Renderer:
         newZ = node.Z + scale_factor * (node.DZ[self.combo_name])
 
         # Generate a sphere source for the node in its deformed position
-        sphere = pv.Sphere(radius=0.4*self.annotation_size, center=[newX, newY, newZ])
+        sphere = _get_pv().Sphere(radius=0.4*self.annotation_size, center=[newX, newY, newZ])
 
         # Add the mesh to the plotter
         self.plotter.add_mesh(sphere, color=color)
@@ -773,7 +788,7 @@ class Renderer:
             
             # Create lines connecting the points
             for i in range(len(D_plot)-1):
-                line = pv.Line(D_plot[i], D_plot[i+1])
+                line = _get_pv().Line(D_plot[i], D_plot[i+1])
                 self.plotter.add_mesh(line, color='red', line_width=2)
 
     def plot_pt_load(self, position: Tuple[float, float, float], direction: Union[Tuple[float, float, float], np.ndarray], 
@@ -791,7 +806,7 @@ class Renderer:
         # Generate the tip of the load arrow
         tip_length = abs(length) / 4
         radius = abs(length) / 16
-        tip = pv.Cone(center=(position[0] - tip_length*sign*unitVector[0]/2,
+        tip = _get_pv().Cone(center=(position[0] - tip_length*sign*unitVector[0]/2,
                               position[1] - tip_length*sign*unitVector[1]/2,
                               position[2] - tip_length*sign*unitVector[2]/2),
                               direction=(direction[0]*sign, direction[1]*sign, direction[2]*sign),
@@ -804,7 +819,7 @@ class Renderer:
         X_tail = position[0] - unitVector[0]*length
         Y_tail = position[1] - unitVector[1]*length
         Z_tail = position[2] - unitVector[2]*length
-        shaft = pv.Line(pointa=position, pointb=(X_tail, Y_tail, Z_tail))
+        shaft = _get_pv().Line(pointa=position, pointb=(X_tail, Y_tail, Z_tail))
         
         # Save the data necessary to create the load's label
         if label_text is not None:
@@ -862,7 +877,7 @@ class Renderer:
             self.plot_pt_load(position, dir_dir_cos, length, label_text, color)
 
         # Draw a line between the first and last load arrow's tails (using cylinder here for better visualization)
-        tail_line = pv.Line(position1 - dir_dir_cos*length1, position2 - dir_dir_cos*length2)
+        tail_line = _get_pv().Line(position1 - dir_dir_cos*length1, position2 - dir_dir_cos*length2)
 
         # Combine all geometry into a single PolyData object
         self.plotter.add_mesh(tail_line, color=color)
@@ -878,7 +893,7 @@ class Renderer:
         v2 = _PerpVector(v1)
         
         # Generate the arc for the moment
-        arc = pv.CircularArcFromNormal(center, resolution=20, normal=v1, angle=215, polar=v2*radius)
+        arc = _get_pv().CircularArcFromNormal(center, resolution=20, normal=v1, angle=215, polar=v2*radius)
         
         # Add the arc to the plot
         self.plotter.add_mesh(arc, line_width=2, color=color)
@@ -887,7 +902,7 @@ class Renderer:
         tip_length = radius/4
         cone_radius = radius/16
         cone_direction = -np.cross(v1, arc.center - arc.points[-1])
-        tip = pv.Cone(center=arc.points[-1], direction=cone_direction, height=tip_length,
+        tip = _get_pv().Cone(center=arc.points[-1], direction=cone_direction, height=tip_length,
                       radius=cone_radius)
 
         # Add the tip to the plot
@@ -917,7 +932,7 @@ class Renderer:
         self.plot_pt_load(position3, dir_dir_cos, length, color=color)
 
         # Create the area load polygon (quad)
-        quad = pv.Quadrilateral([self.p0, self.p1, self.p2, self.p3])
+        quad = _get_pv().Quadrilateral([self.p0, self.p1, self.p2, self.p3])
 
         self.plotter.add_mesh(quad, color=color)
 

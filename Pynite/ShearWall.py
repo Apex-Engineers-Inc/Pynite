@@ -6,9 +6,6 @@ from typing import TYPE_CHECKING, Literal
 
 from prettytable import PrettyTable
 
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
-
 if TYPE_CHECKING:
     from typing import List, Dict, Tuple
     from Pynite.Quad3D import Quad3D
@@ -18,6 +15,26 @@ if TYPE_CHECKING:
 class ShearWall():
     """Creates a new shear wall model that allows for modeling of complex shear walls. You can add openings and flanges (wall returns or intersections). Diaphragm levels can be defined in order to apply shear forces along the length of the wall. Diaphragms can be full or partial length. Supports can be applied at any level in the shear wall. Supports can also be full or partial length. A `ky_mod` factor is built in to account for cracking. Shear walls can automatically detect shear wall piers and coupling beams, and sum internal forces in those components.
     """
+
+    # Class-level cache for matplotlib imports (lazy loading)
+    __plt = None
+    __Rectangle = None
+
+    @classmethod
+    def _load_matplotlib(cls):
+        """Lazily load matplotlib modules when needed."""
+        if cls.__plt is None:
+            try:
+                import matplotlib.pyplot as plt
+                from matplotlib.patches import Rectangle
+                cls.__plt = plt
+                cls.__Rectangle = Rectangle
+            except ImportError:
+                raise ImportError(
+                    "matplotlib is required for visualization features. "
+                    "Install it with: pip install matplotlib"
+                )
+        return cls.__plt, cls.__Rectangle
 
     def __init__(self, model, name, mesh_size, length, height, thickness, material_name, ky_mod=0.35, origin=[0, 0, 0], plane='XY') -> None:
 
@@ -630,14 +647,16 @@ class ShearWall():
                     beam.plates.append(plate)
 
     def draw_piers(self, show: bool = False) -> None | matplotlib.figure.Figure:
-        
+
+        plt, Rectangle = self._load_matplotlib()
+
         fig, ax = plt.subplots()
 
         ax.patch.set_facecolor((0.8, 0.8, 0.8))
 
         for pier in self.piers.values():
             self._add_rectangle(ax, pier.x, pier.y, pier.width, pier.height, pier.name)
-        
+
         # Adjust the aspect ratio of the plot
         ax.set_aspect('equal')
 
@@ -649,7 +668,9 @@ class ShearWall():
         else: return plt
 
     def draw_coupling_beams(self, show: bool = False) -> None | matplotlib.figure.Figure:
-        
+
+        plt, Rectangle = self._load_matplotlib()
+
         fig, ax = plt.subplots()
 
         ax.patch.set_facecolor((0.8, 0.8, 0.8))
@@ -663,7 +684,7 @@ class ShearWall():
 
         for beam in self.coupling_beams.values():
             self._add_rectangle(ax, beam.x, beam.y, beam.length, beam.height, beam.name, 'white')
-        
+
         # Adjust the aspect ratio of the plot
         ax.set_aspect('equal')
 
@@ -677,6 +698,8 @@ class ShearWall():
     def _add_rectangle(self, ax: matplotlib.axes.Axes, x: float, y: float, w: float, h: float, name: str, color: str = 'white') -> None:
         """Adds a rectangle to the pyplot
         """
+
+        plt, Rectangle = self._load_matplotlib()
 
         # create rectangle
         rect = Rectangle((x, y), w, h, linewidth=1, edgecolor='r', facecolor=color)

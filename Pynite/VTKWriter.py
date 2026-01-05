@@ -5,7 +5,6 @@ This module contains the VTKWriter class, which fetches the FEModel3D data and w
 
 from __future__ import annotations # Allows more recent type hints features
 
-import vtk
 import os
 import tempfile
 import subprocess
@@ -18,6 +17,23 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import Dict, Tuple, List
     from Pynite.FEModel3D import FEModel3D, Member3D
+
+# Lazy loading for vtk - only import when actually needed
+_vtk = None
+
+def _get_vtk():
+    """Lazily load vtk module when needed."""
+    global _vtk
+    if _vtk is None:
+        try:
+            import vtk
+            _vtk = vtk
+        except ImportError:
+            raise ImportError(
+                "vtk is required for VTK file writing features. "
+                "Install it with: pip install vtk"
+            )
+    return _vtk
 
 class VTKWriter:
     """
@@ -70,49 +86,49 @@ class VTKWriter:
         if self.log:
             print("- collecting node data...")
 
-        ugrid = vtk.vtkUnstructuredGrid()
-        points = vtk.vtkPoints()
+        ugrid = _get_vtk().vtkUnstructuredGrid()
+        points = _get_vtk().vtkPoints()
 
-        node_names = vtk.vtkStringArray()
+        node_names = _get_vtk().vtkStringArray()
         node_names.SetName("Name")
 
-        node_cells = vtk.vtkCellArray()
+        node_cells = _get_vtk().vtkCellArray()
         node_ids: Dict[str, int] = {}
         for node in self.model.nodes.values():
             point_id = points.InsertNextPoint(node.X, node.Y, node.Z)
             node_ids[node.name] = point_id
             node_names.InsertValue(point_id, node.name)
-            vert = vtk.vtkVertex()
+            vert = _get_vtk().vtkVertex()
             vert.GetPointIds().SetId(0, point_id)
             node_cells.InsertNextCell(vert)
 
         ugrid.SetPoints(points)
-        ugrid.SetCells(vtk.VTK_POINT_DATA, node_cells)
+        ugrid.SetCells(_get_vtk().VTK_POINT_DATA, node_cells)
         ugrid.GetPointData().AddArray(node_names)
 
         #### LOAD SPECIFIC DATA ####
         for combo in self.model.load_combos.keys():
-            reaction_constraints = vtk.vtkIntArray()
+            reaction_constraints = _get_vtk().vtkIntArray()
             reaction_constraints.SetName("Reaction Constraints")
             reaction_constraints.SetNumberOfComponents(6)
 
-            displacements = vtk.vtkDoubleArray()
+            displacements = _get_vtk().vtkDoubleArray()
             displacements.SetName("Displacements D")
             displacements.SetNumberOfComponents(3)
 
-            forces = vtk.vtkDoubleArray()
+            forces = _get_vtk().vtkDoubleArray()
             forces.SetName(f"Force Reactions F - {combo}")
             forces.SetNumberOfComponents(3)
 
-            moments = vtk.vtkDoubleArray()
+            moments = _get_vtk().vtkDoubleArray()
             moments.SetName(f"Moment Reactions M - {combo}")
             moments.SetNumberOfComponents(3)
 
-            force_loads = vtk.vtkDoubleArray()
+            force_loads = _get_vtk().vtkDoubleArray()
             force_loads.SetName(f"Loads F - {combo}")
             force_loads.SetNumberOfComponents(3)
 
-            moment_loads = vtk.vtkDoubleArray()
+            moment_loads = _get_vtk().vtkDoubleArray()
             moment_loads.SetName(f"Loads M - {combo}")
             moment_loads.SetNumberOfComponents(3)
 
@@ -145,7 +161,7 @@ class VTKWriter:
             ugrid.GetPointData().AddArray(force_loads)
             ugrid.GetPointData().AddArray(moment_loads)
 
-        writer = vtk.vtkUnstructuredGridWriter()
+        writer = _get_vtk().vtkUnstructuredGridWriter()
         writer.SetFileName(path)
         writer.SetInputData(ugrid)
         writer.Write()
@@ -162,16 +178,16 @@ class VTKWriter:
         if self.log:
             print(f"- collecting member data ({len(self.model.members)})...")
 
-        points = vtk.vtkPoints()
+        points = _get_vtk().vtkPoints()
 
         #### CREATE LINE CELLS ####
         # each (sub)member is further subdivided into line segments
-        lines = vtk.vtkCellArray()
-        submembers: List[Tuple[Tuple[float, float], Member3D, vtk.vtkLine]] = []
+        lines = _get_vtk().vtkCellArray()
+        submembers: List[Tuple[Tuple[float, float], Member3D, _get_vtk().vtkLine]] = []
         for member in self.model.members.values():
             if len(member.sub_members) == 0:
                 # The model has not been analyzed yet. Only add straight lines between the nodes
-                line = vtk.vtkLine()
+                line = _get_vtk().vtkLine()
                 line.SetObjectName(member.name)
                 line.GetPointIds().SetId(0, points.InsertNextPoint(member.i_node.X, member.i_node.Y, member.i_node.Z))
                 line.GetPointIds().SetId(1, points.InsertNextPoint(member.j_node.X, member.j_node.Y, member.j_node.Z))
@@ -192,53 +208,53 @@ class VTKWriter:
                             end,
                         )
 
-                        line = vtk.vtkLine()
+                        line = _get_vtk().vtkLine()
                         line.SetObjectName(member.name)
                         line.GetPointIds().SetId(0, points.InsertNextPoint(*p1))
                         line.GetPointIds().SetId(1, points.InsertNextPoint(*p2))
                         submembers.append(((start, end), subm, line))
                         lines.InsertNextCell(line)
 
-        ugrid_members = vtk.vtkUnstructuredGrid()
+        ugrid_members = _get_vtk().vtkUnstructuredGrid()
         ugrid_members.SetPoints(points)
-        ugrid_members.SetCells(vtk.VTK_LINE, lines)
+        ugrid_members.SetCells(_get_vtk().VTK_LINE, lines)
 
         #### MEMBER Data ####
         for combo in self.model.load_combos.keys():
             # Displacement
-            D_array_G = vtk.vtkDoubleArray()
+            D_array_G = _get_vtk().vtkDoubleArray()
             D_array_G.SetNumberOfComponents(3)
             D_array_G.SetName(f"Displacement D - {combo}")
 
-            D_array_lok = vtk.vtkDoubleArray()
+            D_array_lok = _get_vtk().vtkDoubleArray()
             D_array_lok.SetNumberOfComponents(3)
             D_array_lok.SetName(f"Displacement d - {combo}")
 
             # Moments
-            moment_G = vtk.vtkDoubleArray()
+            moment_G = _get_vtk().vtkDoubleArray()
             moment_G.SetNumberOfComponents(3)
             moment_G.SetName(f"Moments M - {combo}")
 
-            moment_lok = vtk.vtkDoubleArray()
+            moment_lok = _get_vtk().vtkDoubleArray()
             moment_lok.SetNumberOfComponents(3)
             moment_lok.SetName(f"Moments m - {combo}")
 
             # Forces
-            force_G = vtk.vtkDoubleArray()
+            force_G = _get_vtk().vtkDoubleArray()
             force_G.SetNumberOfComponents(3)
             force_G.SetName(f"Forces F - {combo}")
 
-            force_lok = vtk.vtkDoubleArray()
+            force_lok = _get_vtk().vtkDoubleArray()
             force_lok.SetNumberOfComponents(3)
             force_lok.SetName(f"Forces f - {combo}")
 
             # Bending Stress increase
             # Can be used with the Paraview Calculator Filter to get bending stresses at a given location by multiplying with the axial distance
-            sigma_b_G = vtk.vtkDoubleArray()
+            sigma_b_G = _get_vtk().vtkDoubleArray()
             sigma_b_G.SetNumberOfComponents(3)
             sigma_b_G.SetName(f"Sigma/r - {combo}")
 
-            sigma_b_lok = vtk.vtkDoubleArray()
+            sigma_b_lok = _get_vtk().vtkDoubleArray()
             sigma_b_lok.SetNumberOfComponents(3)
             sigma_b_lok.SetName(f"sigma/r - {combo}")
 
@@ -280,14 +296,14 @@ class VTKWriter:
             ugrid_members.GetPointData().AddArray(sigma_b_lok)
 
         # clean the data from duplicate points
-        cleaner = vtk.vtkStaticCleanUnstructuredGrid()
+        cleaner = _get_vtk().vtkStaticCleanUnstructuredGrid()
         cleaner.SetInputData(ugrid_members)
         cleaner.SetToleranceIsAbsolute(True)
         cleaner.SetAbsoluteTolerance(0.01)
         cleaner.Update()
         ugrid_members = cleaner.GetOutput()
 
-        member_writer = vtk.vtkUnstructuredGridWriter()
+        member_writer = _get_vtk().vtkUnstructuredGridWriter()
         member_writer.SetFileName(path)
         member_writer.SetInputData(ugrid_members)
         member_writer.Write()
@@ -327,16 +343,16 @@ class VTKWriter:
             7:(-1,0),
             8:(0,0),
         }
-        ugrid = vtk.vtkUnstructuredGrid() # this holds all data and gets written to .vtk at the end
-        points = vtk.vtkPoints() # this holds all Point data
-        quads = vtk.vtkCellArray() # this holds all cell data. A cell is in this case the vtkBiQuadraticQuads
+        ugrid = _get_vtk().vtkUnstructuredGrid() # this holds all data and gets written to .vtk at the end
+        points = _get_vtk().vtkPoints() # this holds all Point data
+        quads = _get_vtk().vtkCellArray() # this holds all cell data. A cell is in this case the vtkBiQuadraticQuads
 
         # keeps track of all vtk subquads for every Pynite Quad by name
-        quad_references: Dict[str, List[vtk.vtkBiQuadraticQuad]] = {}
+        quad_references: Dict[str, List[_get_vtk().vtkBiQuadraticQuad]] = {}
 
         # this loops through every Pynite quad and creates 4 vtkBiQuadraticQuad elements and their point data
         for quad in self.model.quads.values():
-            quad_references[quad.name] = [vtk.vtkBiQuadraticQuad() for i in range(4)]
+            quad_references[quad.name] = [_get_vtk().vtkBiQuadraticQuad() for i in range(4)]
             # corner coordinates of the Pynite quad
             i_coords = np.array((quad.i_node.X, quad.i_node.Y, quad.i_node.Z))
             j_coords = np.array((quad.j_node.X, quad.j_node.Y, quad.j_node.Z))
@@ -365,34 +381,34 @@ class VTKWriter:
         for combo in self.model.load_combos.keys():
             # firstly, instantiate all data arrays for every load combo
             # Displacement Data
-            D = vtk.vtkDoubleArray()
+            D = _get_vtk().vtkDoubleArray()
             D.SetName(f"Displacement - {combo}")
             D.SetNumberOfComponents(3)
 
             # Membrane Data
-            membrane_loc = vtk.vtkDoubleArray()
+            membrane_loc = _get_vtk().vtkDoubleArray()
             membrane_loc.SetName(f"Membrane Stresses sigma - {combo}")
             membrane_loc.SetNumberOfComponents(3)
             
-            membrane_glob = vtk.vtkDoubleArray()
+            membrane_glob = _get_vtk().vtkDoubleArray()
             membrane_glob.SetName(f"Membrane Stresses Sigma - {combo}")
             membrane_glob.SetNumberOfComponents(3)
 
             # Moment Data
-            moments_loc = vtk.vtkDoubleArray()
+            moments_loc = _get_vtk().vtkDoubleArray()
             moments_loc.SetName(f"Moments m - {combo}")
             moments_loc.SetNumberOfComponents(3)
 
-            moments_glob = vtk.vtkDoubleArray()
+            moments_glob = _get_vtk().vtkDoubleArray()
             moments_glob.SetName(f"Moments M - {combo}")
             moments_glob.SetNumberOfComponents(3)
 
             # SHEAR Data
-            shear_loc = vtk.vtkDoubleArray()
+            shear_loc = _get_vtk().vtkDoubleArray()
             shear_loc.SetName(f"Forces f - {combo}")
             shear_loc.SetNumberOfComponents(3)
 
-            shear_glob = vtk.vtkDoubleArray()
+            shear_glob = _get_vtk().vtkDoubleArray()
             shear_glob.SetName(f"Forces F - {combo}")
             shear_glob.SetNumberOfComponents(3)
 
@@ -469,10 +485,10 @@ class VTKWriter:
 
 
         ugrid.SetPoints(points)
-        ugrid.SetCells(vtk.VTK_BIQUADRATIC_QUAD, quads)
+        ugrid.SetCells(_get_vtk().VTK_BIQUADRATIC_QUAD, quads)
 
         # clean the data from duplicate points
-        cleaner = vtk.vtkStaticCleanUnstructuredGrid()
+        cleaner = _get_vtk().vtkStaticCleanUnstructuredGrid()
         cleaner.SetInputData(ugrid)
         cleaner.SetToleranceIsAbsolute(True)
         cleaner.SetAbsoluteTolerance(0.01)
@@ -480,7 +496,7 @@ class VTKWriter:
         ugrid = cleaner.GetOutput()
 
         #### WRITE DATA TO DISK ####
-        quads_writer = vtk.vtkUnstructuredGridWriter()
+        quads_writer = _get_vtk().vtkUnstructuredGridWriter()
         quads_writer.SetFileName(path)
         quads_writer.SetInputData(ugrid)
         quads_writer.Write()
