@@ -397,6 +397,16 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
             # Store the calculated displacements
             _store_displacements(model, D1, D2, D1_indices, D2_indices, model.load_combos[combo_name])
 
+            # Clear member displacement/force caches so they pick up the updated nodal displacements
+            # This is critical for P-Delta analysis where displacements change between solution steps
+            for phys_member in model.members.values():
+                for member in phys_member.sub_members.values():
+                    if hasattr(member, '_clear_results_cache'):
+                        member._clear_results_cache()
+                    elif hasattr(member, '_cached_d'):
+                        member._cached_d = {}
+                        member._cached_f = {}
+
         # Check whether the tension/compression-only analysis has converged and deactivate any members that are showing forces they can't hold
         convergence_TC = _check_TC_convergence(model, combo_name, log)
 
