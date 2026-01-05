@@ -3,7 +3,6 @@ from json import load
 import warnings
 from typing import TYPE_CHECKING, Callable, List, Any
 
-from IPython.display import Image
 import numpy as np
 import math
 
@@ -68,9 +67,9 @@ class Renderer:
         # This is added because `self.update()` clears the plotter, removing user self.plotter configurations.
         # Functions in this list run after Pynite adds actors, allowing further PyVista customizations
         # (e.g., grid, axes) before render. Each func in this list must accept a `pyvista.Plotter` argument.
-        self.post_update_callbacks: List[Callable[["pv.Plotter"], None]] = []
+        self.post_update_callbacks: List[Callable[[pv.Plotter], None]] = []
 
-        self.plotter: "pv.Plotter" = _get_pv().Plotter()
+        self.plotter: pv.Plotter = _get_pv().Plotter()
         self.plotter.set_background('white')  # Setting background color
         # self.plotter.add_logo_widget('./Resources/Full Logo No Buffer - Transparent.png')
         # self.plotter.view_isometric()

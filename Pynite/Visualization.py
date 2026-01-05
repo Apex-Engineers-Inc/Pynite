@@ -2,7 +2,6 @@ from __future__ import annotations # Allows more recent type hints features
 from json import load
 import warnings
 
-from IPython.display import Image
 from numpy import array, empty, append, cross
 from numpy.linalg import norm
 
@@ -199,6 +198,7 @@ class Renderer():
             window.Finalize()
 
             if filepath == 'console':
+                from IPython.display import Image
                 return Image(fig_file)
             elif filepath == 'BytesIO':
                 from io import BytesIO
