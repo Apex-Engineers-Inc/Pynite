@@ -1999,8 +1999,8 @@ class FEModel3D():
     #     self.solution = 'Linear TC'
 
     @staticmethod
-    def _solve_combo_linear_worker(model, combo, K11, K11_factored, K12, K12_csr, D2,
-                                   D1_indices, D2_indices, sparse):
+    def _solve_combo_linear_worker(model: 'FEModel3D', combo: LoadCombo, K11, K11_factored, K12, K12_csr, D2,
+                                   D1_indices: list[int], D2_indices: list[int], sparse: bool):
         """Worker function to solve a single load combination in parallel.
 
         This function is designed to be called from ThreadPoolExecutor for parallel
@@ -2026,28 +2026,28 @@ class FEModel3D():
 
         # Calculate the global displacement vector
         if K11.shape == (0, 0):
-            # All displacements are known, so D1 is an empty vector
-            D1 = []
+            # All displacements are known, so disp1 is an empty vector
+            disp1 = []
         else:
-            # Calculate the unknown displacements D1
+            # Calculate the unknown displacements disp1
             if sparse:
                 # Use the factored sparse matrix (SuperLU object)
                 # The solve method of SuperLU performs back-substitution
-                D1 = K11_factored.solve(subtract(subtract(P1, FER1), K12_csr @ D2))
-                D1 = D1.reshape(len(D1), 1)
+                disp1 = K11_factored.solve(subtract(subtract(P1, FER1), K12_csr @ D2))
+                disp1 = disp1.reshape(len(disp1), 1)
             else:
                 # Use the factored dense matrix (LU factorization tuple)
                 from scipy.linalg import lu_solve
-                D1 = lu_solve(K11_factored, subtract(subtract(P1, FER1), matmul(K12, D2)))
+                disp1 = lu_solve(K11_factored, subtract(subtract(P1, FER1), matmul(K12, D2)))
 
             # Check for NaN or Inf values which indicate a singular matrix
-            if np.any(np.isnan(D1)) or np.any(np.isinf(D1)):
+            if np.any(np.isnan(disp1)) or np.any(np.isinf(disp1)):
                 raise ValueError(f"Solution for combo '{combo.name}' contains NaN or Inf values - matrix is singular")
 
-        return (combo, D1)
+        return (combo, disp1)
 
-    def analyze_linear(self, log=False, check_stability=True, check_statics=False, sparse=True,
-                      combo_tags=None, parallel=True, max_workers=None):
+    def analyze_linear(self, log: bool = False, check_stability: bool = True, check_statics: bool = False, sparse: bool = True,
+                      combo_tags = None, parallel: bool = True, max_workers: int | None = None):
         """Performs first-order static analysis. This analysis procedure is much faster since it only assembles the global stiffness matrix once, rather than once for each load combination. It is not appropriate when non-linear behavior such as tension/compression only analysis or P-Delta analysis are required.
 
         :param log: Prints the analysis log to the console if set to True. Default is False.

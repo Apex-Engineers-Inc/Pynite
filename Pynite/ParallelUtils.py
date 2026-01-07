@@ -7,7 +7,6 @@ and parallelizing load combination analysis using ThreadPoolExecutor.
 
 import sys
 import os
-from typing import Optional
 
 
 def is_free_threaded() -> bool:
@@ -34,7 +33,9 @@ def is_free_threaded() -> bool:
     if hasattr(sys, '_is_gil_enabled'):
         try:
             # If GIL is disabled, we're in free-threaded mode
-            return not sys._is_gil_enabled()
+            # Use getattr to avoid type checker issues with private attribute
+            is_gil_enabled = getattr(sys, '_is_gil_enabled')
+            return not is_gil_enabled()
         except Exception:
             # If there's any error calling the function, assume GIL is enabled
             return False
@@ -43,7 +44,7 @@ def is_free_threaded() -> bool:
     return False
 
 
-def get_optimal_worker_count(combo_count: int, max_workers: Optional[int] = None) -> int:
+def get_optimal_worker_count(combo_count: int, max_workers: int | None = None) -> int:
     """
     Determine the optimal number of worker threads for parallelizing load combinations.
 
