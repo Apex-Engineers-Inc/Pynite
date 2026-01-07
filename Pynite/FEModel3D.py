@@ -20,6 +20,7 @@ from Pynite.LoadCombo import LoadCombo
 from Pynite.Mesh import Mesh, RectangleMesh, AnnulusMesh, FrustrumMesh, CylinderMesh
 from Pynite.ShearWall import ShearWall
 from Pynite import Analysis
+from Pynite.ParallelUtils import is_free_threaded, get_optimal_worker_count
 
 if TYPE_CHECKING:
     from typing import Dict, List, Tuple, Union, Any
@@ -1997,7 +1998,56 @@ class FEModel3D():
     #     # Flag the model as solved
     #     self.solution = 'Linear TC'
 
-    def analyze_linear(self, log=False, check_stability=True, check_statics=False, sparse=True, combo_tags=None):
+    @staticmethod
+    def _solve_combo_linear_worker(model, combo, K11, K11_factored, K12, K12_csr, D2,
+                                   D1_indices, D2_indices, sparse):
+        """Worker function to solve a single load combination in parallel.
+
+        This function is designed to be called from ThreadPoolExecutor for parallel
+        execution on free-threaded Python (Python 3.14t with no GIL).
+
+        :param model: The finite element model
+        :param combo: The load combination to solve
+        :param K11: The partitioned stiffness matrix (used for dense solve)
+        :param K11_factored: The factored K11 matrix (SuperLU object for sparse, LU tuple for dense)
+        :param K12: The K12 partition (used for dense solve)
+        :param K12_csr: The K12 partition in CSR format (used for sparse solve)
+        :param D2: Known displacements
+        :param D1_indices: Indices for unknown displacements
+        :param D2_indices: Indices for known displacements
+        :param sparse: Whether to use sparse solver
+        :return: Tuple of (combo, D1) where D1 is the computed displacement vector
+        """
+        # Get the partitioned global fixed end reaction vector
+        FER1, FER2 = Analysis._partition(model, model.FER(combo.name), D1_indices, D2_indices)
+
+        # Get the partitioned global nodal force vector
+        P1, P2 = Analysis._partition(model, model.P(combo.name), D1_indices, D2_indices)
+
+        # Calculate the global displacement vector
+        if K11.shape == (0, 0):
+            # All displacements are known, so D1 is an empty vector
+            D1 = []
+        else:
+            # Calculate the unknown displacements D1
+            if sparse:
+                # Use the factored sparse matrix (SuperLU object)
+                # The solve method of SuperLU performs back-substitution
+                D1 = K11_factored.solve(subtract(subtract(P1, FER1), K12_csr @ D2))
+                D1 = D1.reshape(len(D1), 1)
+            else:
+                # Use the factored dense matrix (LU factorization tuple)
+                from scipy.linalg import lu_solve
+                D1 = lu_solve(K11_factored, subtract(subtract(P1, FER1), matmul(K12, D2)))
+
+            # Check for NaN or Inf values which indicate a singular matrix
+            if np.any(np.isnan(D1)) or np.any(np.isinf(D1)):
+                raise ValueError(f"Solution for combo '{combo.name}' contains NaN or Inf values - matrix is singular")
+
+        return (combo, D1)
+
+    def analyze_linear(self, log=False, check_stability=True, check_statics=False, sparse=True,
+                      combo_tags=None, parallel=True, max_workers=None):
         """Performs first-order static analysis. This analysis procedure is much faster since it only assembles the global stiffness matrix once, rather than once for each load combination. It is not appropriate when non-linear behavior such as tension/compression only analysis or P-Delta analysis are required.
 
         :param log: Prints the analysis log to the console if set to True. Default is False.
@@ -2008,6 +2058,12 @@ class FEModel3D():
         :type check_statics: bool, optional
         :param sparse: Indicates whether the sparse matrix solver should be used. A matrix can be considered sparse or dense depening on how many zero terms there are. Structural stiffness matrices often contain many zero terms. The sparse solver can offer faster solutions for such matrices. Using the sparse solver on dense matrices may lead to slower solution times. Be sure ``scipy`` is installed to use the sparse solver. Default is True.
         :type sparse: bool, optional
+        :param combo_tags: Optional list of load combination tags to filter which combinations are analyzed. If None, all combinations are analyzed.
+        :type combo_tags: list, optional
+        :param parallel: Whether to use parallel processing when running on free-threaded Python (Python 3.14t). On standard Python with GIL, this parameter is ignored and sequential processing is used. Default is True.
+        :type parallel: bool, optional
+        :param max_workers: Maximum number of worker threads to use for parallel processing. If None, uses the number of CPU cores. Only used when parallel=True and running on free-threaded Python. Default is None.
+        :type max_workers: int, optional
         :raises Exception: Occurs when a singular stiffness matrix is found. This indicates an unstable structure has been modeled.
         """
 
@@ -2076,71 +2132,149 @@ class FEModel3D():
                     diagnostic_text
                 ) from e
 
-        # Step through each load combination
-        for combo in combo_list:
+        # Determine if we should use parallel processing
+        # Only use threads if:
+        # 1. parallel=True (user enabled it)
+        # 2. Running on free-threaded Python (no GIL)
+        # 3. Have enough combos to justify overhead (>= 4)
+        use_parallel = parallel and is_free_threaded() and len(combo_list) >= 4
+
+        if use_parallel:
+            # Parallel execution using ThreadPoolExecutor (free-threaded Python only)
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            # Determine optimal number of workers
+            num_workers = get_optimal_worker_count(len(combo_list), max_workers)
 
             if log:
+                print(f'- Using parallel processing with {num_workers} workers (free-threaded Python detected)')
                 print('')
-                print('- Analyzing load combination ' + combo.name)
 
-            # Get the partitioned global fixed end reaction vector
-            FER1, FER2 = Analysis._partition(self, self.FER(combo.name), D1_indices, D2_indices)
+            # Submit all combos to the thread pool
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                # Submit all work to the executor
+                future_to_combo = {
+                    executor.submit(
+                        FEModel3D._solve_combo_linear_worker,
+                        self, combo, K11, K11_factored, K12, K12_csr, D2,
+                        D1_indices, D2_indices, sparse
+                    ): combo
+                    for combo in combo_list
+                }
 
-            # Get the partitioned global nodal force vector
-            P1, P2 = Analysis._partition(self, self.P(combo.name), D1_indices, D2_indices)
+                # Process results as they complete
+                for future in as_completed(future_to_combo):
+                    combo = future_to_combo[future]
+                    try:
+                        # Get the result (combo, D1) from the worker
+                        result_combo, D1 = future.result()
 
-            # Calculate the global displacement vector
-            if log:
-                print('- Calculating global displacement vector')
-            if K11.shape == (0, 0):
-                # All displacements are known, so D1 is an empty vector
-                D1 = []
-            else:
-                try:
-                    # Calculate the unknown displacements D1
-                    if sparse == True:
-                        # The partitioned stiffness matrix is in `lil` format, which is great
-                        # for memory, but slow for mathematical operations. The stiffness
-                        # matrix will be converted to `csr` format for mathematical operations.
-                        # The `@` operator performs matrix multiplication on sparse matrices.
-                        D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2))
-                        D1 = D1.reshape(len(D1), 1)
-                    else:
-                        D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
+                        if log:
+                            print(f'- Completed load combination {result_combo.name}')
 
-                    # Check for NaN or Inf values which indicate a singular matrix
-                    # (scipy spsolve may not raise an exception for singular matrices)
-                    import numpy as np
-                    if np.any(np.isnan(D1)) or np.any(np.isinf(D1)):
-                        raise ValueError("Solution contains NaN or Inf values - matrix is singular")
+                        # Store the displacements (done serially to ensure thread safety)
+                        Analysis._store_displacements(self, D1, D2, D1_indices, D2_indices, result_combo)
 
-                except Exception as e:
-                    # Return out of the method if 'K' is singular and provide an error message
-                    # Run diagnostics to explain why the matrix is singular
-                    from Pynite.Diagnostics import ModelDiagnostics
+                    except Exception as e:
+                        # Handle any errors from the worker
+                        from Pynite.Diagnostics import ModelDiagnostics
+                        print('')
+                        print('=' * 60)
+                        print(f'ANALYSIS FAILED - Error in load combination {combo.name}')
+                        print('=' * 60)
+                        print('')
+                        print(f'Error: {str(e)}')
+                        print('')
+
+                        # If it's a singular matrix error, run diagnostics
+                        if 'singular' in str(e).lower():
+                            print('Running diagnostics to identify root cause...')
+                            print('')
+                            diagnostics = ModelDiagnostics(self)
+                            report = diagnostics.run_full_diagnosis()
+                            diagnostic_text = report.format(verbose=True)
+                            print(diagnostic_text)
+
+                            raise Analysis.AnalysisError(
+                                'The stiffness matrix is singular (structure is unstable)',
+                                diagnostic_text
+                            ) from e
+                        else:
+                            raise
+
+        else:
+            # Sequential execution (standard Python with GIL, or when parallel=False)
+            if log and not parallel:
+                print('- Using sequential processing (parallel=False)')
+            elif log and not is_free_threaded():
+                print('- Using sequential processing (free-threaded Python not detected)')
+            elif log:
+                print('- Using sequential processing (too few load combinations)')
+
+            for combo in combo_list:
+
+                if log:
                     print('')
-                    print('=' * 60)
-                    print('ANALYSIS FAILED - Singular Stiffness Matrix')
-                    print('=' * 60)
-                    print('')
-                    print('The stiffness matrix could not be inverted, which means the')
-                    print('structure has one or more rigid body modes (it can move freely).')
-                    print('')
-                    print('Running diagnostics to identify root cause...')
-                    print('')
+                    print('- Analyzing load combination ' + combo.name)
 
-                    diagnostics = ModelDiagnostics(self)
-                    report = diagnostics.run_full_diagnosis()
-                    diagnostic_text = report.format(verbose=True)
-                    print(diagnostic_text)
+                # Get the partitioned global fixed end reaction vector
+                FER1, FER2 = Analysis._partition(self, self.FER(combo.name), D1_indices, D2_indices)
 
-                    raise Analysis.AnalysisError(
-                        'The stiffness matrix is singular (structure is unstable)',
-                        diagnostic_text
-                    ) from e
+                # Get the partitioned global nodal force vector
+                P1, P2 = Analysis._partition(self, self.P(combo.name), D1_indices, D2_indices)
 
-            # Store the calculated displacements to the model and the nodes in the model
-            Analysis._store_displacements(self, D1, D2, D1_indices, D2_indices, combo)
+                # Calculate the global displacement vector
+                if log:
+                    print('- Calculating global displacement vector')
+                if K11.shape == (0, 0):
+                    # All displacements are known, so D1 is an empty vector
+                    D1 = []
+                else:
+                    try:
+                        # Calculate the unknown displacements D1
+                        if sparse == True:
+                            # The partitioned stiffness matrix is in `lil` format, which is great
+                            # for memory, but slow for mathematical operations. The stiffness
+                            # matrix will be converted to `csr` format for mathematical operations.
+                            # The `@` operator performs matrix multiplication on sparse matrices.
+                            D1 = spsolve(K11.tocsr(), subtract(subtract(P1, FER1), K12.tocsr() @ D2))
+                            D1 = D1.reshape(len(D1), 1)
+                        else:
+                            D1 = solve(K11, subtract(subtract(P1, FER1), matmul(K12, D2)))
+
+                        # Check for NaN or Inf values which indicate a singular matrix
+                        # (scipy spsolve may not raise an exception for singular matrices)
+                        import numpy as np
+                        if np.any(np.isnan(D1)) or np.any(np.isinf(D1)):
+                            raise ValueError("Solution contains NaN or Inf values - matrix is singular")
+
+                    except Exception as e:
+                        # Return out of the method if 'K' is singular and provide an error message
+                        # Run diagnostics to explain why the matrix is singular
+                        from Pynite.Diagnostics import ModelDiagnostics
+                        print('')
+                        print('=' * 60)
+                        print('ANALYSIS FAILED - Singular Stiffness Matrix')
+                        print('=' * 60)
+                        print('')
+                        print('The stiffness matrix could not be inverted, which means the')
+                        print('structure has one or more rigid body modes (it can move freely).')
+                        print('')
+                        print('Running diagnostics to identify root cause...')
+                        print('')
+
+                        diagnostics = ModelDiagnostics(self)
+                        report = diagnostics.run_full_diagnosis()
+                        diagnostic_text = report.format(verbose=True)
+                        print(diagnostic_text)
+
+                        raise Analysis.AnalysisError(
+                            'The stiffness matrix is singular (structure is unstable)',
+                            diagnostic_text
+                        ) from e
+
+                # Store the calculated displacements to the model and the nodes in the model
+                Analysis._store_displacements(self, D1, D2, D1_indices, D2_indices, combo)
 
         # Calculate reactions
         Analysis._calc_reactions(self, log, combo_tags)
