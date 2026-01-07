@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from numpy import float64
     from numpy.typing import NDArray
     from Pynite.Member3D import Member3D as Member3DType
+    from scipy.sparse.linalg import SuperLU
 
 
 # %%
@@ -2035,15 +2036,15 @@ class FEModel3D():
     def _solve_combo_linear_worker(
         model: 'FEModel3D',
         combo: LoadCombo,
-        K11,  # scipy sparse matrix or ndarray
-        K11_factored,  # SuperLU object or LU factorization tuple
-        K12,  # scipy sparse matrix or ndarray
-        K12_csr,  # scipy csr_matrix or None
-        D2,  # ndarray
+        K11: Any,  # scipy sparse matrix or ndarray
+        K11_factored: Any,  # SuperLU object or LU factorization tuple
+        K12: Any,  # scipy sparse matrix or ndarray
+        K12_csr: Any,  # scipy csr_matrix or None
+        D2: NDArray[float64],
         D1_indices: list[int],
         D2_indices: list[int],
         sparse: bool
-    ):
+    ) -> tuple[LoadCombo, NDArray[float64] | list[Any]]:
         """Worker function to solve a single load combination.
 
         This function can be called directly (sequential) or via ThreadPoolExecutor
@@ -2089,7 +2090,7 @@ class FEModel3D():
 
         return (combo, disp1)
 
-    def analyze_linear(self, log: bool = False, check_stability: bool = True, check_statics: bool = False, sparse: bool = True, combo_tags = None):
+    def analyze_linear(self, log: bool = False, check_stability: bool = True, check_statics: bool = False, sparse: bool = True, combo_tags: list[str] | None = None) -> None:
         """Performs first-order static analysis. This analysis procedure is much faster since it only assembles the global stiffness matrix once, rather than once for each load combination. It is not appropriate when non-linear behavior such as tension/compression only analysis or P-Delta analysis are required.
 
         On Python 3.14t (free-threaded build), this method automatically uses parallel processing
