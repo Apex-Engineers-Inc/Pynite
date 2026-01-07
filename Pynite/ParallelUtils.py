@@ -44,20 +44,19 @@ def is_free_threaded() -> bool:
     return False
 
 
-def get_optimal_worker_count(combo_count: int, max_workers: int | None = None) -> int:
+def get_optimal_worker_count(combo_count: int) -> int:
     """
     Determine the optimal number of worker threads for parallelizing load combinations.
 
     Args:
         combo_count: Number of load combinations to analyze
-        max_workers: Maximum number of workers to use (None = auto-detect from CPU count)
 
     Returns:
         int: Optimal number of workers to use
 
     Notes:
         - Returns 1 (sequential) if combo_count < 4 (overhead not worth it)
-        - Otherwise returns min(combo_count, cpu_count, max_workers)
+        - Otherwise returns min(combo_count, cpu_count)
     """
     # Not worth parallelizing for small combo counts
     if combo_count < 4:
@@ -66,14 +65,5 @@ def get_optimal_worker_count(combo_count: int, max_workers: int | None = None) -
     # Get CPU count (defaults to 1 if can't determine)
     cpu_count = os.cpu_count() or 1
 
-    # Start with the CPU count
-    workers = cpu_count
-
     # No point having more workers than combos
-    workers = min(workers, combo_count)
-
-    # Respect user's max_workers if specified
-    if max_workers is not None:
-        workers = min(workers, max_workers)
-
-    return workers
+    return min(cpu_count, combo_count)

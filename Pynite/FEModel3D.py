@@ -2089,9 +2089,11 @@ class FEModel3D():
 
         return (combo, disp1)
 
-    def analyze_linear(self, log: bool = False, check_stability: bool = True, check_statics: bool = False, sparse: bool = True,
-                      combo_tags = None, parallel: bool = True, max_workers: int | None = None):
+    def analyze_linear(self, log: bool = False, check_stability: bool = True, check_statics: bool = False, sparse: bool = True, combo_tags = None):
         """Performs first-order static analysis. This analysis procedure is much faster since it only assembles the global stiffness matrix once, rather than once for each load combination. It is not appropriate when non-linear behavior such as tension/compression only analysis or P-Delta analysis are required.
+
+        On Python 3.14t (free-threaded build), this method automatically uses parallel processing
+        for improved performance when analyzing 4 or more load combinations.
 
         :param log: Prints the analysis log to the console if set to True. Default is False.
         :type log: bool, optional
@@ -2103,10 +2105,6 @@ class FEModel3D():
         :type sparse: bool, optional
         :param combo_tags: Optional list of load combination tags to filter which combinations are analyzed. If None, all combinations are analyzed.
         :type combo_tags: list, optional
-        :param parallel: Whether to use parallel processing when running on free-threaded Python (Python 3.14t). On standard Python with GIL, this parameter is ignored and sequential processing is used. Default is True.
-        :type parallel: bool, optional
-        :param max_workers: Maximum number of worker threads to use for parallel processing. If None, uses the number of CPU cores. Only used when parallel=True and running on free-threaded Python. Default is None.
-        :type max_workers: int, optional
         :raises Exception: Occurs when a singular stiffness matrix is found. This indicates an unstable structure has been modeled.
         """
 
@@ -2175,21 +2173,18 @@ class FEModel3D():
                     diagnostic_text
                 ) from e
 
-        # Determine if we should use parallel processing
-        # Only use threads if:
-        # 1. parallel=True (user enabled it)
-        # 2. Running on free-threaded Python (no GIL)
-        # 3. Have enough combos to justify overhead (>= 4)
-        use_parallel = parallel and is_free_threaded() and len(combo_list) >= 4
+        # Auto-detect parallel processing capability
+        # Use threads if running on free-threaded Python (no GIL) with 4+ combos
+        use_parallel = is_free_threaded() and len(combo_list) >= 4
 
         if use_parallel:
             # Parallel execution using ThreadPoolExecutor (free-threaded Python only)
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            num_workers = get_optimal_worker_count(len(combo_list), max_workers)
+            num_workers = get_optimal_worker_count(len(combo_list))
 
             if log:
-                print(f'- Using parallel processing with {num_workers} workers (free-threaded Python detected)')
+                print(f'- Using parallel processing with {num_workers} workers')
                 print('')
 
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
@@ -2213,21 +2208,12 @@ class FEModel3D():
                         self._handle_solve_error(e, combo.name)
         else:
             # Sequential execution - call worker directly without thread pool
-            if log:
-                if not parallel:
-                    print('- Using sequential processing (parallel=False)')
-                elif not is_free_threaded():
-                    print('- Using sequential processing (free-threaded Python not detected)')
-                else:
-                    print('- Using sequential processing (too few load combinations)')
-                print('')
-
             for combo in combo_list:
                 if log:
+                    print('')
                     print(f'- Analyzing load combination {combo.name}')
 
                 try:
-                    # Call the same worker function used by parallel execution
                     result_combo, D1 = FEModel3D._solve_combo_linear_worker(
                         self, combo, K11, K11_factored, K12, K12_csr, D2,
                         D1_indices, D2_indices, sparse

@@ -79,10 +79,10 @@ def test_parallel_analysis():
     print(f"Model created with {len(model.load_combos)} load combinations")
     print()
 
-    # Test 1: Analyze with parallel=True (auto-detect)
-    print("Test 1: analyze_linear(parallel=True, log=True)")
+    # Test 1: Analyze with auto-detection
+    print("Test 1: analyze_linear(log=True)")
     print("-" * 60)
-    model.analyze_linear(log=True, parallel=True)
+    model.analyze_linear(log=True)
     print()
 
     # Check results
@@ -94,11 +94,11 @@ def test_parallel_analysis():
             print(f"  {combo_name}: max displacement = {max_disp:.6f} in")
     print()
 
-    # Test 2: Analyze with parallel=False (force sequential)
-    print("Test 2: analyze_linear(parallel=False)")
+    # Test 2: Analyze without logging (also uses auto-detection)
+    print("Test 2: analyze_linear(log=False)")
     print("-" * 60)
     model2 = create_simple_beam_model()
-    model2.analyze_linear(log=False, parallel=False)
+    model2.analyze_linear(log=False)
     print("Sequential analysis completed successfully")
     print()
 
@@ -130,8 +130,8 @@ def test_parallel_analysis():
         print("✓ Running on free-threaded Python - parallel processing was used")
     else:
         print("✓ Running on standard Python - sequential processing was used")
-    print("✓ analyze_linear() works correctly with parallel parameter")
-    print("✓ Results are consistent between parallel and sequential execution")
+    print("✓ analyze_linear() auto-detects and uses optimal execution mode")
+    print("✓ Results are consistent between runs")
 
     return True
 
