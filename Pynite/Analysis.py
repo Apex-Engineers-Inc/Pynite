@@ -109,7 +109,7 @@ def _identify_combos(model: FEModel3D, combo_tags: List[str] | None = None) -> L
     return combo_list
 
 
-def _check_stability(model: FEModel3D, K: NDArray[float64]) -> None:
+def _check_stability(model: FEModel3D, K: NDArray[float64], log: bool = True) -> None:
     """
     Identifies nodal instabilities in a model's stiffness matrix and provides
     comprehensive diagnostics about the root cause.
@@ -176,36 +176,36 @@ def _check_stability(model: FEModel3D, K: NDArray[float64]) -> None:
             unstable_dofs.append((node.name, DOF_NAMES[dof], stiffness_value))
 
     if unstable_dofs:
-        # Print detailed instability information
-        print('')
-        print('=' * 60)
-        print('INSTABILITY DETECTED - Analysis cannot proceed')
-        print('=' * 60)
-        print('')
-        print(f'Found {len(unstable_dofs)} unstable degree(s) of freedom:')
-        print('')
-
-        # Group by node for cleaner output
-        from collections import defaultdict
-        node_dofs = defaultdict(list)
-        for node_name, dof_name, stiffness in unstable_dofs:
-            node_dofs[node_name].append(dof_name)
-
-        for node_name, dofs in node_dofs.items():
-            print(f'  Node "{node_name}":')
-            for dof in dofs:
-                print(f'    - {dof}')
-
-        print('')
-
         # Run full diagnostics to explain why
-        print('Running diagnostics to identify root cause...')
-        print('')
-
         diagnostics = ModelDiagnostics(model)
         report = diagnostics.run_full_diagnosis()
         diagnostic_text = report.format(verbose=True)
-        print(diagnostic_text)
+
+        # Print detailed instability information only when logging is enabled
+        if log:
+            print('')
+            print('=' * 60)
+            print('INSTABILITY DETECTED - Analysis cannot proceed')
+            print('=' * 60)
+            print('')
+            print(f'Found {len(unstable_dofs)} unstable degree(s) of freedom:')
+            print('')
+
+            # Group by node for cleaner output
+            from collections import defaultdict
+            node_dofs = defaultdict(list)
+            for node_name, dof_name, stiffness in unstable_dofs:
+                node_dofs[node_name].append(dof_name)
+
+            for node_name, dofs in node_dofs.items():
+                print(f'  Node "{node_name}":')
+                for dof in dofs:
+                    print(f'    - {dof}')
+
+            print('')
+            print('Running diagnostics to identify root cause...')
+            print('')
+            print(diagnostic_text)
 
         # Create a summary message
         error_msg = f"Model is unstable: {len(unstable_dofs)} degree(s) of freedom have zero stiffness."
@@ -370,24 +370,25 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
                 except Exception as e:
                     # Return out of the method if 'K' is singular and provide an error message
                     # Run diagnostics to explain why the matrix is singular
-                    print('')
-                    print('=' * 60)
-                    print('P-DELTA ANALYSIS FAILED - Singular Stiffness Matrix')
-                    print('=' * 60)
-                    print('')
-                    print('The stiffness matrix could not be inverted during P-Delta analysis.')
-                    print('This can occur when:')
-                    print('  1. The structure is geometrically unstable')
-                    print('  2. P-Delta effects have caused buckling')
-                    print('  3. The structure lacks sufficient bracing')
-                    print('')
-                    print('Running diagnostics to identify root cause...')
-                    print('')
-
                     diagnostics = ModelDiagnostics(model)
                     report = diagnostics.run_full_diagnosis()
                     diagnostic_text = report.format(verbose=True)
-                    print(diagnostic_text)
+
+                    if log:
+                        print('')
+                        print('=' * 60)
+                        print('P-DELTA ANALYSIS FAILED - Singular Stiffness Matrix')
+                        print('=' * 60)
+                        print('')
+                        print('The stiffness matrix could not be inverted during P-Delta analysis.')
+                        print('This can occur when:')
+                        print('  1. The structure is geometrically unstable')
+                        print('  2. P-Delta effects have caused buckling')
+                        print('  3. The structure lacks sufficient bracing')
+                        print('')
+                        print('Running diagnostics to identify root cause...')
+                        print('')
+                        print(diagnostic_text)
 
                     raise AnalysisError(
                         'The stiffness matrix is singular during P-Delta analysis (structure may have buckled)',
@@ -428,28 +429,30 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
         # Check for divergence in the tension/compression-only analysis
         if iter_count_TC > max_iter:
             divergence_TC = True
-            print('')
-            print('=' * 60)
-            print('P-DELTA ANALYSIS FAILED - T/C-Only Divergence')
-            print('=' * 60)
-            print('')
-            print(f'The tension/compression-only analysis failed to converge after {max_iter} iterations.')
-            print('')
-            print('This typically happens when:')
-            print('  1. Combined P-Delta effects with T/C-only elements create oscillation')
-            print('  2. The structure becomes unstable as elements deactivate')
-            print('  3. Large P-Delta effects cause element status to flip repeatedly')
-            print('')
-            print('Suggestions:')
-            print('  - Increase max_iter for more convergence attempts')
-            print('  - Reduce the number of T/C-only elements')
-            print('  - Check if brace arrangement is stable under P-Delta')
-            print('')
 
             diagnostics = ModelDiagnostics(model)
             report = diagnostics.run_full_diagnosis()
             diagnostic_text = report.format(verbose=True)
-            print(diagnostic_text)
+
+            if log:
+                print('')
+                print('=' * 60)
+                print('P-DELTA ANALYSIS FAILED - T/C-Only Divergence')
+                print('=' * 60)
+                print('')
+                print(f'The tension/compression-only analysis failed to converge after {max_iter} iterations.')
+                print('')
+                print('This typically happens when:')
+                print('  1. Combined P-Delta effects with T/C-only elements create oscillation')
+                print('  2. The structure becomes unstable as elements deactivate')
+                print('  3. Large P-Delta effects cause element status to flip repeatedly')
+                print('')
+                print('Suggestions:')
+                print('  - Increase max_iter for more convergence attempts')
+                print('  - Reduce the number of T/C-only elements')
+                print('  - Check if brace arrangement is stable under P-Delta')
+                print('')
+                print(diagnostic_text)
 
             raise AnalysisError(
                 'Model diverged during P-Delta tension/compression-only analysis',
