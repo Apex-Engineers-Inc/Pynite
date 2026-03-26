@@ -544,28 +544,31 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
 
             except Exception as e:
                 # Return out of the method if 'K' is singular and provide an error message
-                print('')
-                print('=' * 60)
-                print('PUSHOVER ANALYSIS FAILED - Structure Became Unstable')
-                print('=' * 60)
-                print('')
-                print('The structure became unstable during pushover analysis.')
-                print('This typically occurs when:')
-                print('  1. A plastic mechanism has formed')
-                print('  2. The structure has reached its ultimate capacity')
-                print('  3. P-Delta effects have caused collapse')
-                print('')
-                print('This may be the expected end of the pushover analysis.')
-                print('')
-
                 diagnostics = ModelDiagnostics(model)
                 report = diagnostics.run_full_diagnosis()
                 diagnostic_text = report.format(verbose=True)
-                print(diagnostic_text)
+                concise_text = report.format(verbose=False)
+
+                if log:
+                    print('')
+                    print('=' * 60)
+                    print('PUSHOVER ANALYSIS FAILED - Structure Became Unstable')
+                    print('=' * 60)
+                    print('')
+                    print('The structure became unstable during pushover analysis.')
+                    print('This typically occurs when:')
+                    print('  1. A plastic mechanism has formed')
+                    print('  2. The structure has reached its ultimate capacity')
+                    print('  3. P-Delta effects have caused collapse')
+                    print('')
+                    print('This may be the expected end of the pushover analysis.')
+                    print('')
+                    print(diagnostic_text)
 
                 raise AnalysisError(
                     'The structure became unstable during pushover analysis (possible collapse mechanism)',
-                    diagnostic_text
+                    diagnostic_text,
+                    concise_text
                 ) from e
 
         # Unpartition the displacement results from the analysis step

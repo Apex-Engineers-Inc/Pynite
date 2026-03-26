@@ -2403,25 +2403,27 @@ class FEModel3D():
                             # Return out of the method if 'K' is singular and provide an error message
                             # Run diagnostics to explain why the matrix is singular
                             from Pynite.Diagnostics import ModelDiagnostics
-                            print('')
-                            print('=' * 60)
-                            print('ANALYSIS FAILED - Singular Stiffness Matrix')
-                            print('=' * 60)
-                            print('')
-                            print('The stiffness matrix could not be inverted, which means the')
-                            print('structure has one or more rigid body modes (it can move freely).')
-                            print('')
-                            print('Running diagnostics to identify root cause...')
-                            print('')
 
                             diagnostics = ModelDiagnostics(self)
                             report = diagnostics.run_full_diagnosis()
                             diagnostic_text = report.format(verbose=True)
-                            print(diagnostic_text)
+                            concise_text = report.format(verbose=False)
+
+                            if log:
+                                print('')
+                                print('=' * 60)
+                                print('ANALYSIS FAILED - Singular Stiffness Matrix')
+                                print('=' * 60)
+                                print('')
+                                print('The stiffness matrix could not be inverted, which means the')
+                                print('structure has one or more rigid body modes (it can move freely).')
+                                print('')
+                                print(diagnostic_text)
 
                             raise Analysis.AnalysisError(
                                 'The stiffness matrix is singular (structure is unstable)',
-                                diagnostic_text
+                                diagnostic_text,
+                                concise_text
                             ) from e
 
                     # Store or sum the calculated displacements to the model and the nodes in the model

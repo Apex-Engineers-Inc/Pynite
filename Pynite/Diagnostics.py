@@ -615,11 +615,21 @@ class ModelDiagnostics:
             if not (node.support_RZ or node.spring_RZ[0] is not None or geom_restraint.get('RZ', False)):
                 rigid_body_modes.append("Rotation about Z through the single support")
         elif len(supported_nodes) >= 2:
-            # Multiple supports - geometric restraint typically prevents rotation.
-            # Note: We intentionally do NOT check for rotation about axis connecting
-            # two supports because member torsional/bending stiffness provides restraint
-            # in practice. Flagging this would be a misleading "red herring" for users.
-            pass
+            # Multiple supports — check if rotations are geometrically restrained
+            # by translation supports at different positions. Collinear supports
+            # (e.g. two pins along the same axis) may still leave rotation about
+            # that axis unrestrained.
+            for axis, dof_attr, spring_attr in [
+                ('RX', 'support_RX', 'spring_RX'),
+                ('RY', 'support_RY', 'spring_RY'),
+                ('RZ', 'support_RZ', 'spring_RZ'),
+            ]:
+                has_explicit = any(
+                    getattr(self.model.nodes[n], dof_attr) or getattr(self.model.nodes[n], spring_attr)[0] is not None
+                    for n in supported_nodes
+                )
+                if not has_explicit and not geom_restraint.get(axis, False):
+                    rigid_body_modes.append(f"Rotation about {axis[1]} (supports are collinear — no geometric restraint)")
 
         self._supports = SupportInfo(
             total_supported_dofs=total_dofs,
@@ -683,8 +693,8 @@ class ModelDiagnostics:
                            "directions. This produces a singular stiffness matrix with no unique solution.",
                 affected_entities=supported_nodes,
                 suggestions=[
-                    "Add boundary conditions to restrain all rigid body modes:",
-                    *[f"  - {mode}" for mode in rigid_body_modes[:3]]
+                    "Restrain: " + ", ".join(mode for mode in rigid_body_modes[:3]),
+                    "Add supports or rotational restraints to prevent free movement"
                 ]
             ))
 
