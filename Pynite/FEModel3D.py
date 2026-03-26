@@ -2029,7 +2029,8 @@ class FEModel3D():
             raise Analysis.AnalysisError(
                 'The stiffness matrix is singular (structure is unstable)',
                 diagnostic_text,
-                concise_text
+                concise_text,
+                report.to_dict_list()
             ) from error
         else:
             raise error
@@ -2175,7 +2176,8 @@ class FEModel3D():
                 raise Analysis.AnalysisError(
                     'The stiffness matrix is singular (structure is unstable)',
                     diagnostic_text,
-                    concise_text
+                    concise_text,
+                    report.to_dict_list()
                 ) from e
 
         # Auto-detect parallel processing capability
@@ -2367,7 +2369,8 @@ class FEModel3D():
                         raise Analysis.AnalysisError(
                             'Model diverged during tension/compression-only analysis',
                             diagnostic_text,
-                            concise_text
+                            concise_text,
+                            report.to_dict_list()
                         )
 
                     # Report which load step we are on
@@ -2423,7 +2426,8 @@ class FEModel3D():
                             raise Analysis.AnalysisError(
                                 'The stiffness matrix is singular (structure is unstable)',
                                 diagnostic_text,
-                                concise_text
+                                concise_text,
+                                report.to_dict_list()
                             ) from e
 
                     # Store or sum the calculated displacements to the model and the nodes in the model

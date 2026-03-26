@@ -20,21 +20,51 @@ class AnalysisError(Exception):
     """
     Custom exception for analysis failures with detailed diagnostics.
 
-    Attributes:
-        message: The error message
-        diagnostic_report: Optional detailed diagnostic report (verbose format).
-            Access this attribute directly for the full report when troubleshooting.
+    Attributes
+    ----------
+    message : str
+        Short description of what went wrong.
+    issues : list[dict]
+        Structured list of diagnostic findings. Each dict has keys:
+        ``severity``, ``category``, ``title``, ``description``,
+        ``affected`` (list of node/member names), and ``suggestions``.
+        Empty list if no diagnostics were run.
+    diagnostic_report : str or None
+        Full verbose diagnostic report as formatted text.
+        Useful for logging or developer consoles.
+
+    Examples
+    --------
+    ::
+
+        try:
+            model.analyze_linear()
+        except AnalysisError as e:
+            # Structured data for your UI
+            for issue in e.issues:
+                print(issue['severity'], issue['title'])
+                print('  Affected:', issue['affected'])
+                print('  Fix:', issue['suggestions'][0])
+
+            # Or just the short message
+            show_error_banner(e.message)
+
+            # Or the full verbose report for a debug log
+            logger.debug(e.diagnostic_report)
     """
-    def __init__(self, message: str, diagnostic_report: str = None, concise_report: str = None):
+    def __init__(self, message: str, diagnostic_report: str = None,
+                 concise_report: str = None, issues: list = None):
         self.message = message
         self.diagnostic_report = diagnostic_report
+        self.issues = issues or []
         self._concise_report = concise_report
         super().__init__(self._format_message())
 
     def _format_message(self) -> str:
-        report = self._concise_report or self.diagnostic_report
-        if report:
-            return f"{self.message}\n{report}"
+        if self._concise_report:
+            return f"{self.message}\n{self._concise_report}"
+        if self.diagnostic_report:
+            return f"{self.message}\n{self.diagnostic_report}"
         return self.message
 
 
@@ -212,7 +242,7 @@ def _check_stability(model: FEModel3D, K: NDArray[float64], log: bool = True) ->
         # Create a summary message
         error_msg = f"Model is unstable: {len(unstable_dofs)} degree(s) of freedom have zero stiffness."
 
-        raise AnalysisError(error_msg, diagnostic_text, concise_text)
+        raise AnalysisError(error_msg, diagnostic_text, concise_text, report.to_dict_list())
 
     return
 
@@ -394,7 +424,8 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
                     raise AnalysisError(
                         'The stiffness matrix is singular during P-Delta analysis (structure may have buckled)',
                         diagnostic_text,
-                        concise_text
+                        concise_text,
+                        report.to_dict_list()
                     ) from e
 
             # Store the calculated displacements
@@ -460,7 +491,8 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
             raise AnalysisError(
                 'Model diverged during P-Delta tension/compression-only analysis',
                 diagnostic_text,
-                concise_text
+                concise_text,
+                report.to_dict_list()
             )
 
     # Flag the model as solved
@@ -568,7 +600,8 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
                 raise AnalysisError(
                     'The structure became unstable during pushover analysis (possible collapse mechanism)',
                     diagnostic_text,
-                    concise_text
+                    concise_text,
+                    report.to_dict_list()
                 ) from e
 
         # Unpartition the displacement results from the analysis step

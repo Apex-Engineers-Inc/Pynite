@@ -55,6 +55,29 @@ class DiagnosticIssue:
     affected_entities: List[str] = field(default_factory=list)
     suggestions: List[str] = field(default_factory=list)
 
+    def to_dict(self) -> Dict:
+        """Return a plain dict for app consumption.
+
+        Example::
+
+            {
+                'severity': 'ERROR',
+                'category': 'MECHANISM',
+                'title': 'Moment release mechanisms — My axis (40 nodes)',
+                'description': '40 node(s) have too many ...',
+                'affected': ['S0_i', 'S0_j', 'S1_i'],
+                'suggestions': ['Remove moment releases ...', '...'],
+            }
+        """
+        return {
+            'severity': self.severity.value,
+            'category': self.category.value,
+            'title': self.title,
+            'description': self.description,
+            'affected': list(self.affected_entities),
+            'suggestions': list(self.suggestions),
+        }
+
     def format(self, verbose: bool = True) -> str:
         """Format the issue as a human-readable string.
 
@@ -82,7 +105,7 @@ class DiagnosticIssue:
                     lines.append(f"    - {suggestion}")
         else:
             # Concise: title + affected entities inline, first suggestion
-            title_line = f"{prefix} {self.title}"
+            title_line = self.title
             if self.affected_entities:
                 if len(self.affected_entities) <= 3:
                     title_line += f" — {', '.join(self.affected_entities)}"
@@ -90,7 +113,7 @@ class DiagnosticIssue:
                     title_line += f" — {', '.join(self.affected_entities[:3])} (and {len(self.affected_entities) - 3} more)"
             lines.append(title_line)
             if self.suggestions:
-                lines.append(f"  Fix: {self.suggestions[0]}")
+                lines.append(f"  {self.suggestions[0]}")
 
         return "\n".join(lines)
 
@@ -182,6 +205,34 @@ class DiagnosticReport:
     def has_warnings(self) -> bool:
         """Check if there are any warning-level issues."""
         return any(issue.severity == IssueSeverity.WARNING for issue in self.issues)
+
+    def to_dict_list(self, include_info: bool = False) -> List[Dict]:
+        """Return issues as a list of plain dicts for app consumption.
+
+        Each dict contains 'severity', 'category', 'title', 'description',
+        'affected', and 'suggestions' keys. INFO-level issues are excluded
+        by default.
+
+        Example::
+
+            [
+                {
+                    'severity': 'ERROR',
+                    'category': 'Mechanism',
+                    'title': 'Moment release mechanisms — My axis (40 nodes)',
+                    'description': '40 node(s) have too many ...',
+                    'affected': ['S0_i', 'S0_j'],
+                    'suggestions': ['Remove moment releases ...'],
+                },
+                ...
+            ]
+        """
+        result = []
+        for issue in self.issues:
+            if not include_info and issue.severity == IssueSeverity.INFO:
+                continue
+            result.append(issue.to_dict())
+        return result
 
     def format(self, verbose: bool = True, include_info: bool = False) -> str:
         """Format the complete report as a human-readable string.
