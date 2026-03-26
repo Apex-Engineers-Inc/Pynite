@@ -22,16 +22,19 @@ class AnalysisError(Exception):
 
     Attributes:
         message: The error message
-        diagnostic_report: Optional detailed diagnostic report
+        diagnostic_report: Optional detailed diagnostic report (verbose format).
+            Access this attribute directly for the full report when troubleshooting.
     """
-    def __init__(self, message: str, diagnostic_report: str = None):
+    def __init__(self, message: str, diagnostic_report: str = None, concise_report: str = None):
         self.message = message
         self.diagnostic_report = diagnostic_report
+        self._concise_report = concise_report
         super().__init__(self._format_message())
 
     def _format_message(self) -> str:
-        if self.diagnostic_report:
-            return f"{self.message}\n\n{self.diagnostic_report}"
+        report = self._concise_report or self.diagnostic_report
+        if report:
+            return f"{self.message}\n{report}"
         return self.message
 
 
@@ -180,6 +183,7 @@ def _check_stability(model: FEModel3D, K: NDArray[float64], log: bool = True) ->
         diagnostics = ModelDiagnostics(model)
         report = diagnostics.run_full_diagnosis()
         diagnostic_text = report.format(verbose=True)
+        concise_text = report.format(verbose=False)
 
         # Print detailed instability information only when logging is enabled
         if log:
@@ -203,14 +207,12 @@ def _check_stability(model: FEModel3D, K: NDArray[float64], log: bool = True) ->
                     print(f'    - {dof}')
 
             print('')
-            print('Running diagnostics to identify root cause...')
-            print('')
             print(diagnostic_text)
 
         # Create a summary message
         error_msg = f"Model is unstable: {len(unstable_dofs)} degree(s) of freedom have zero stiffness."
 
-        raise AnalysisError(error_msg, diagnostic_text)
+        raise AnalysisError(error_msg, diagnostic_text, concise_text)
 
     return
 
@@ -373,6 +375,7 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
                     diagnostics = ModelDiagnostics(model)
                     report = diagnostics.run_full_diagnosis()
                     diagnostic_text = report.format(verbose=True)
+                    concise_text = report.format(verbose=False)
 
                     if log:
                         print('')
@@ -386,13 +389,12 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
                         print('  2. P-Delta effects have caused buckling')
                         print('  3. The structure lacks sufficient bracing')
                         print('')
-                        print('Running diagnostics to identify root cause...')
-                        print('')
                         print(diagnostic_text)
 
                     raise AnalysisError(
                         'The stiffness matrix is singular during P-Delta analysis (structure may have buckled)',
-                        diagnostic_text
+                        diagnostic_text,
+                        concise_text
                     ) from e
 
             # Store the calculated displacements
@@ -433,6 +435,7 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
             diagnostics = ModelDiagnostics(model)
             report = diagnostics.run_full_diagnosis()
             diagnostic_text = report.format(verbose=True)
+            concise_text = report.format(verbose=False)
 
             if log:
                 print('')
@@ -456,7 +459,8 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
 
             raise AnalysisError(
                 'Model diverged during P-Delta tension/compression-only analysis',
-                diagnostic_text
+                diagnostic_text,
+                concise_text
             )
 
     # Flag the model as solved

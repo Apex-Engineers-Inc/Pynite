@@ -2014,6 +2014,7 @@ class FEModel3D():
             diagnostics = ModelDiagnostics(self)
             report = diagnostics.run_full_diagnosis()
             diagnostic_text = report.format(verbose=True)
+            concise_text = report.format(verbose=False)
 
             if log:
                 print('')
@@ -2023,13 +2024,12 @@ class FEModel3D():
                 print('')
                 print(f'Error: {str(error)}')
                 print('')
-                print('Running diagnostics to identify root cause...')
-                print('')
                 print(diagnostic_text)
 
             raise Analysis.AnalysisError(
                 'The stiffness matrix is singular (structure is unstable)',
-                diagnostic_text
+                diagnostic_text,
+                concise_text
             ) from error
         else:
             raise error
@@ -2159,6 +2159,7 @@ class FEModel3D():
                 diagnostics = ModelDiagnostics(self)
                 report = diagnostics.run_full_diagnosis()
                 diagnostic_text = report.format(verbose=True)
+                concise_text = report.format(verbose=False)
 
                 if log:
                     print('')
@@ -2169,13 +2170,12 @@ class FEModel3D():
                     print('The stiffness matrix could not be factored, which means the')
                     print('structure has one or more rigid body modes (it can move freely).')
                     print('')
-                    print('Running diagnostics to identify root cause...')
-                    print('')
                     print(diagnostic_text)
 
                 raise Analysis.AnalysisError(
                     'The stiffness matrix is singular (structure is unstable)',
-                    diagnostic_text
+                    diagnostic_text,
+                    concise_text
                 ) from e
 
         # Auto-detect parallel processing capability
@@ -2341,6 +2341,7 @@ class FEModel3D():
                         diagnostics = ModelDiagnostics(self)
                         report = diagnostics.run_full_diagnosis()
                         diagnostic_text = report.format(verbose=True)
+                        concise_text = report.format(verbose=False)
 
                         if log:
                             print('')
@@ -2365,7 +2366,8 @@ class FEModel3D():
 
                         raise Analysis.AnalysisError(
                             'Model diverged during tension/compression-only analysis',
-                            diagnostic_text
+                            diagnostic_text,
+                            concise_text
                         )
 
                     # Report which load step we are on

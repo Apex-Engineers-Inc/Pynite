@@ -56,12 +56,17 @@ class DiagnosticIssue:
     suggestions: List[str] = field(default_factory=list)
 
     def format(self, verbose: bool = True) -> str:
-        """Format the issue as a human-readable string."""
+        """Format the issue as a human-readable string.
+
+        When verbose=False, shows the title with affected entities on one line
+        and the first suggestion. When verbose=True, shows the full description,
+        all affected entities, and all suggestions.
+        """
         lines = []
         prefix = f"[{self.severity.value}]"
-        lines.append(f"{prefix} {self.title}")
 
         if verbose:
+            lines.append(f"{prefix} {self.title}")
             lines.append(f"  {self.description}")
 
             if self.affected_entities:
@@ -75,6 +80,17 @@ class DiagnosticIssue:
                 lines.append("  Suggestions:")
                 for suggestion in self.suggestions:
                     lines.append(f"    - {suggestion}")
+        else:
+            # Concise: title + affected entities inline, first suggestion
+            title_line = f"{prefix} {self.title}"
+            if self.affected_entities:
+                if len(self.affected_entities) <= 3:
+                    title_line += f" — {', '.join(self.affected_entities)}"
+                else:
+                    title_line += f" — {', '.join(self.affected_entities[:3])} (and {len(self.affected_entities) - 3} more)"
+            lines.append(title_line)
+            if self.suggestions:
+                lines.append(f"  Fix: {self.suggestions[0]}")
 
         return "\n".join(lines)
 
@@ -168,47 +184,54 @@ class DiagnosticReport:
         return any(issue.severity == IssueSeverity.WARNING for issue in self.issues)
 
     def format(self, verbose: bool = True, include_info: bool = False) -> str:
-        """Format the complete report as a human-readable string."""
+        """Format the complete report as a human-readable string.
+
+        When verbose=False, only errors and warnings are shown with their
+        titles, affected entities, and suggestions — no model summary,
+        connectivity, or support sections.
+        """
         lines = []
-        lines.append("=" * 70)
-        lines.append("                    MODEL DIAGNOSTIC REPORT")
-        lines.append("=" * 70)
-        lines.append("")
 
-        # Model summary
-        if self.model_summary:
-            lines.append("MODEL SUMMARY")
-            lines.append("-" * 40)
-            for key, value in self.model_summary.items():
-                lines.append(f"  {key}: {value}")
+        if verbose:
+            lines.append("=" * 70)
+            lines.append("                    MODEL DIAGNOSTIC REPORT")
+            lines.append("=" * 70)
             lines.append("")
 
-        # Connectivity summary
-        if self.connectivity:
-            lines.append("CONNECTIVITY ANALYSIS")
-            lines.append("-" * 40)
-            lines.append(f"  Connected components: {self.connectivity.num_components}")
-            if self.connectivity.num_components > 1:
-                lines.append("  Component sizes: " + ", ".join(
-                    str(len(c)) + " nodes" for c in self.connectivity.components
-                ))
-            if self.connectivity.floating_nodes:
-                lines.append(f"  Floating nodes: {len(self.connectivity.floating_nodes)}")
-            lines.append("")
+            # Model summary
+            if self.model_summary:
+                lines.append("MODEL SUMMARY")
+                lines.append("-" * 40)
+                for key, value in self.model_summary.items():
+                    lines.append(f"  {key}: {value}")
+                lines.append("")
 
-        # Support summary
-        if self.supports:
-            lines.append("SUPPORT ANALYSIS")
-            lines.append("-" * 40)
-            lines.append(f"  Total supported DOFs: {self.supports.total_supported_dofs}")
-            lines.append(f"  Supported nodes: {len(self.supports.supported_nodes)}")
-            trans = self.supports.translation_dofs
-            rot = self.supports.rotation_dofs
-            lines.append(f"  Translations: X={trans.get('X', 0)}, Y={trans.get('Y', 0)}, Z={trans.get('Z', 0)}")
-            lines.append(f"  Rotations: RX={rot.get('RX', 0)}, RY={rot.get('RY', 0)}, RZ={rot.get('RZ', 0)}")
-            if self.supports.rigid_body_modes:
-                lines.append(f"  Possible rigid body modes: {', '.join(self.supports.rigid_body_modes)}")
-            lines.append("")
+            # Connectivity summary
+            if self.connectivity:
+                lines.append("CONNECTIVITY ANALYSIS")
+                lines.append("-" * 40)
+                lines.append(f"  Connected components: {self.connectivity.num_components}")
+                if self.connectivity.num_components > 1:
+                    lines.append("  Component sizes: " + ", ".join(
+                        str(len(c)) + " nodes" for c in self.connectivity.components
+                    ))
+                if self.connectivity.floating_nodes:
+                    lines.append(f"  Floating nodes: {len(self.connectivity.floating_nodes)}")
+                lines.append("")
+
+            # Support summary
+            if self.supports:
+                lines.append("SUPPORT ANALYSIS")
+                lines.append("-" * 40)
+                lines.append(f"  Total supported DOFs: {self.supports.total_supported_dofs}")
+                lines.append(f"  Supported nodes: {len(self.supports.supported_nodes)}")
+                trans = self.supports.translation_dofs
+                rot = self.supports.rotation_dofs
+                lines.append(f"  Translations: X={trans.get('X', 0)}, Y={trans.get('Y', 0)}, Z={trans.get('Z', 0)}")
+                lines.append(f"  Rotations: RX={rot.get('RX', 0)}, RY={rot.get('RY', 0)}, RZ={rot.get('RZ', 0)}")
+                if self.supports.rigid_body_modes:
+                    lines.append(f"  Possible rigid body modes: {', '.join(self.supports.rigid_body_modes)}")
+                lines.append("")
 
         # Issues grouped by severity
         errors = [i for i in self.issues if i.severity == IssueSeverity.ERROR]
@@ -216,22 +239,25 @@ class DiagnosticReport:
         infos = [i for i in self.issues if i.severity == IssueSeverity.INFO]
 
         if errors:
-            lines.append("ERRORS (will prevent successful analysis)")
-            lines.append("-" * 40)
+            if verbose:
+                lines.append("ERRORS (will prevent successful analysis)")
+                lines.append("-" * 40)
             for issue in errors:
                 lines.append(issue.format(verbose))
                 lines.append("")
 
         if warnings:
-            lines.append("WARNINGS (may cause unexpected results)")
-            lines.append("-" * 40)
+            if verbose:
+                lines.append("WARNINGS (may cause unexpected results)")
+                lines.append("-" * 40)
             for issue in warnings:
                 lines.append(issue.format(verbose))
                 lines.append("")
 
         if include_info and infos:
-            lines.append("INFORMATION")
-            lines.append("-" * 40)
+            if verbose:
+                lines.append("INFORMATION")
+                lines.append("-" * 40)
             for issue in infos:
                 lines.append(issue.format(verbose))
                 lines.append("")
@@ -240,7 +266,8 @@ class DiagnosticReport:
             lines.append("No issues detected. Model appears ready for analysis.")
             lines.append("")
 
-        lines.append("=" * 70)
+        if verbose:
+            lines.append("=" * 70)
 
         return "\n".join(lines)
 
