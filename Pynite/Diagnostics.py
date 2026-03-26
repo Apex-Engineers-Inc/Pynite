@@ -238,28 +238,40 @@ class DiagnosticReport:
         warnings = [i for i in self.issues if i.severity == IssueSeverity.WARNING]
         infos = [i for i in self.issues if i.severity == IssueSeverity.INFO]
 
+        # Cap displayed issues per severity to avoid overwhelming output
+        max_issues = 10 if verbose else 5
+
         if errors:
             if verbose:
                 lines.append("ERRORS (will prevent successful analysis)")
                 lines.append("-" * 40)
-            for issue in errors:
+            for issue in errors[:max_issues]:
                 lines.append(issue.format(verbose))
+                lines.append("")
+            if len(errors) > max_issues:
+                lines.append(f"  ... and {len(errors) - max_issues} more error(s) not shown")
                 lines.append("")
 
         if warnings:
             if verbose:
                 lines.append("WARNINGS (may cause unexpected results)")
                 lines.append("-" * 40)
-            for issue in warnings:
+            for issue in warnings[:max_issues]:
                 lines.append(issue.format(verbose))
+                lines.append("")
+            if len(warnings) > max_issues:
+                lines.append(f"  ... and {len(warnings) - max_issues} more warning(s) not shown")
                 lines.append("")
 
         if include_info and infos:
             if verbose:
                 lines.append("INFORMATION")
                 lines.append("-" * 40)
-            for issue in infos:
+            for issue in infos[:max_issues]:
                 lines.append(issue.format(verbose))
+                lines.append("")
+            if len(infos) > max_issues:
+                lines.append(f"  ... and {len(infos) - max_issues} more info item(s) not shown")
                 lines.append("")
 
         if not errors and not warnings:
@@ -705,6 +717,7 @@ class ModelDiagnostics:
         """
         # Check each node for mechanism potential
         node_releases: Dict[str, List[Tuple[str, str]]] = defaultdict(list)  # node -> [(member, release_type), ...]
+        axial_both_ends: List[str] = []  # members with axial release at both ends
 
         for member in self.model.members.values():
             releases = member.Releases
@@ -729,20 +742,32 @@ class ModelDiagnostics:
 
             # Track axial releases (can cause mechanism if both ends released)
             if releases[0] and releases[6]:  # Both Fxi and Fxj released
-                self.issues.append(DiagnosticIssue(
-                    severity=IssueSeverity.ERROR,
-                    category=IssueCategory.MECHANISM,
-                    title=f"Member '{member.name}' has axial release at both ends",
-                    description="Releasing axial force at both ends means this member cannot transfer any axial "
-                               "load, creating an unstable mechanism.",
-                    affected_entities=[member.name, i_node, j_node],
-                    suggestions=[
-                        "Remove the axial release from at least one end of this member",
-                        "A member with axial releases at both ends cannot carry any axial load"
-                    ]
-                ))
+                axial_both_ends.append(member.name)
+
+        # Report members with axial release at both ends (consolidated)
+        if axial_both_ends:
+            if len(axial_both_ends) <= 5:
+                affected = axial_both_ends
+            else:
+                affected = axial_both_ends[:3] + [f"and {len(axial_both_ends) - 3} more members"]
+            self.issues.append(DiagnosticIssue(
+                severity=IssueSeverity.ERROR,
+                category=IssueCategory.MECHANISM,
+                title=f"Axial release at both ends ({len(axial_both_ends)} members)",
+                description=f"{len(axial_both_ends)} member(s) have axial force released at both ends, "
+                           "meaning they cannot transfer any axial load and create unstable mechanisms.",
+                affected_entities=affected,
+                suggestions=[
+                    "Remove the axial release from at least one end of each affected member",
+                    "A member with axial releases at both ends cannot carry any axial load"
+                ]
+            ))
 
         # Check for hinge chains (multiple releases at a node creating a mechanism)
+        # Collect all mechanism nodes by type, then emit consolidated issues
+        my_mechanism_nodes = []  # (node_name, [member_names])
+        mz_mechanism_nodes = []
+
         for node_name, releases in node_releases.items():
             node = self.model.nodes[node_name]
 
@@ -768,34 +793,64 @@ class ModelDiagnostics:
                 max_releases = num_members if is_rotationally_supported else num_members - 1
 
                 if my_releases > max_releases:
-                    self.issues.append(DiagnosticIssue(
-                        severity=IssueSeverity.ERROR,
-                        category=IssueCategory.MECHANISM,
-                        title=f"Moment release mechanism at node '{node_name}' (My)",
-                        description=f"Node has {my_releases} My (major-axis moment) releases across {num_members} "
-                                   f"connected member(s). With N members at an unsupported node, at most N-1 "
-                                   "moment releases are allowed to maintain rotational equilibrium.",
-                        affected_entities=[node_name] + [m for m, _ in releases if 'My' in _],
-                        suggestions=[
-                            "Remove the moment release (hinge) from at least one member end at this node",
-                            "Or add a rotational restraint at this node to prevent free spinning"
-                        ]
-                    ))
+                    members_involved = [m for m, _ in releases if 'My' in _]
+                    my_mechanism_nodes.append((node_name, members_involved))
 
                 if mz_releases > max_releases:
-                    self.issues.append(DiagnosticIssue(
-                        severity=IssueSeverity.ERROR,
-                        category=IssueCategory.MECHANISM,
-                        title=f"Moment release mechanism at node '{node_name}' (Mz)",
-                        description=f"Node has {mz_releases} Mz (minor-axis moment) releases across {num_members} "
-                                   f"connected member(s). With N members at an unsupported node, at most N-1 "
-                                   "moment releases are allowed to maintain rotational equilibrium.",
-                        affected_entities=[node_name] + [m for m, _ in releases if 'Mz' in _],
-                        suggestions=[
-                            "Remove the moment release (hinge) from at least one member end at this node",
-                            "Or add a rotational restraint at this node to prevent free spinning"
-                        ]
-                    ))
+                    members_involved = [m for m, _ in releases if 'Mz' in _]
+                    mz_mechanism_nodes.append((node_name, members_involved))
+
+        # Emit one consolidated issue per mechanism type
+        if my_mechanism_nodes:
+            # Collect unique member names involved
+            all_members = set()
+            for _, members in my_mechanism_nodes:
+                all_members.update(members)
+            node_names = [n for n, _ in my_mechanism_nodes]
+
+            if len(my_mechanism_nodes) <= 3:
+                affected = node_names + sorted(all_members)
+            else:
+                affected = node_names[:3] + [f"and {len(node_names) - 3} more nodes"]
+
+            self.issues.append(DiagnosticIssue(
+                severity=IssueSeverity.ERROR,
+                category=IssueCategory.MECHANISM,
+                title=f"Moment release mechanisms — My axis ({len(my_mechanism_nodes)} nodes)",
+                description=f"{len(my_mechanism_nodes)} node(s) have too many major-axis moment releases (hinges), "
+                           "creating unstable mechanisms. Each node with only one connected member cannot "
+                           "have a moment release at that connection without rotational support.",
+                affected_entities=affected,
+                suggestions=[
+                    "Remove moment releases (hinges) from member ends at singly-connected nodes",
+                    "Or add rotational restraints at these nodes"
+                ]
+            ))
+
+        if mz_mechanism_nodes:
+            all_members = set()
+            for _, members in mz_mechanism_nodes:
+                all_members.update(members)
+            node_names = [n for n, _ in mz_mechanism_nodes]
+
+            if len(mz_mechanism_nodes) <= 3:
+                affected = node_names + sorted(all_members)
+            else:
+                affected = node_names[:3] + [f"and {len(node_names) - 3} more nodes"]
+
+            self.issues.append(DiagnosticIssue(
+                severity=IssueSeverity.ERROR,
+                category=IssueCategory.MECHANISM,
+                title=f"Moment release mechanisms — Mz axis ({len(mz_mechanism_nodes)} nodes)",
+                description=f"{len(mz_mechanism_nodes)} node(s) have too many minor-axis moment releases (hinges), "
+                           "creating unstable mechanisms. Each node with only one connected member cannot "
+                           "have a moment release at that connection without rotational support.",
+                affected_entities=affected,
+                suggestions=[
+                    "Remove moment releases (hinges) from member ends at singly-connected nodes",
+                    "Or add rotational restraints at these nodes"
+                ]
+            ))
 
     def _get_connected_members(self, node_name: str) -> List[str]:
         """Get list of member names connected to a node."""
