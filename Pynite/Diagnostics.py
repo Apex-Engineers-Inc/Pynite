@@ -349,7 +349,7 @@ class ModelDiagnostics:
                 category=IssueCategory.GEOMETRY,
                 title="No nodes defined",
                 description="The model contains no nodes. A structural model requires at least one node to define geometry.",
-                suggestions=["Add nodes using model.add_node(name, X, Y, Z)"]
+                suggestions=["The model geometry is empty — define node locations to establish the structure"]
             ))
             return  # Can't continue without nodes
 
@@ -365,9 +365,8 @@ class ModelDiagnostics:
                 description="The model contains nodes but no structural elements (members, springs, plates, or quads). "
                            "Elements are required to transfer loads through the structure.",
                 suggestions=[
-                    "Add members using model.add_member(...)",
-                    "Add springs using model.add_spring(...)",
-                    "Add plates/quads for shell structures"
+                    "Add structural elements (beams, columns, braces, plates, etc.) to connect the nodes",
+                    "A structure needs elements to transfer loads between nodes"
                 ]
             ))
 
@@ -468,13 +467,12 @@ class ModelDiagnostics:
                 severity=IssueSeverity.WARNING,
                 category=IssueCategory.CONNECTIVITY,
                 title=f"Unconnected nodes ({len(floating_nodes)} nodes)",
-                description="These nodes exist in the model but have no members, plates, or springs attached. "
-                           "Unconnected nodes create degrees of freedom with zero stiffness, which typically "
-                           "causes the system of equations to be unsolvable.",
+                description="These nodes exist in the model but have no structural elements attached to them. "
+                           "Unconnected nodes have no stiffness and will cause the analysis to fail.",
                 affected_entities=sorted(list(floating_nodes)),
                 suggestions=[
-                    "Remove unused nodes, or connect them to structural elements",
-                    "Verify member definitions reference the correct node names"
+                    "Remove unused nodes, or connect them with structural elements",
+                    "Verify that element definitions reference the correct node names"
                 ]
             ))
 
@@ -501,9 +499,9 @@ class ModelDiagnostics:
                     description=desc,
                     affected_entities=all_affected,
                     suggestions=[
-                        "Connect the separate parts with structural elements",
+                        "Connect the separate parts with structural elements (beams, braces, etc.)",
                         "Add supports to all disconnected components",
-                        "Check if members were accidentally omitted"
+                        "Check if elements were accidentally omitted between parts"
                     ]
                 ))
             else:
@@ -645,12 +643,12 @@ class ModelDiagnostics:
                 severity=IssueSeverity.ERROR,
                 category=IssueCategory.SUPPORTS,
                 title="No supports defined",
-                description="The model has no boundary conditions. Without at least one supported node, "
-                           "the structure has no reference point and equilibrium cannot be established.",
+                description="The structure has no supports. Without at least one support, the structure "
+                           "can move freely and cannot resist any loads.",
                 suggestions=[
-                    "Add supports using model.def_support(node_name, DX, DY, DZ, RX, RY, RZ)",
-                    "A fixed support restrains all 6 DOFs: def_support(node, True, True, True, True, True, True)",
-                    "A pinned support restrains translations only: def_support(node, True, True, True, False, False, False)"
+                    "Add support conditions (fixed, pinned, or roller) at one or more nodes",
+                    "A fixed support restrains all translations and rotations",
+                    "A pinned support restrains translations but allows rotation"
                 ]
             ))
         elif total_dofs < 6:
@@ -670,14 +668,14 @@ class ModelDiagnostics:
                     severity=IssueSeverity.ERROR,
                     category=IssueCategory.SUPPORTS,
                     title=f"Insufficient boundary conditions ({total_dofs} restrained DOFs)",
-                    description="A 3D structure requires restraint against 3 translations (X, Y, Z) and "
-                               "3 rotations (RX, RY, RZ) to prevent rigid body motion. The current support "
-                               "configuration does not fully restrain the structure.",
+                    description="The structure does not have enough support restraints to prevent it from "
+                               "moving freely. A stable 3D structure needs restraint against translation "
+                               "in X, Y, Z and rotation about X, Y, Z.",
                     affected_entities=supported_nodes,
                     suggestions=[
-                        "Use a fixed support at one node (restrains all 6 DOFs)",
-                        "Or use multiple supports that collectively prevent all rigid body modes",
-                        "Two pinned supports at different elevations can geometrically restrain rotations"
+                        "The structure needs at least 6 restrained degrees of freedom to be stable",
+                        "Use a fixed support, or multiple pin/roller supports at non-collinear locations",
+                        "Supports at different elevations can geometrically restrain rotations"
                     ]
                 ))
 
@@ -689,8 +687,8 @@ class ModelDiagnostics:
                 severity=IssueSeverity.ERROR if has_translation_mode else IssueSeverity.WARNING,
                 category=IssueCategory.SUPPORTS,
                 title=f"Unrestrained rigid body mode(s) detected ({len(rigid_body_modes)})",
-                description="The structure can displace without developing internal resistance in one or more "
-                           "directions. This produces a singular stiffness matrix with no unique solution.",
+                description="The structure can move freely in one or more directions because the supports "
+                           "do not fully restrain it.",
                 affected_entities=supported_nodes,
                 suggestions=[
                     "Restrain: " + ", ".join(mode for mode in rigid_body_modes[:3]),
@@ -735,12 +733,12 @@ class ModelDiagnostics:
                     severity=IssueSeverity.ERROR,
                     category=IssueCategory.MECHANISM,
                     title=f"Member '{member.name}' has axial release at both ends",
-                    description="Releasing axial force at both ends removes all axial stiffness from this member. "
-                               "The member cannot transfer axial load and creates a mechanism.",
+                    description="Releasing axial force at both ends means this member cannot transfer any axial "
+                               "load, creating an unstable mechanism.",
                     affected_entities=[member.name, i_node, j_node],
                     suggestions=[
-                        "Remove the axial release from one end",
-                        "If zero axial stiffness is intended, use a spring element with defined stiffness"
+                        "Remove the axial release from at least one end of this member",
+                        "A member with axial releases at both ends cannot carry any axial load"
                     ]
                 ))
 
@@ -779,8 +777,8 @@ class ModelDiagnostics:
                                    "moment releases are allowed to maintain rotational equilibrium.",
                         affected_entities=[node_name] + [m for m, _ in releases if 'My' in _],
                         suggestions=[
-                            "Remove the moment release from at least one member end at this node",
-                            "Or add a rotational support (RY or RZ) at this node"
+                            "Remove the moment release (hinge) from at least one member end at this node",
+                            "Or add a rotational restraint at this node to prevent free spinning"
                         ]
                     ))
 
@@ -794,8 +792,8 @@ class ModelDiagnostics:
                                    "moment releases are allowed to maintain rotational equilibrium.",
                         affected_entities=[node_name] + [m for m, _ in releases if 'Mz' in _],
                         suggestions=[
-                            "Remove the moment release from at least one member end at this node",
-                            "Or add a rotational support (RY or RZ) at this node"
+                            "Remove the moment release (hinge) from at least one member end at this node",
+                            "Or add a rotational restraint at this node to prevent free spinning"
                         ]
                     ))
 
@@ -831,9 +829,9 @@ class ModelDiagnostics:
                                "to define its local coordinate system and compute stiffness.",
                     affected_entities=[member.name, member.i_node.name, member.j_node.name],
                     suggestions=[
-                        "Verify node coordinates are correct",
-                        "If nodes should coincide, use a single node for both member ends",
-                        "Run model.merge_duplicate_nodes() to merge coincident nodes"
+                        "Verify node coordinates — these two nodes are at the same location",
+                        "If they should be the same point, merge them into a single node",
+                        "Check for duplicate nodes created during model generation"
                     ]
                 ))
             elif length < 1e-6:
@@ -844,8 +842,8 @@ class ModelDiagnostics:
                     description=f"Member has an extremely small length which may cause numerical issues.",
                     affected_entities=[member.name],
                     suggestions=[
-                        "Consider merging nodes if unintentional",
-                        "Use consistent units throughout the model"
+                        "Check if these nodes should be merged — they may be duplicates",
+                        "Verify that consistent units are used throughout the model"
                     ]
                 ))
 
@@ -866,9 +864,8 @@ class ModelDiagnostics:
                                "a modeling error unless intentionally used for special connections.",
                     affected_entities=nodes,
                     suggestions=[
-                        "Merge duplicate nodes if they should be the same point",
-                        "Check for unintentional node duplication",
-                        "If intentional, ensure nodes are properly connected"
+                        "Merge these nodes if they should be the same point",
+                        "If intentional (e.g. for a hinge), ensure proper connectivity between them"
                     ]
                 ))
 
@@ -965,7 +962,7 @@ class ModelDiagnostics:
                 title="No load combinations defined",
                 description="No load combinations are defined. A default 'Combo 1' will be created "
                            "automatically during analysis.",
-                suggestions=["Define load combinations for different load scenarios"]
+                suggestions=["Define load combinations to specify how loads are applied"]
             ))
 
         # Check for loaded nodes that are in disconnected/unsupported regions
@@ -1067,8 +1064,8 @@ class ModelDiagnostics:
             affected.append(f"... and {len(singly_connected) - 5} more")
 
         suggestions = [
-            f"Run model.merge_duplicate_nodes(tolerance={merge_tolerance:.3g}) to merge nearby nodes",
-            "Or ensure members reference the same node object at shared connection points"
+            "Merge nearby nodes that should share connectivity (they appear to be duplicates)",
+            "Ensure elements at shared connection points reference the same node"
         ]
         for candidate in unmerged_candidates[:3]:
             suggestions.append(f"  - {candidate}")
@@ -1160,8 +1157,8 @@ class ModelDiagnostics:
                            "unintentional coordinate discrepancies or nodes that should be merged.",
                 affected_entities=affected,
                 suggestions=[
-                    f"Run model.merge_duplicate_nodes(tolerance={near_tolerance:.4g}) to merge",
-                    "Or verify that the coordinate differences are intentional"
+                    "These nodes may need to be merged — they are very close but not coincident",
+                    "Verify that the coordinate differences are intentional"
                 ]
             ))
 
