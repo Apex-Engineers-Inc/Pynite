@@ -55,13 +55,41 @@ class DiagnosticIssue:
     affected_entities: List[str] = field(default_factory=list)
     suggestions: List[str] = field(default_factory=list)
 
+    def to_dict(self) -> Dict:
+        """Return a plain dict for app consumption.
+
+        Example::
+
+            {
+                'severity': 'ERROR',
+                'category': 'MECHANISM',
+                'title': 'Moment release mechanisms — My axis (40 nodes)',
+                'description': '40 node(s) have too many ...',
+                'affected': ['S0_i', 'S0_j', 'S1_i'],
+                'suggestions': ['Remove moment releases ...', '...'],
+            }
+        """
+        return {
+            'severity': self.severity.value,
+            'category': self.category.value,
+            'title': self.title,
+            'description': self.description,
+            'affected': list(self.affected_entities),
+            'suggestions': list(self.suggestions),
+        }
+
     def format(self, verbose: bool = True) -> str:
-        """Format the issue as a human-readable string."""
+        """Format the issue as a human-readable string.
+
+        When verbose=False, shows the title with affected entities on one line
+        and the first suggestion. When verbose=True, shows the full description,
+        all affected entities, and all suggestions.
+        """
         lines = []
         prefix = f"[{self.severity.value}]"
-        lines.append(f"{prefix} {self.title}")
 
         if verbose:
+            lines.append(f"{prefix} {self.title}")
             lines.append(f"  {self.description}")
 
             if self.affected_entities:
@@ -75,6 +103,17 @@ class DiagnosticIssue:
                 lines.append("  Suggestions:")
                 for suggestion in self.suggestions:
                     lines.append(f"    - {suggestion}")
+        else:
+            # Concise: title + affected entities inline, first suggestion
+            title_line = self.title
+            if self.affected_entities:
+                if len(self.affected_entities) <= 3:
+                    title_line += f" — {', '.join(self.affected_entities)}"
+                else:
+                    title_line += f" — {', '.join(self.affected_entities[:3])} (and {len(self.affected_entities) - 3} more)"
+            lines.append(title_line)
+            if self.suggestions:
+                lines.append(f"  {self.suggestions[0]}")
 
         return "\n".join(lines)
 
@@ -167,80 +206,131 @@ class DiagnosticReport:
         """Check if there are any warning-level issues."""
         return any(issue.severity == IssueSeverity.WARNING for issue in self.issues)
 
+    def to_dict_list(self, include_info: bool = False) -> List[Dict]:
+        """Return issues as a list of plain dicts for app consumption.
+
+        Each dict contains 'severity', 'category', 'title', 'description',
+        'affected', and 'suggestions' keys. INFO-level issues are excluded
+        by default.
+
+        Example::
+
+            [
+                {
+                    'severity': 'ERROR',
+                    'category': 'Mechanism',
+                    'title': 'Moment release mechanisms — My axis (40 nodes)',
+                    'description': '40 node(s) have too many ...',
+                    'affected': ['S0_i', 'S0_j'],
+                    'suggestions': ['Remove moment releases ...'],
+                },
+                ...
+            ]
+        """
+        result = []
+        for issue in self.issues:
+            if not include_info and issue.severity == IssueSeverity.INFO:
+                continue
+            result.append(issue.to_dict())
+        return result
+
     def format(self, verbose: bool = True, include_info: bool = False) -> str:
-        """Format the complete report as a human-readable string."""
+        """Format the complete report as a human-readable string.
+
+        When verbose=False, only errors and warnings are shown with their
+        titles, affected entities, and suggestions — no model summary,
+        connectivity, or support sections.
+        """
         lines = []
-        lines.append("=" * 70)
-        lines.append("                    MODEL DIAGNOSTIC REPORT")
-        lines.append("=" * 70)
-        lines.append("")
 
-        # Model summary
-        if self.model_summary:
-            lines.append("MODEL SUMMARY")
-            lines.append("-" * 40)
-            for key, value in self.model_summary.items():
-                lines.append(f"  {key}: {value}")
+        if verbose:
+            lines.append("=" * 70)
+            lines.append("                    MODEL DIAGNOSTIC REPORT")
+            lines.append("=" * 70)
             lines.append("")
 
-        # Connectivity summary
-        if self.connectivity:
-            lines.append("CONNECTIVITY ANALYSIS")
-            lines.append("-" * 40)
-            lines.append(f"  Connected components: {self.connectivity.num_components}")
-            if self.connectivity.num_components > 1:
-                lines.append("  Component sizes: " + ", ".join(
-                    str(len(c)) + " nodes" for c in self.connectivity.components
-                ))
-            if self.connectivity.floating_nodes:
-                lines.append(f"  Floating nodes: {len(self.connectivity.floating_nodes)}")
-            lines.append("")
+            # Model summary
+            if self.model_summary:
+                lines.append("MODEL SUMMARY")
+                lines.append("-" * 40)
+                for key, value in self.model_summary.items():
+                    lines.append(f"  {key}: {value}")
+                lines.append("")
 
-        # Support summary
-        if self.supports:
-            lines.append("SUPPORT ANALYSIS")
-            lines.append("-" * 40)
-            lines.append(f"  Total supported DOFs: {self.supports.total_supported_dofs}")
-            lines.append(f"  Supported nodes: {len(self.supports.supported_nodes)}")
-            trans = self.supports.translation_dofs
-            rot = self.supports.rotation_dofs
-            lines.append(f"  Translations: X={trans.get('X', 0)}, Y={trans.get('Y', 0)}, Z={trans.get('Z', 0)}")
-            lines.append(f"  Rotations: RX={rot.get('RX', 0)}, RY={rot.get('RY', 0)}, RZ={rot.get('RZ', 0)}")
-            if self.supports.rigid_body_modes:
-                lines.append(f"  Possible rigid body modes: {', '.join(self.supports.rigid_body_modes)}")
-            lines.append("")
+            # Connectivity summary
+            if self.connectivity:
+                lines.append("CONNECTIVITY ANALYSIS")
+                lines.append("-" * 40)
+                lines.append(f"  Connected components: {self.connectivity.num_components}")
+                if self.connectivity.num_components > 1:
+                    lines.append("  Component sizes: " + ", ".join(
+                        str(len(c)) + " nodes" for c in self.connectivity.components
+                    ))
+                if self.connectivity.floating_nodes:
+                    lines.append(f"  Floating nodes: {len(self.connectivity.floating_nodes)}")
+                lines.append("")
+
+            # Support summary
+            if self.supports:
+                lines.append("SUPPORT ANALYSIS")
+                lines.append("-" * 40)
+                lines.append(f"  Total supported DOFs: {self.supports.total_supported_dofs}")
+                lines.append(f"  Supported nodes: {len(self.supports.supported_nodes)}")
+                trans = self.supports.translation_dofs
+                rot = self.supports.rotation_dofs
+                lines.append(f"  Translations: X={trans.get('X', 0)}, Y={trans.get('Y', 0)}, Z={trans.get('Z', 0)}")
+                lines.append(f"  Rotations: RX={rot.get('RX', 0)}, RY={rot.get('RY', 0)}, RZ={rot.get('RZ', 0)}")
+                if self.supports.rigid_body_modes:
+                    lines.append(f"  Possible rigid body modes: {', '.join(self.supports.rigid_body_modes)}")
+                lines.append("")
 
         # Issues grouped by severity
         errors = [i for i in self.issues if i.severity == IssueSeverity.ERROR]
         warnings = [i for i in self.issues if i.severity == IssueSeverity.WARNING]
         infos = [i for i in self.issues if i.severity == IssueSeverity.INFO]
 
+        # Cap displayed issues per severity to avoid overwhelming output
+        max_issues = 10 if verbose else 5
+
         if errors:
-            lines.append("ERRORS (will prevent successful analysis)")
-            lines.append("-" * 40)
-            for issue in errors:
+            if verbose:
+                lines.append("ERRORS (will prevent successful analysis)")
+                lines.append("-" * 40)
+            for issue in errors[:max_issues]:
                 lines.append(issue.format(verbose))
+                lines.append("")
+            if len(errors) > max_issues:
+                lines.append(f"  ... and {len(errors) - max_issues} more error(s) not shown")
                 lines.append("")
 
         if warnings:
-            lines.append("WARNINGS (may cause unexpected results)")
-            lines.append("-" * 40)
-            for issue in warnings:
+            if verbose:
+                lines.append("WARNINGS (may cause unexpected results)")
+                lines.append("-" * 40)
+            for issue in warnings[:max_issues]:
                 lines.append(issue.format(verbose))
+                lines.append("")
+            if len(warnings) > max_issues:
+                lines.append(f"  ... and {len(warnings) - max_issues} more warning(s) not shown")
                 lines.append("")
 
         if include_info and infos:
-            lines.append("INFORMATION")
-            lines.append("-" * 40)
-            for issue in infos:
+            if verbose:
+                lines.append("INFORMATION")
+                lines.append("-" * 40)
+            for issue in infos[:max_issues]:
                 lines.append(issue.format(verbose))
+                lines.append("")
+            if len(infos) > max_issues:
+                lines.append(f"  ... and {len(infos) - max_issues} more info item(s) not shown")
                 lines.append("")
 
         if not errors and not warnings:
             lines.append("No issues detected. Model appears ready for analysis.")
             lines.append("")
 
-        lines.append("=" * 70)
+        if verbose:
+            lines.append("=" * 70)
 
         return "\n".join(lines)
 
@@ -322,7 +412,7 @@ class ModelDiagnostics:
                 category=IssueCategory.GEOMETRY,
                 title="No nodes defined",
                 description="The model contains no nodes. A structural model requires at least one node to define geometry.",
-                suggestions=["Add nodes using model.add_node(name, X, Y, Z)"]
+                suggestions=["The model geometry is empty — define node locations to establish the structure"]
             ))
             return  # Can't continue without nodes
 
@@ -338,9 +428,8 @@ class ModelDiagnostics:
                 description="The model contains nodes but no structural elements (members, springs, plates, or quads). "
                            "Elements are required to transfer loads through the structure.",
                 suggestions=[
-                    "Add members using model.add_member(...)",
-                    "Add springs using model.add_spring(...)",
-                    "Add plates/quads for shell structures"
+                    "Add structural elements (beams, columns, braces, plates, etc.) to connect the nodes",
+                    "A structure needs elements to transfer loads between nodes"
                 ]
             ))
 
@@ -441,13 +530,12 @@ class ModelDiagnostics:
                 severity=IssueSeverity.WARNING,
                 category=IssueCategory.CONNECTIVITY,
                 title=f"Unconnected nodes ({len(floating_nodes)} nodes)",
-                description="These nodes exist in the model but have no members, plates, or springs attached. "
-                           "Unconnected nodes create degrees of freedom with zero stiffness, which typically "
-                           "causes the system of equations to be unsolvable.",
+                description="These nodes exist in the model but have no structural elements attached to them. "
+                           "Unconnected nodes have no stiffness and will cause the analysis to fail.",
                 affected_entities=sorted(list(floating_nodes)),
                 suggestions=[
-                    "Remove unused nodes, or connect them to structural elements",
-                    "Verify member definitions reference the correct node names"
+                    "Remove unused nodes, or connect them with structural elements",
+                    "Verify that element definitions reference the correct node names"
                 ]
             ))
 
@@ -474,9 +562,9 @@ class ModelDiagnostics:
                     description=desc,
                     affected_entities=all_affected,
                     suggestions=[
-                        "Connect the separate parts with structural elements",
+                        "Connect the separate parts with structural elements (beams, braces, etc.)",
                         "Add supports to all disconnected components",
-                        "Check if members were accidentally omitted"
+                        "Check if elements were accidentally omitted between parts"
                     ]
                 ))
             else:
@@ -588,11 +676,21 @@ class ModelDiagnostics:
             if not (node.support_RZ or node.spring_RZ[0] is not None or geom_restraint.get('RZ', False)):
                 rigid_body_modes.append("Rotation about Z through the single support")
         elif len(supported_nodes) >= 2:
-            # Multiple supports - geometric restraint typically prevents rotation.
-            # Note: We intentionally do NOT check for rotation about axis connecting
-            # two supports because member torsional/bending stiffness provides restraint
-            # in practice. Flagging this would be a misleading "red herring" for users.
-            pass
+            # Multiple supports — check if rotations are geometrically restrained
+            # by translation supports at different positions. Collinear supports
+            # (e.g. two pins along the same axis) may still leave rotation about
+            # that axis unrestrained.
+            for axis, dof_attr, spring_attr in [
+                ('RX', 'support_RX', 'spring_RX'),
+                ('RY', 'support_RY', 'spring_RY'),
+                ('RZ', 'support_RZ', 'spring_RZ'),
+            ]:
+                has_explicit = any(
+                    getattr(self.model.nodes[n], dof_attr) or getattr(self.model.nodes[n], spring_attr)[0] is not None
+                    for n in supported_nodes
+                )
+                if not has_explicit and not geom_restraint.get(axis, False):
+                    rigid_body_modes.append(f"Rotation about {axis[1]} (supports are collinear — no geometric restraint)")
 
         self._supports = SupportInfo(
             total_supported_dofs=total_dofs,
@@ -608,12 +706,12 @@ class ModelDiagnostics:
                 severity=IssueSeverity.ERROR,
                 category=IssueCategory.SUPPORTS,
                 title="No supports defined",
-                description="The model has no boundary conditions. Without at least one supported node, "
-                           "the structure has no reference point and equilibrium cannot be established.",
+                description="The structure has no supports. Without at least one support, the structure "
+                           "can move freely and cannot resist any loads.",
                 suggestions=[
-                    "Add supports using model.def_support(node_name, DX, DY, DZ, RX, RY, RZ)",
-                    "A fixed support restrains all 6 DOFs: def_support(node, True, True, True, True, True, True)",
-                    "A pinned support restrains translations only: def_support(node, True, True, True, False, False, False)"
+                    "Add support conditions (fixed, pinned, or roller) at one or more nodes",
+                    "A fixed support restrains all translations and rotations",
+                    "A pinned support restrains translations but allows rotation"
                 ]
             ))
         elif total_dofs < 6:
@@ -633,14 +731,14 @@ class ModelDiagnostics:
                     severity=IssueSeverity.ERROR,
                     category=IssueCategory.SUPPORTS,
                     title=f"Insufficient boundary conditions ({total_dofs} restrained DOFs)",
-                    description="A 3D structure requires restraint against 3 translations (X, Y, Z) and "
-                               "3 rotations (RX, RY, RZ) to prevent rigid body motion. The current support "
-                               "configuration does not fully restrain the structure.",
+                    description="The structure does not have enough support restraints to prevent it from "
+                               "moving freely. A stable 3D structure needs restraint against translation "
+                               "in X, Y, Z and rotation about X, Y, Z.",
                     affected_entities=supported_nodes,
                     suggestions=[
-                        "Use a fixed support at one node (restrains all 6 DOFs)",
-                        "Or use multiple supports that collectively prevent all rigid body modes",
-                        "Two pinned supports at different elevations can geometrically restrain rotations"
+                        "The structure needs at least 6 restrained degrees of freedom to be stable",
+                        "Use a fixed support, or multiple pin/roller supports at non-collinear locations",
+                        "Supports at different elevations can geometrically restrain rotations"
                     ]
                 ))
 
@@ -652,12 +750,12 @@ class ModelDiagnostics:
                 severity=IssueSeverity.ERROR if has_translation_mode else IssueSeverity.WARNING,
                 category=IssueCategory.SUPPORTS,
                 title=f"Unrestrained rigid body mode(s) detected ({len(rigid_body_modes)})",
-                description="The structure can displace without developing internal resistance in one or more "
-                           "directions. This produces a singular stiffness matrix with no unique solution.",
+                description="The structure can move freely in one or more directions because the supports "
+                           "do not fully restrain it.",
                 affected_entities=supported_nodes,
                 suggestions=[
-                    "Add boundary conditions to restrain all rigid body modes:",
-                    *[f"  - {mode}" for mode in rigid_body_modes[:3]]
+                    "Restrain: " + ", ".join(mode for mode in rigid_body_modes[:3]),
+                    "Add supports or rotational restraints to prevent free movement"
                 ]
             ))
 
@@ -670,6 +768,7 @@ class ModelDiagnostics:
         """
         # Check each node for mechanism potential
         node_releases: Dict[str, List[Tuple[str, str]]] = defaultdict(list)  # node -> [(member, release_type), ...]
+        axial_both_ends: List[str] = []  # members with axial release at both ends
 
         for member in self.model.members.values():
             releases = member.Releases
@@ -694,20 +793,32 @@ class ModelDiagnostics:
 
             # Track axial releases (can cause mechanism if both ends released)
             if releases[0] and releases[6]:  # Both Fxi and Fxj released
-                self.issues.append(DiagnosticIssue(
-                    severity=IssueSeverity.ERROR,
-                    category=IssueCategory.MECHANISM,
-                    title=f"Member '{member.name}' has axial release at both ends",
-                    description="Releasing axial force at both ends removes all axial stiffness from this member. "
-                               "The member cannot transfer axial load and creates a mechanism.",
-                    affected_entities=[member.name, i_node, j_node],
-                    suggestions=[
-                        "Remove the axial release from one end",
-                        "If zero axial stiffness is intended, use a spring element with defined stiffness"
-                    ]
-                ))
+                axial_both_ends.append(member.name)
+
+        # Report members with axial release at both ends (consolidated)
+        if axial_both_ends:
+            if len(axial_both_ends) <= 5:
+                affected = axial_both_ends
+            else:
+                affected = axial_both_ends[:3] + [f"and {len(axial_both_ends) - 3} more members"]
+            self.issues.append(DiagnosticIssue(
+                severity=IssueSeverity.ERROR,
+                category=IssueCategory.MECHANISM,
+                title=f"Axial release at both ends ({len(axial_both_ends)} members)",
+                description=f"{len(axial_both_ends)} member(s) have axial force released at both ends, "
+                           "meaning they cannot transfer any axial load and create unstable mechanisms.",
+                affected_entities=affected,
+                suggestions=[
+                    "Remove the axial release from at least one end of each affected member",
+                    "A member with axial releases at both ends cannot carry any axial load"
+                ]
+            ))
 
         # Check for hinge chains (multiple releases at a node creating a mechanism)
+        # Collect all mechanism nodes by type, then emit consolidated issues
+        my_mechanism_nodes = []  # (node_name, [member_names])
+        mz_mechanism_nodes = []
+
         for node_name, releases in node_releases.items():
             node = self.model.nodes[node_name]
 
@@ -733,34 +844,64 @@ class ModelDiagnostics:
                 max_releases = num_members if is_rotationally_supported else num_members - 1
 
                 if my_releases > max_releases:
-                    self.issues.append(DiagnosticIssue(
-                        severity=IssueSeverity.ERROR,
-                        category=IssueCategory.MECHANISM,
-                        title=f"Moment release mechanism at node '{node_name}' (My)",
-                        description=f"Node has {my_releases} My (major-axis moment) releases across {num_members} "
-                                   f"connected member(s). With N members at an unsupported node, at most N-1 "
-                                   "moment releases are allowed to maintain rotational equilibrium.",
-                        affected_entities=[node_name] + [m for m, _ in releases if 'My' in _],
-                        suggestions=[
-                            "Remove the moment release from at least one member end at this node",
-                            "Or add a rotational support (RY or RZ) at this node"
-                        ]
-                    ))
+                    members_involved = [m for m, _ in releases if 'My' in _]
+                    my_mechanism_nodes.append((node_name, members_involved))
 
                 if mz_releases > max_releases:
-                    self.issues.append(DiagnosticIssue(
-                        severity=IssueSeverity.ERROR,
-                        category=IssueCategory.MECHANISM,
-                        title=f"Moment release mechanism at node '{node_name}' (Mz)",
-                        description=f"Node has {mz_releases} Mz (minor-axis moment) releases across {num_members} "
-                                   f"connected member(s). With N members at an unsupported node, at most N-1 "
-                                   "moment releases are allowed to maintain rotational equilibrium.",
-                        affected_entities=[node_name] + [m for m, _ in releases if 'Mz' in _],
-                        suggestions=[
-                            "Remove the moment release from at least one member end at this node",
-                            "Or add a rotational support (RY or RZ) at this node"
-                        ]
-                    ))
+                    members_involved = [m for m, _ in releases if 'Mz' in _]
+                    mz_mechanism_nodes.append((node_name, members_involved))
+
+        # Emit one consolidated issue per mechanism type
+        if my_mechanism_nodes:
+            # Collect unique member names involved
+            all_members = set()
+            for _, members in my_mechanism_nodes:
+                all_members.update(members)
+            node_names = [n for n, _ in my_mechanism_nodes]
+
+            if len(my_mechanism_nodes) <= 3:
+                affected = node_names + sorted(all_members)
+            else:
+                affected = node_names[:3] + [f"and {len(node_names) - 3} more nodes"]
+
+            self.issues.append(DiagnosticIssue(
+                severity=IssueSeverity.ERROR,
+                category=IssueCategory.MECHANISM,
+                title=f"Moment release mechanisms — My axis ({len(my_mechanism_nodes)} nodes)",
+                description=f"{len(my_mechanism_nodes)} node(s) have too many major-axis moment releases (hinges), "
+                           "creating unstable mechanisms. Each node with only one connected member cannot "
+                           "have a moment release at that connection without rotational support.",
+                affected_entities=affected,
+                suggestions=[
+                    "Remove moment releases (hinges) from member ends at singly-connected nodes",
+                    "Or add rotational restraints at these nodes"
+                ]
+            ))
+
+        if mz_mechanism_nodes:
+            all_members = set()
+            for _, members in mz_mechanism_nodes:
+                all_members.update(members)
+            node_names = [n for n, _ in mz_mechanism_nodes]
+
+            if len(mz_mechanism_nodes) <= 3:
+                affected = node_names + sorted(all_members)
+            else:
+                affected = node_names[:3] + [f"and {len(node_names) - 3} more nodes"]
+
+            self.issues.append(DiagnosticIssue(
+                severity=IssueSeverity.ERROR,
+                category=IssueCategory.MECHANISM,
+                title=f"Moment release mechanisms — Mz axis ({len(mz_mechanism_nodes)} nodes)",
+                description=f"{len(mz_mechanism_nodes)} node(s) have too many minor-axis moment releases (hinges), "
+                           "creating unstable mechanisms. Each node with only one connected member cannot "
+                           "have a moment release at that connection without rotational support.",
+                affected_entities=affected,
+                suggestions=[
+                    "Remove moment releases (hinges) from member ends at singly-connected nodes",
+                    "Or add rotational restraints at these nodes"
+                ]
+            ))
 
     def _get_connected_members(self, node_name: str) -> List[str]:
         """Get list of member names connected to a node."""
@@ -794,9 +935,9 @@ class ModelDiagnostics:
                                "to define its local coordinate system and compute stiffness.",
                     affected_entities=[member.name, member.i_node.name, member.j_node.name],
                     suggestions=[
-                        "Verify node coordinates are correct",
-                        "If nodes should coincide, use a single node for both member ends",
-                        "Run model.merge_duplicate_nodes() to merge coincident nodes"
+                        "Verify node coordinates — these two nodes are at the same location",
+                        "If they should be the same point, merge them into a single node",
+                        "Check for duplicate nodes created during model generation"
                     ]
                 ))
             elif length < 1e-6:
@@ -807,8 +948,8 @@ class ModelDiagnostics:
                     description=f"Member has an extremely small length which may cause numerical issues.",
                     affected_entities=[member.name],
                     suggestions=[
-                        "Consider merging nodes if unintentional",
-                        "Use consistent units throughout the model"
+                        "Check if these nodes should be merged — they may be duplicates",
+                        "Verify that consistent units are used throughout the model"
                     ]
                 ))
 
@@ -829,9 +970,8 @@ class ModelDiagnostics:
                                "a modeling error unless intentionally used for special connections.",
                     affected_entities=nodes,
                     suggestions=[
-                        "Merge duplicate nodes if they should be the same point",
-                        "Check for unintentional node duplication",
-                        "If intentional, ensure nodes are properly connected"
+                        "Merge these nodes if they should be the same point",
+                        "If intentional (e.g. for a hinge), ensure proper connectivity between them"
                     ]
                 ))
 
@@ -928,7 +1068,7 @@ class ModelDiagnostics:
                 title="No load combinations defined",
                 description="No load combinations are defined. A default 'Combo 1' will be created "
                            "automatically during analysis.",
-                suggestions=["Define load combinations for different load scenarios"]
+                suggestions=["Define load combinations to specify how loads are applied"]
             ))
 
         # Check for loaded nodes that are in disconnected/unsupported regions
@@ -1030,8 +1170,8 @@ class ModelDiagnostics:
             affected.append(f"... and {len(singly_connected) - 5} more")
 
         suggestions = [
-            f"Run model.merge_duplicate_nodes(tolerance={merge_tolerance:.3g}) to merge nearby nodes",
-            "Or ensure members reference the same node object at shared connection points"
+            "Merge nearby nodes that should share connectivity (they appear to be duplicates)",
+            "Ensure elements at shared connection points reference the same node"
         ]
         for candidate in unmerged_candidates[:3]:
             suggestions.append(f"  - {candidate}")
@@ -1123,8 +1263,8 @@ class ModelDiagnostics:
                            "unintentional coordinate discrepancies or nodes that should be merged.",
                 affected_entities=affected,
                 suggestions=[
-                    f"Run model.merge_duplicate_nodes(tolerance={near_tolerance:.4g}) to merge",
-                    "Or verify that the coordinate differences are intentional"
+                    "These nodes may need to be merged — they are very close but not coincident",
+                    "Verify that the coordinate differences are intentional"
                 ]
             ))
 

@@ -1601,8 +1601,8 @@ class FEModel3D():
         # Check that there are no nodal instabilities
         if check_stability:
             if log: print('- Checking nodal stability')
-            if sparse: Analysis._check_stability(self, K.tocsr())
-            else: Analysis._check_stability(self, K)
+            if sparse: Analysis._check_stability(self, K.tocsr(), log)
+            else: Analysis._check_stability(self, K, log)
 
         # Return the global stiffness matrix
         return K
@@ -1999,35 +1999,38 @@ class FEModel3D():
     #     # Flag the model as solved
     #     self.solution = 'Linear TC'
 
-    def _handle_solve_error(self, error: Exception, combo_name: str) -> None:
+    def _handle_solve_error(self, error: Exception, combo_name: str, log: bool = False) -> None:
         """Handle errors during load combination solving with diagnostics.
 
         :param error: The exception that was raised
         :param combo_name: Name of the load combination that failed
+        :param log: Prints verbose diagnostics to the console if set to True. Default is False.
         :raises Analysis.AnalysisError: Always raises after diagnostics
         """
         from Pynite.Diagnostics import ModelDiagnostics
 
-        print('')
-        print('=' * 60)
-        print(f'ANALYSIS FAILED - Error in load combination {combo_name}')
-        print('=' * 60)
-        print('')
-        print(f'Error: {str(error)}')
-        print('')
-
         # Run diagnostics for singular matrix errors
         if 'singular' in str(error).lower():
-            print('Running diagnostics to identify root cause...')
-            print('')
             diagnostics = ModelDiagnostics(self)
             report = diagnostics.run_full_diagnosis()
             diagnostic_text = report.format(verbose=True)
-            print(diagnostic_text)
+            concise_text = report.format(verbose=False)
+
+            if log:
+                print('')
+                print('=' * 60)
+                print(f'ANALYSIS FAILED - Error in load combination {combo_name}')
+                print('=' * 60)
+                print('')
+                print(f'Error: {str(error)}')
+                print('')
+                print(diagnostic_text)
 
             raise Analysis.AnalysisError(
                 'The stiffness matrix is singular (structure is unstable)',
-                diagnostic_text
+                diagnostic_text,
+                concise_text,
+                report.to_dict_list()
             ) from error
         else:
             raise error
@@ -2153,25 +2156,28 @@ class FEModel3D():
             except Exception as e:
                 # Diagnose the root cause of the singular matrix
                 from Pynite.Diagnostics import ModelDiagnostics
-                print('')
-                print('=' * 60)
-                print('ANALYSIS FAILED - Singular Stiffness Matrix')
-                print('=' * 60)
-                print('')
-                print('The stiffness matrix could not be factored, which means the')
-                print('structure has one or more rigid body modes (it can move freely).')
-                print('')
-                print('Running diagnostics to identify root cause...')
-                print('')
 
                 diagnostics = ModelDiagnostics(self)
                 report = diagnostics.run_full_diagnosis()
                 diagnostic_text = report.format(verbose=True)
-                print(diagnostic_text)
+                concise_text = report.format(verbose=False)
+
+                if log:
+                    print('')
+                    print('=' * 60)
+                    print('ANALYSIS FAILED - Singular Stiffness Matrix')
+                    print('=' * 60)
+                    print('')
+                    print('The stiffness matrix could not be factored, which means the')
+                    print('structure has one or more rigid body modes (it can move freely).')
+                    print('')
+                    print(diagnostic_text)
 
                 raise Analysis.AnalysisError(
                     'The stiffness matrix is singular (structure is unstable)',
-                    diagnostic_text
+                    diagnostic_text,
+                    concise_text,
+                    report.to_dict_list()
                 ) from e
 
         # Auto-detect parallel processing capability
@@ -2206,7 +2212,7 @@ class FEModel3D():
                             print(f'- Completed load combination {result_combo.name}')
                         Analysis._store_displacements(self, D1, D2, D1_indices, D2_indices, result_combo)
                     except Exception as e:
-                        self._handle_solve_error(e, combo.name)
+                        self._handle_solve_error(e, combo.name, log)
         else:
             # Sequential execution - call worker directly without thread pool
             for combo in combo_list:
@@ -2221,7 +2227,7 @@ class FEModel3D():
                     )
                     Analysis._store_displacements(self, D1, D2, D1_indices, D2_indices, result_combo)
                 except Exception as e:
-                    self._handle_solve_error(e, combo.name)
+                    self._handle_solve_error(e, combo.name, log)
 
         # Calculate reactions
         Analysis._calc_reactions(self, log, combo_tags)
@@ -2333,33 +2339,38 @@ class FEModel3D():
                     if iter_count > max_iter:
                         divergence = True
                         from Pynite.Diagnostics import ModelDiagnostics
-                        print('')
-                        print('=' * 60)
-                        print('ANALYSIS FAILED - Tension/Compression-Only Divergence')
-                        print('=' * 60)
-                        print('')
-                        print(f'The model failed to converge after {max_iter} iterations.')
-                        print('')
-                        print('This typically happens when:')
-                        print('  1. Too many tension-only or compression-only elements')
-                        print('  2. The structure becomes unstable as elements deactivate')
-                        print('  3. Loads cause elements to repeatedly activate/deactivate')
-                        print('')
-                        print('Suggestions:')
-                        print('  - Increase max_iter if convergence is nearly achieved')
-                        print('  - Reduce num_steps for better load stepping')
-                        print('  - Check if T/C-only element arrangement is physically sensible')
-                        print('  - Consider using regular elements for some members')
-                        print('')
 
                         diagnostics = ModelDiagnostics(self)
                         report = diagnostics.run_full_diagnosis()
                         diagnostic_text = report.format(verbose=True)
-                        print(diagnostic_text)
+                        concise_text = report.format(verbose=False)
+
+                        if log:
+                            print('')
+                            print('=' * 60)
+                            print('ANALYSIS FAILED - Tension/Compression-Only Divergence')
+                            print('=' * 60)
+                            print('')
+                            print(f'The model failed to converge after {max_iter} iterations.')
+                            print('')
+                            print('This typically happens when:')
+                            print('  1. Too many tension-only or compression-only elements')
+                            print('  2. The structure becomes unstable as elements deactivate')
+                            print('  3. Loads cause elements to repeatedly activate/deactivate')
+                            print('')
+                            print('Suggestions:')
+                            print('  - Increase max_iter if convergence is nearly achieved')
+                            print('  - Reduce num_steps for better load stepping')
+                            print('  - Check if T/C-only element arrangement is physically sensible')
+                            print('  - Consider using regular elements for some members')
+                            print('')
+                            print(diagnostic_text)
 
                         raise Analysis.AnalysisError(
                             'Model diverged during tension/compression-only analysis',
-                            diagnostic_text
+                            diagnostic_text,
+                            concise_text,
+                            report.to_dict_list()
                         )
 
                     # Report which load step we are on
@@ -2395,25 +2406,28 @@ class FEModel3D():
                             # Return out of the method if 'K' is singular and provide an error message
                             # Run diagnostics to explain why the matrix is singular
                             from Pynite.Diagnostics import ModelDiagnostics
-                            print('')
-                            print('=' * 60)
-                            print('ANALYSIS FAILED - Singular Stiffness Matrix')
-                            print('=' * 60)
-                            print('')
-                            print('The stiffness matrix could not be inverted, which means the')
-                            print('structure has one or more rigid body modes (it can move freely).')
-                            print('')
-                            print('Running diagnostics to identify root cause...')
-                            print('')
 
                             diagnostics = ModelDiagnostics(self)
                             report = diagnostics.run_full_diagnosis()
                             diagnostic_text = report.format(verbose=True)
-                            print(diagnostic_text)
+                            concise_text = report.format(verbose=False)
+
+                            if log:
+                                print('')
+                                print('=' * 60)
+                                print('ANALYSIS FAILED - Singular Stiffness Matrix')
+                                print('=' * 60)
+                                print('')
+                                print('The stiffness matrix could not be inverted, which means the')
+                                print('structure has one or more rigid body modes (it can move freely).')
+                                print('')
+                                print(diagnostic_text)
 
                             raise Analysis.AnalysisError(
                                 'The stiffness matrix is singular (structure is unstable)',
-                                diagnostic_text
+                                diagnostic_text,
+                                concise_text,
+                                report.to_dict_list()
                             ) from e
 
                     # Store or sum the calculated displacements to the model and the nodes in the model
